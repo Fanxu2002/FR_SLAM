@@ -1,0 +1,25 @@
+# ROS2
+build/
+install/
+log/
+
+# VS Code
+.vscode/
+
+# ROS bags
+*.bag
+*.db3
+*.mcap
+
+# Logs
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Temporary
+*.swp
+*~
+.DS_Store
