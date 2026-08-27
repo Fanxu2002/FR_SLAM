@@ -1,5 +1,6 @@
 #include "fr_slam/fr_lidar_preprocessor.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 
@@ -21,6 +22,22 @@ void PreProcessor::SetDeskewExtrinsic(
         deskewer_.SetExtrinsic(
             Q_IL,
             P_IL);
+}
+
+void PreProcessor::SetOutlierFiltersEnabled(
+    bool enable_sor,
+    bool enable_ror)
+{
+        process_enable_sor_ =
+            enable_sor;
+
+        process_enable_ror_ =
+            enable_ror;
+}
+
+const PreprocessorTiming &PreProcessor::GetLastTiming() const
+{
+        return last_timing_;
 }
 
 // ============================================================================
@@ -57,9 +74,9 @@ bool PreProcessor::Deskew(
 // Raw LiDAR
 //     -> Deskew
 //     -> Remove NaN / Range / ROI / CropBox
-//     -> SOR
-//     -> ROR
 //     -> VoxelGrid
+//     -> optional SOR
+//     -> optional ROR
 //
 // The returned frame is ready for registration.
 // ============================================================================
@@ -69,9 +86,25 @@ LIDAR_FRAME PreProcessor::Process(
     const std::vector<IMU_POSE> &imu_poses,
     bool use_translation)
 {
+        using Clock = std::chrono::steady_clock;
+
+        last_timing_ =
+            PreprocessorTiming();
+
+        if (lidar_frame.cloud)
+        {
+                last_timing_.input_points =
+                    lidar_frame.cloud->size();
+        }
+
+        const Clock::time_point total_start =
+            Clock::now();
+
         // ============================================================
         // 1. Deskew
         // ============================================================
+        const Clock::time_point deskew_start =
+            Clock::now();
 
         LIDAR_FRAME deskewed_frame;
 
@@ -88,13 +121,31 @@ LIDAR_FRAME PreProcessor::Process(
                 return LIDAR_FRAME();
         }
 
+        const Clock::time_point deskew_end =
+            Clock::now();
+
+        last_timing_.deskew_ms =
+            std::chrono::duration<double, std::milli>(
+                deskew_end - deskew_start)
+                .count();
+
         // ============================================================
         // 2. Basic preprocessing
         // ============================================================
+        const Clock::time_point basic_start =
+            Clock::now();
 
         LIDAR_FRAME clean_frame =
             preprocess(
                 deskewed_frame);
+
+        const Clock::time_point basic_end =
+            Clock::now();
+
+        last_timing_.basic_ms =
+            std::chrono::duration<double, std::milli>(
+                basic_end - basic_start)
+                .count();
 
         if (!clean_frame.cloud ||
             clean_frame.cloud->empty())
@@ -107,57 +158,30 @@ LIDAR_FRAME PreProcessor::Process(
                 return LIDAR_FRAME();
         }
 
+        last_timing_.after_basic_points =
+            clean_frame.cloud->size();
+
         // ============================================================
-        // 3. Statistical outlier removal
+        // 3. Voxel FIRST.
         //
-        // If SOR is disabled in config, SOR() simply returns input.
+        // The old pipeline performed SOR/ROR on roughly 8k-10k points and
+        // only then reduced the cloud to ~2k points. For real-time operation
+        // we reduce the cloud before any optional neighborhood outlier filter.
         // ============================================================
-
-        LIDAR_FRAME sor_frame =
-            SOR(
-                clean_frame);
-
-        if (!sor_frame.cloud ||
-            sor_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after SOR."
-                    << std::endl;
-
-                return LIDAR_FRAME();
-        }
-
-        // ============================================================
-        // 4. Radius outlier removal
-        //
-        // If ROR is disabled in config, ROR() simply returns input.
-        // ============================================================
-
-        LIDAR_FRAME ror_frame =
-            ROR(
-                sor_frame);
-
-        if (!ror_frame.cloud ||
-            ror_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after ROR."
-                    << std::endl;
-
-                return LIDAR_FRAME();
-        }
-
-        // ============================================================
-        // 5. Voxel downsample
-        //
-        // If voxel is disabled in config, VoxelGrid() returns input.
-        // ============================================================
+        const Clock::time_point voxel_start =
+            Clock::now();
 
         LIDAR_FRAME voxel_frame =
             VoxelGrid(
-                ror_frame);
+                clean_frame);
+
+        const Clock::time_point voxel_end =
+            Clock::now();
+
+        last_timing_.voxel_ms =
+            std::chrono::duration<double, std::milli>(
+                voxel_end - voxel_start)
+                .count();
 
         if (!voxel_frame.cloud ||
             voxel_frame.cloud->empty())
@@ -170,7 +194,94 @@ LIDAR_FRAME PreProcessor::Process(
                 return LIDAR_FRAME();
         }
 
-        return voxel_frame;
+        last_timing_.after_voxel_points =
+            voxel_frame.cloud->size();
+
+        // ============================================================
+        // 4. Optional SOR on the downsampled cloud.
+        // ============================================================
+        LIDAR_FRAME sor_frame =
+            voxel_frame;
+
+        if (process_enable_sor_)
+        {
+                const Clock::time_point sor_start =
+                    Clock::now();
+
+                sor_frame =
+                    SOR(
+                        voxel_frame);
+
+                const Clock::time_point sor_end =
+                    Clock::now();
+
+                last_timing_.sor_ms =
+                    std::chrono::duration<double, std::milli>(
+                        sor_end - sor_start)
+                        .count();
+        }
+
+        if (!sor_frame.cloud ||
+            sor_frame.cloud->empty())
+        {
+                std::cerr
+                    << "PreProcessor::Process(): "
+                    << "cloud is empty after SOR."
+                    << std::endl;
+
+                return LIDAR_FRAME();
+        }
+
+        last_timing_.after_sor_points =
+            sor_frame.cloud->size();
+
+        // ============================================================
+        // 5. Optional ROR on the downsampled cloud.
+        // ============================================================
+        LIDAR_FRAME ror_frame =
+            sor_frame;
+
+        if (process_enable_ror_)
+        {
+                const Clock::time_point ror_start =
+                    Clock::now();
+
+                ror_frame =
+                    ROR(
+                        sor_frame);
+
+                const Clock::time_point ror_end =
+                    Clock::now();
+
+                last_timing_.ror_ms =
+                    std::chrono::duration<double, std::milli>(
+                        ror_end - ror_start)
+                        .count();
+        }
+
+        if (!ror_frame.cloud ||
+            ror_frame.cloud->empty())
+        {
+                std::cerr
+                    << "PreProcessor::Process(): "
+                    << "cloud is empty after ROR."
+                    << std::endl;
+
+                return LIDAR_FRAME();
+        }
+
+        last_timing_.after_ror_points =
+            ror_frame.cloud->size();
+
+        const Clock::time_point total_end =
+            Clock::now();
+
+        last_timing_.total_ms =
+            std::chrono::duration<double, std::milli>(
+                total_end - total_start)
+                .count();
+
+        return ror_frame;
 }
 
 // ============================================================================
@@ -219,17 +330,6 @@ LIDAR_FRAME PreProcessor::preprocess(
             *final_pointcloud,
             valid_indices);
 
-        std::cout
-            << "There are "
-            << original_pointcloud->size()
-            << " points in the original cloud;\n"
-            << std::endl;
-
-        std::cout
-            << "After removing NaN value, there are "
-            << final_pointcloud->size()
-            << " points in the cloud;\n"
-            << std::endl;
 
         // ============================================================
         // 2. Range filter:
@@ -376,11 +476,6 @@ LIDAR_FRAME PreProcessor::preprocess(
                 cropbox->filter(
                     *final_pointcloud);
 
-                std::cout
-                    << "There are "
-                    << final_pointcloud->size()
-                    << " points after cropbox filtering!\n"
-                    << std::endl;
         }
 
         // ============================================================
@@ -532,11 +627,6 @@ LIDAR_FRAME PreProcessor::SOR(
         sor->filter(
             *final_pointcloud);
 
-        std::cout
-            << "There are "
-            << final_pointcloud->size()
-            << " points after SOR filtering!\n"
-            << std::endl;
 
         LIDAR_FRAME output_frame;
 
@@ -611,11 +701,6 @@ LIDAR_FRAME PreProcessor::ROR(
         ror->filter(
             *final_pointcloud);
 
-        std::cout
-            << "There are "
-            << final_pointcloud->size()
-            << " points after ROR filtering!\n"
-            << std::endl;
 
         LIDAR_FRAME output_frame;
 

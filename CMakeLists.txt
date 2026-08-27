@@ -11,9 +11,12 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(Threads REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(fmt REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 
 # ============================================
@@ -152,8 +155,8 @@ install(
 # target_link_libraries(lidar_deskewer ${PCL_LIBRARIES})
 # target_compile_definitions(lidar_deskewer PRIVATE ${PCL_NO_PRECOMPILE})
 
-add_executable(lidar_registration)
-target_sources(lidar_registration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_registration.cpp
+add_executable(lidar_registration_scan2scan)
+target_sources(lidar_registration_scan2scan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_registration_scan2scan.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_initializer.cpp
@@ -164,15 +167,66 @@ target_sources(lidar_registration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_preprocessor.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_registration.cpp
                                             )
-target_include_directories(lidar_registration PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-ament_target_dependencies(lidar_registration rclcpp sensor_msgs pcl_conversions nav_msgs geometry_msgs)
-target_link_libraries(lidar_registration ${PCL_LIBRARIES})
+target_include_directories(lidar_registration_scan2scan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ament_target_dependencies(lidar_registration_scan2scan rclcpp sensor_msgs pcl_conversions nav_msgs geometry_msgs)
+target_link_libraries(lidar_registration_scan2scan ${PCL_LIBRARIES})
 target_link_libraries(
-    lidar_registration
+lidar_registration_scan2scan    Threads::Threads
+)
+target_compile_definitions(lidar_registration_scan2scan PRIVATE PCL_NO_PRECOMPILE)
+
+
+
+add_executable(lidar_registration_scan2localmap)
+target_sources(lidar_registration_scan2localmap PRIVATE 
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_registration_scan2localmap.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_initializer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_integrator.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_deskewer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp                                           
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mid360s_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_preprocessor.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_registration.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_local_map.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_registration_scan2localmap.cpp    
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_keyframe_detector.cpp   
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_keyframe_manager.cpp   
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_submap_manager.cpp  
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_pose_graph.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_detector.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_scan_context.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_verifier.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_consistency_checker.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_pose_graph_optimizer.cpp
+
+                                            )
+target_include_directories(lidar_registration_scan2localmap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(
+    lidar_registration_scan2localmap
+    PRIVATE
+
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    /usr/local/include
+)
+ament_target_dependencies(lidar_registration_scan2localmap rclcpp sensor_msgs pcl_conversions nav_msgs geometry_msgs visualization_msgs )
+target_link_libraries(lidar_registration_scan2localmap ${PCL_LIBRARIES} ${G2O_LIBRARIES})
+target_link_libraries(
+    lidar_registration_scan2localmap
+
+    ${PCL_LIBRARIES}
+
+    /usr/local/lib/libg2o_types_slam3d.so
+    /usr/local/lib/libg2o_solver_eigen.so
+    /usr/local/lib/libg2o_core.so
+    /usr/local/lib/libg2o_stuff.so
+
     Threads::Threads
+    fmt::fmt
 )
 
-target_compile_definitions(lidar_registration PRIVATE PCL_NO_PRECOMPILE)
+target_compile_definitions(lidar_registration_scan2localmap PRIVATE PCL_NO_PRECOMPILE)
 
 # add_executable(path)
 # target_sources(path PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/path.cpp
@@ -202,7 +256,8 @@ install(
 install(
   TARGETS 
           # lidar_deskewer
-          lidar_registration
+          lidar_registration_scan2scan
+          lidar_registration_scan2localmap
           # path
   RUNTIME DESTINATION lib/${PROJECT_NAME}/test)
 

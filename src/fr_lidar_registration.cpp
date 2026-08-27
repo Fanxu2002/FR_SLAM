@@ -636,6 +636,24 @@ bool LidarRegistration::Align(
         const Eigen::Matrix<double, 6, 1> hessian_eigenvalues =
             hessian_eigen_solver.eigenvalues();
 
+        // ====================================================
+        // Eigenvectors of H.
+        //
+        // H = V * Lambda * V^T
+        //
+        // Each column of V represents one motion direction
+        // in the 6-DOF perturbation space:
+        //
+        //      dx = [rotation, translation]
+        //
+        // Eigenvalues and eigenvectors have the same order.
+        // Eigen's SelfAdjointEigenSolver returns eigenvalues
+        // from small to large.
+        // ====================================================
+
+        const Eigen::Matrix<double, 6, 6> hessian_eigenvectors =
+            hessian_eigen_solver.eigenvectors();
+
         const double lambda_min =
             hessian_eigenvalues(0);
 
@@ -728,18 +746,260 @@ bool LidarRegistration::Align(
             << std::endl;
 
         // ====================================================
-        // 2.7 Solve H dx = -b
+        // 2.7 Solve H dx = -b with degeneracy handling
+        //
+        // Normal case:
+        // ----------------------------------------------------
+        //
+        //      H * dx = -b
+        //
+        // Solve directly using LDLT.
+        //
+        // Degenerate case:
+        // ----------------------------------------------------
+        //
+        // Since:
+        //
+        //      H = V * Lambda * V^T
+        //
+        // define:
+        //
+        //      dx = V * alpha
+        //
+        // Then:
+        //
+        //      Lambda * alpha = -V^T * b
+        //
+        // For a well-constrained direction:
+        //
+        //      alpha_i = -(v_i^T * b) / lambda_i
+        //
+        // For a weak / degenerate direction:
+        //
+        //      alpha_i = 0
+        //
+        // IMPORTANT:
+        //
+        // Setting alpha_i = 0 does NOT mean that the robot pose
+        // becomes zero in that direction.
+        //
+        // It only means:
+        //
+        //      ICP does not add a correction along that
+        //      weakly observable direction.
+        //
+        // Therefore that direction remains close to the
+        // current prediction / initial guess.
         // ====================================================
 
-        const Eigen::Matrix<double, 6, 1> dx =
-            H.ldlt().solve(
-                -b);
+        Eigen::Matrix<double, 6, 1> dx =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        // ====================================================
+        // 2.7.1 Normal case
+        //
+        // Keep the old solver completely unchanged when the
+        // geometry is not degenerate.
+        // ====================================================
+
+        if (!degenerate)
+        {
+            dx =
+                H.ldlt().solve(
+                    -b);
+        }
+
+        // ====================================================
+        // 2.7.2 Degenerate case
+        //
+        // Do NOT directly invert the weak eigenvalues.
+        //
+        // Instead solve only in the observable subspace.
+        // ====================================================
+
+        else
+        {
+            // ------------------------------------------------
+            // If all six directions are weak, there is no
+            // meaningful LiDAR correction available.
+            // ------------------------------------------------
+
+            if (degenerate_directions >= 6)
+            {
+                std::cerr
+                    << "LidarRegistration::Align(): "
+                    << "all Hessian directions are degenerate."
+                    << std::endl;
+
+                result.success =
+                    false;
+
+                result.converged =
+                    false;
+
+                result.iterations =
+                    iteration + 1;
+
+                result.correspondences =
+                    valid_correspondences;
+
+                result.T_target_source =
+                    T_target_source;
+
+                return false;
+            }
+
+            // ------------------------------------------------
+            // Project gradient into Hessian eigenvector space.
+            //
+            //      gradient_eigen = V^T * b
+            //
+            // Each component now corresponds to one Hessian
+            // eigen-direction.
+            // ------------------------------------------------
+
+            const Eigen::Matrix<double, 6, 1> gradient_eigen =
+                hessian_eigenvectors.transpose() *
+                b;
+
+            // ------------------------------------------------
+            // Solution in eigenvector space.
+            //
+            // alpha_i:
+            //
+            //      how much correction we want to apply along
+            //      eigen-direction v_i.
+            // ------------------------------------------------
+
+            Eigen::Matrix<double, 6, 1> delta_eigen =
+                Eigen::Matrix<double, 6, 1>::Zero();
+
+            int usable_directions =
+                0;
+
+            for (int i = 0;
+                 i < 6;
+                 ++i)
+            {
+                const double lambda =
+                    hessian_eigenvalues(i);
+
+                const double relative_lambda =
+                    relative_eigenvalues(i);
+
+                // --------------------------------------------
+                // Use exactly the SAME criterion that we used
+                // above for degeneracy detection.
+                // --------------------------------------------
+
+                const bool weak_direction =
+                    !std::isfinite(lambda) ||
+                    lambda <=
+                        config_.degeneracy_absolute_eigenvalue_threshold ||
+                    relative_lambda <
+                        config_.degeneracy_relative_eigenvalue_threshold;
+
+                // ----------------------------------------------------
+                // Print only the weak Hessian direction.
+                // ----------------------------------------------------
+
+                if (weak_direction)
+                {
+                    std::cout
+                        << "Weak Hessian direction"
+                        << " | index=" << i
+                        << " | eigenvalue=" << lambda
+                        << " | relative=" << relative_lambda
+                        << " | eigenvector=["
+                        << hessian_eigenvectors.col(i).transpose()
+                        << "]"
+                        << std::endl;
+                }
+                // --------------------------------------------
+                // Weak direction:
+                //
+                // Do NOT trust LiDAR correction.
+                //
+                // Keep:
+                //
+                //      delta_eigen(i) = 0
+                //
+                // Therefore this direction stays at the
+                // predicted pose instead of being moved by an
+                // unstable LiDAR solution.
+                // --------------------------------------------
+
+                if (weak_direction)
+                {
+                    delta_eigen(i) =
+                        0.0;
+
+                    continue;
+                }
+
+                // --------------------------------------------
+                // Observable direction:
+                //
+                //      alpha_i
+                //
+                //          =
+                //
+                //      -(v_i^T b) / lambda_i
+                // --------------------------------------------
+
+                delta_eigen(i) =
+                    -gradient_eigen(i) /
+                    lambda;
+
+                ++usable_directions;
+            }
+
+            // ------------------------------------------------
+            // Safety check.
+            // ------------------------------------------------
+
+            if (usable_directions <= 0)
+            {
+                std::cerr
+                    << "LidarRegistration::Align(): "
+                    << "no observable Hessian direction remains."
+                    << std::endl;
+
+                return false;
+            }
+
+            // ------------------------------------------------
+            // Transform solution from Hessian eigenvector space
+            // back into the original 6-DOF perturbation space.
+            //
+            //      dx = V * alpha
+            // ------------------------------------------------
+
+            dx =
+                hessian_eigenvectors *
+                delta_eigen;
+
+            std::cout
+                << "Degeneracy handling"
+                << " | suppressed="
+                << degenerate_directions
+                << " | usable="
+                << usable_directions
+                << " | eigen_step=["
+                << delta_eigen.transpose()
+                << "]"
+                << std::endl;
+        }
+
+        // ====================================================
+        // 2.7.3 Final numerical check
+        // ====================================================
 
         if (!dx.allFinite())
         {
             std::cerr
                 << "LidarRegistration::Align(): "
-                << "dx contains NaN/Inf."
+                << "dx contains NaN/Inf after degeneracy handling."
                 << std::endl;
 
             return false;
