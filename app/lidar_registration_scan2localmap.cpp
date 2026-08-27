@@ -1431,13 +1431,11 @@ private:
     // overlap. After global optimization they separate and directly show
     // how much the graph was corrected.
     // ============================================================
-    // ============================================================
-    // Publish only the optimized Keyframe path.
-    // ============================================================
     void PublishPoseGraphPaths(
         const builtin_interfaces::msg::Time &stamp)
     {
         if (!scan_to_local_map_ ||
+            !pose_graph_before_path_pub_ ||
             !optimized_path_pub_)
         {
             return;
@@ -1454,7 +1452,26 @@ private:
             return;
         }
 
+        std::unordered_map<
+            std::size_t,
+            Eigen::Isometry3d>
+            before_poses;
+
+        if (!BuildOdometryOnlyKeyframePoses(
+                graph,
+                before_poses))
+        {
+            return;
+        }
+
+        nav_msgs::msg::Path before_path;
         nav_msgs::msg::Path optimized_path;
+
+        before_path.header.frame_id =
+            world_frame_;
+
+        before_path.header.stamp =
+            stamp;
 
         optimized_path.header.frame_id =
             world_frame_;
@@ -1462,23 +1479,43 @@ private:
         optimized_path.header.stamp =
             stamp;
 
+        before_path.poses.reserve(
+            nodes.size());
+
         optimized_path.poses.reserve(
             nodes.size());
 
         for (const PoseGraphNode &node :
              nodes)
         {
-            if (!node.T_WK
-                     .matrix()
-                     .allFinite())
+            const auto before_iterator =
+                before_poses.find(
+                    node.id);
+
+            if (before_iterator !=
+                before_poses.end())
             {
-                continue;
+                before_path.poses.push_back(
+                    MakePoseStamped(
+                        before_iterator->second,
+                        stamp));
             }
 
-            optimized_path.poses.push_back(
-                MakePoseStamped(
-                    node.T_WK,
-                    stamp));
+            if (node.T_WK
+                    .matrix()
+                    .allFinite())
+            {
+                optimized_path.poses.push_back(
+                    MakePoseStamped(
+                        node.T_WK,
+                        stamp));
+            }
+        }
+
+        if (!before_path.poses.empty())
+        {
+            pose_graph_before_path_pub_->publish(
+                before_path);
         }
 
         if (!optimized_path.poses.empty())
@@ -1487,7 +1524,6 @@ private:
                 optimized_path);
         }
     }
-
 
     void PublishPoseGraph(
         const builtin_interfaces::msg::Time &stamp)
@@ -2048,13 +2084,11 @@ private:
     // again after a PoseGraph correction.  This function still does almost
     // nothing on ordinary non-Keyframe LiDAR scans.
     // ============================================================
-    // ============================================================
-    // Publish only the optimized global map.
-    // ============================================================
     void PublishGlobalMapSnapshots(
         const builtin_interfaces::msg::Time &stamp)
     {
         if (!scan_to_local_map_ ||
+            !raw_keyframe_map_pub_ ||
             !optimized_map_pub_)
         {
             return;
@@ -2064,47 +2098,180 @@ private:
             scan_to_local_map_->GlobalMapRevision();
 
         if (revision == 0 ||
-            revision ==
-                last_published_global_map_revision_)
+            revision == last_published_global_map_revision_)
         {
             return;
         }
 
-        const pcl::PointCloud<LIDAR_POINT>::ConstPtr
-            optimized_map =
-                scan_to_local_map_->GetOptimizedMap();
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr raw_map =
+            scan_to_local_map_->GetRawKeyframeMap();
 
-        if (!optimized_map ||
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr optimized_map =
+            scan_to_local_map_->GetOptimizedMap();
+
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr refined_map =
+            scan_to_local_map_->GetRefinedMap();
+
+        const std::size_t refined_revision =
+            scan_to_local_map_->RefinedMapRevision();
+
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_historical_target =
+            scan_to_local_map_->GetRefinementHistoricalTarget();
+
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_before =
+            scan_to_local_map_->GetRefinementCurrentBefore();
+
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_after =
+            scan_to_local_map_->GetRefinementCurrentAfter();
+
+        const std::size_t refinement_debug_revision =
+            scan_to_local_map_->RefinementDebugRevision();
+
+        if (!raw_map ||
+            !optimized_map ||
+            raw_map->empty() ||
             optimized_map->empty())
         {
             return;
         }
 
-        sensor_msgs::msg::PointCloud2 map_msg;
+        sensor_msgs::msg::PointCloud2 raw_map_msg;
+        sensor_msgs::msg::PointCloud2 optimized_map_msg;
+
+        pcl::toROSMsg(
+            *raw_map,
+            raw_map_msg);
 
         pcl::toROSMsg(
             *optimized_map,
-            map_msg);
+            optimized_map_msg);
 
-        map_msg.header.stamp =
+        raw_map_msg.header.stamp =
             stamp;
 
-        map_msg.header.frame_id =
+        raw_map_msg.header.frame_id =
             world_frame_;
 
+        optimized_map_msg.header.stamp =
+            stamp;
+
+        optimized_map_msg.header.frame_id =
+            world_frame_;
+
+        raw_keyframe_map_pub_->publish(
+            raw_map_msg);
+
         optimized_map_pub_->publish(
-            map_msg);
+            optimized_map_msg);
+
+        std::size_t refined_points = 0;
+
+        // Publish /refined_map only when it was built from THIS exact G2O
+        // snapshot.  Never replay a stale refined cloud after a later graph
+        // optimization.
+        if (refined_map_pub_ &&
+            refined_map &&
+            !refined_map->empty() &&
+            refined_revision == revision)
+        {
+            sensor_msgs::msg::PointCloud2 refined_map_msg;
+
+            pcl::toROSMsg(
+                *refined_map,
+                refined_map_msg);
+
+            refined_map_msg.header.stamp =
+                stamp;
+
+            refined_map_msg.header.frame_id =
+                world_frame_;
+
+            refined_map_pub_->publish(
+                refined_map_msg);
+
+            refined_points =
+                refined_map->size();
+        }
+
+        std::size_t debug_historical_points = 0;
+        std::size_t debug_before_points = 0;
+        std::size_t debug_after_points = 0;
+
+        if (refinement_debug_revision == revision)
+        {
+            auto publish_debug_cloud =
+                [&stamp, this](
+                    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud,
+                    const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &publisher)
+            {
+                if (!publisher ||
+                    !cloud ||
+                    cloud->empty())
+                {
+                    return;
+                }
+
+                sensor_msgs::msg::PointCloud2 msg;
+
+                pcl::toROSMsg(
+                    *cloud,
+                    msg);
+
+                msg.header.stamp =
+                    stamp;
+
+                msg.header.frame_id =
+                    world_frame_;
+
+                publisher->publish(
+                    msg);
+            };
+
+            publish_debug_cloud(
+                refinement_historical_target,
+                refinement_historical_target_pub_);
+
+            publish_debug_cloud(
+                refinement_current_before,
+                refinement_current_before_pub_);
+
+            publish_debug_cloud(
+                refinement_current_after,
+                refinement_current_after_pub_);
+
+            if (refinement_historical_target)
+            {
+                debug_historical_points =
+                    refinement_historical_target->size();
+            }
+
+            if (refinement_current_before)
+            {
+                debug_before_points =
+                    refinement_current_before->size();
+            }
+
+            if (refinement_current_after)
+            {
+                debug_after_points =
+                    refinement_current_after->size();
+            }
+        }
 
         last_published_global_map_revision_ =
             revision;
 
         RCLCPP_INFO(
             this->get_logger(),
-            "Optimized global map published | revision=%zu points=%zu",
+            "Global map snapshots published | revision=%zu raw_points=%zu optimized_points=%zu refined_points=%zu refinement_debug=[hist:%zu before:%zu after:%zu]",
             revision,
-            optimized_map->size());
+            raw_map->size(),
+            optimized_map->size(),
+            refined_points,
+            debug_historical_points,
+            debug_before_points,
+            debug_after_points);
     }
-
 
     // ============================================================
     // Process one LiDAR frame after IMU coverage is ready.
@@ -2386,6 +2553,10 @@ private:
         // ========================================================
         const Clock::time_point publish_start =
             Clock::now();
+
+        PublishPose(
+            pending.stamp,
+            pending.frame_id);
 
         PublishCorrectedPose(
             pending.stamp,
@@ -2703,7 +2874,17 @@ public:
         // ========================================================
         // 7. Publishers
         // ========================================================
+        path_pub_ =
+            this->create_publisher<
+                nav_msgs::msg::Path>(
+                "/lidar_path",
+                10);
 
+        pose_graph_before_path_pub_ =
+            this->create_publisher<
+                nav_msgs::msg::Path>(
+                "/pose_graph_before_path",
+                10);
 
         optimized_path_pub_ =
             this->create_publisher<
@@ -2711,6 +2892,11 @@ public:
                 "/optimized_path",
                 10);
 
+        odom_pub_ =
+            this->create_publisher<
+                nav_msgs::msg::Odometry>(
+                "/lidar_odometry",
+                10);
 
         corrected_odom_pub_ =
             this->create_publisher<
@@ -2730,6 +2916,11 @@ public:
         global_map_qos.reliable();
         global_map_qos.transient_local();
 
+        raw_keyframe_map_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/raw_keyframe_map",
+                global_map_qos);
 
         optimized_map_pub_ =
             this->create_publisher<
@@ -2737,9 +2928,29 @@ public:
                 "/optimized_map",
                 global_map_qos);
 
+        refined_map_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/refined_map",
+                global_map_qos);
 
+        refinement_historical_target_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/refinement_historical_target",
+                global_map_qos);
 
+        refinement_current_before_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/refinement_current_before",
+                global_map_qos);
 
+        refinement_current_after_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/refinement_current_after",
+                global_map_qos);
 
         pose_graph_marker_pub_ =
             this->create_publisher<
@@ -2818,12 +3029,21 @@ public:
             this->get_logger(),
             "-> KeyframeManager -> LocalMap");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Odom     : /lidar_odometry");
 
         RCLCPP_INFO(
             this->get_logger(),
             "CorrOdom : /corrected_odometry");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Path     : /lidar_path");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Before   : /pose_graph_before_path");
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -2833,11 +3053,17 @@ public:
             this->get_logger(),
             "LocalMap : /local_map");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RawMap   : /raw_keyframe_map");
 
         RCLCPP_INFO(
             this->get_logger(),
             "OptMap   : /optimized_map");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Refined  : /refined_map");
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -2847,8 +3073,17 @@ public:
             this->get_logger(),
             "PoseGraph: Gravity Guard + 2-edge first-loop batch + XY shape guard");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RefDbg H : /refinement_historical_target");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RefDbg B : /refinement_current_before");
 
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RefDbg A : /refinement_current_after");
 
         RCLCPP_INFO(
             this->get_logger(),
