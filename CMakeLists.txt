@@ -254,12 +254,20 @@ install(
       DESTINATION include/${PROJECT_NAME}
 )
 install(
+      DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/config 
+      DESTINATION share/${PROJECT_NAME}
+)
+install(
+      DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/launch
+      DESTINATION share/${PROJECT_NAME}
+)
+install(
   TARGETS 
           # lidar_deskewer
           lidar_registration_scan2scan
           lidar_registration_scan2localmap
           # path
-  RUNTIME DESTINATION lib/${PROJECT_NAME}/test)
+  RUNTIME DESTINATION lib/${PROJECT_NAME})
 
 
 
