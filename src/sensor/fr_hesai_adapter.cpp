@@ -1,4 +1,4 @@
-#include "fr_slam/fr_hesai_adapter.hpp"
+#include "fr_slam/sensor/fr_hesai_adapter.hpp"
 
 #include <cmath>
 #include <cstdint>

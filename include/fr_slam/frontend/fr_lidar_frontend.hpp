@@ -15,18 +15,18 @@
 
 #include <pcl/point_cloud.h>
 
-#include "fr_slam/fr_keyframe.hpp"
-#include "fr_slam/fr_incremental_global_map.hpp"
-#include "fr_slam/fr_keyframe_detector.hpp"
-#include "fr_slam/fr_keyframe_manager.hpp"
-#include "fr_slam/fr_lidar_registration.hpp"
-#include "fr_slam/fr_lidar_registration_config.hpp"
-#include "fr_slam/fr_loop_detector.hpp"
-#include "fr_slam/fr_loop_verifier.hpp"
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_pose_graph.hpp"
-#include "fr_slam/fr_pose_graph_optimizer.hpp"
-#include "fr_slam/fr_submap_manager.hpp"
+#include "fr_slam/mapping/fr_keyframe.hpp"
+#include "fr_slam/mapping/fr_incremental_global_map.hpp"
+#include "fr_slam/mapping/fr_keyframe_detector.hpp"
+#include "fr_slam/mapping/fr_keyframe_manager.hpp"
+#include "fr_slam/lidar/fr_lidar_registration.hpp"
+#include "fr_slam/lidar/fr_lidar_registration_config.hpp"
+#include "fr_slam/loop/fr_loop_detector.hpp"
+#include "fr_slam/loop/fr_loop_verifier.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/backend/fr_pose_graph.hpp"
+#include "fr_slam/backend/fr_pose_graph_optimizer.hpp"
+#include "fr_slam/mapping/fr_submap_manager.hpp"
 
 // ============================================================================
 // Scan-to-Active-Submap frontend + KEYFRAME PoseGraph backend.

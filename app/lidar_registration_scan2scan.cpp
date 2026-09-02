@@ -1,15 +1,15 @@
-#include "fr_slam/fr_lidar_registration.hpp"
-#include "fr_slam/fr_lidar_preprocessor.hpp"
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_lidar_frame.hpp"
+#include "fr_slam/lidar/fr_lidar_registration.hpp"
+#include "fr_slam/lidar/fr_lidar_preprocessor.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/common/fr_lidar_frame.hpp"
 
-#include "fr_slam/fr_mid360s_adapter.hpp"
-#include "fr_slam/fr_imu_adapter.hpp"
+#include "fr_slam/sensor/fr_mid360s_adapter.hpp"
+#include "fr_slam/sensor/fr_imu_adapter.hpp"
 
-#include "fr_slam/fr_imu_buffer.hpp"
-#include "fr_slam/fr_imu_initializer.hpp"
-#include "fr_slam/fr_imu_integrator.hpp"
-#include "fr_slam/fr_imu_types.hpp"
+#include "fr_slam/imu/fr_imu_buffer.hpp"
+#include "fr_slam/imu/fr_imu_initializer.hpp"
+#include "fr_slam/imu/fr_imu_integrator.hpp"
+#include "fr_slam/imu/fr_imu_types.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>

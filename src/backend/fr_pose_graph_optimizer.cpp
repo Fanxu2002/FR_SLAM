@@ -1,4 +1,4 @@
-#include "fr_slam/fr_pose_graph_optimizer.hpp"
+#include "fr_slam/backend/fr_pose_graph_optimizer.hpp"
 
 #include <algorithm>
 #include <cmath>

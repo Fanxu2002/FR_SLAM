@@ -1,4 +1,4 @@
-#include "fr_slam/fr_imu_integrator.hpp"
+#include "fr_slam/imu/fr_imu_integrator.hpp"
 #include <Eigen/Geometry>
 #include <Eigen/Core>
 

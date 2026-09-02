@@ -15,11 +15,11 @@
 #include <pcl/filters/radius_outlier_removal.h>
 #include <pcl/filters/bilateral.h>
 
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_lidar_frame.hpp"
-#include "fr_slam/fr_imu_types.hpp"
-#include "fr_slam/fr_lidar_deskew.hpp"
-#include "fr_slam/fr_PreprocessorConfig.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/common/fr_lidar_frame.hpp"
+#include "fr_slam/imu/fr_imu_types.hpp"
+#include "fr_slam/lidar/fr_lidar_deskew.hpp"
+#include "fr_slam/lidar/fr_preprocessor_config.hpp"
 
 
 struct PreprocessorTiming

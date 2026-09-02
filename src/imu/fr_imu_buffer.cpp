@@ -1,4 +1,4 @@
-#include "fr_slam/fr_imu_buffer.hpp"
+#include "fr_slam/imu/fr_imu_buffer.hpp"
 
 namespace
 {

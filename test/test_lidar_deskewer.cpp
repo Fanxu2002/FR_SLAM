@@ -1,4 +1,4 @@
-#include "fr_slam/fr_lidar_deskew.hpp"
+#include "fr_slam/lidar/fr_lidar_deskew.hpp"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>

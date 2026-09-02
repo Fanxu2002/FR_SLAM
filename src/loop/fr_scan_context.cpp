@@ -1,4 +1,4 @@
-#include "fr_slam/fr_scan_context.hpp"
+#include "fr_slam/loop/fr_scan_context.hpp"
 
 #include <algorithm>
 #include <cmath>

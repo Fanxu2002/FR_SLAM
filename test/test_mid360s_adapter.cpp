@@ -1,5 +1,5 @@
 #include "rclcpp/rclcpp.hpp"
-#include <fr_slam/fr_mid360s_adapter.hpp>
+#include <fr_slam/sensor/fr_mid360s_adapter.hpp>
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include <memory>
 #include <limits>

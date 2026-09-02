@@ -1,4 +1,4 @@
-#include "fr_slam/fr_ground_segmenter.hpp"
+#include "fr_slam/frontend/fr_ground_segmenter.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -1,7 +1,7 @@
-#include "fr_slam/fr_imu_buffer.hpp"
-#include "fr_slam/fr_imu_types.hpp"
-#include "fr_slam/fr_imu_adapter.hpp"
-#include "fr_slam/fr_imu_initializer.hpp"
+#include "fr_slam/imu/fr_imu_buffer.hpp"
+#include "fr_slam/imu/fr_imu_types.hpp"
+#include "fr_slam/sensor/fr_imu_adapter.hpp"
+#include "fr_slam/imu/fr_imu_initializer.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
 #include <functional>

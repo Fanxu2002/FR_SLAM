@@ -1,6 +1,6 @@
 #pragma once
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_lidar_frame.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/common/fr_lidar_frame.hpp"
 #include <pcl/point_cloud.h>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 

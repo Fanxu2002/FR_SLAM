@@ -4,7 +4,7 @@ IMU initialization:
 2. Estimate accelerometer bias.
 3. Estimate the gravity direction and align it with the world z-axis.
 */
-#include "fr_slam/fr_imu_initializer.hpp"
+#include "fr_slam/imu/fr_imu_initializer.hpp"
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <cmath>

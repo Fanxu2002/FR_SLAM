@@ -1,7 +1,7 @@
 #pragma once
 
-#include "fr_slam/fr_local_map.hpp"
-#include "fr_slam/fr_point_types.hpp"
+#include "fr_slam/mapping/fr_local_map.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
 
 #include <cstddef>
 #include <vector>

@@ -1,4 +1,4 @@
-#include "fr_slam/fr_state_publisher.hpp"
+#include "fr_slam/ros/fr_state_publisher.hpp"
 
 #include <cmath>
 #include <cstdint>

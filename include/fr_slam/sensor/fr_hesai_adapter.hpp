@@ -1,5 +1,5 @@
 #pragma once
-#include "fr_slam/fr_lidar_adapter.hpp"
+#include "fr_slam/sensor/fr_lidar_adapter.hpp"
 
 class HESAI_Adapter : public Lidar_Adapt
 {

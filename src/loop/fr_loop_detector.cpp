@@ -1,4 +1,4 @@
-#include "fr_slam/fr_loop_detector.hpp"
+#include "fr_slam/loop/fr_loop_detector.hpp"
 
 #include <algorithm>
 #include <cmath>

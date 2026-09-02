@@ -1,5 +1,5 @@
 #pragma once
-#include "fr_slam/fr_imu_types.hpp"
+#include "fr_slam/imu/fr_imu_types.hpp"
 #include <vector>
 
 class ImuInitializer

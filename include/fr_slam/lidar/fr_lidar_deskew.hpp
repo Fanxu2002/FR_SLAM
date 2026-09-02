@@ -2,8 +2,8 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 #include <vector>
-#include "fr_slam/fr_lidar_frame.hpp"
-#include "fr_slam/fr_imu_types.hpp"
+#include "fr_slam/common/fr_lidar_frame.hpp"
+#include "fr_slam/imu/fr_imu_types.hpp"
 
 class LidarDeskewer
 {

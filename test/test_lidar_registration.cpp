@@ -9,8 +9,8 @@
 
 #include <pcl/point_cloud.h>
 
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_lidar_registration.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/lidar/fr_lidar_registration.hpp"
 
 // ============================================================
 // Create a simple 3D environment:

@@ -34,12 +34,12 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 
-#include "fr_slam/fr_mid360s_adapter.hpp"
-#include "fr_slam/fr_lidar_preprocessor.hpp"
-#include "fr_slam/fr_lidar_registration.hpp"
-#include "fr_slam/fr_lidar_frame.hpp"
-#include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/fr_local_map.hpp"
+#include "fr_slam/sensor/fr_mid360s_adapter.hpp"
+#include "fr_slam/lidar/fr_lidar_preprocessor.hpp"
+#include "fr_slam/lidar/fr_lidar_registration.hpp"
+#include "fr_slam/common/fr_lidar_frame.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
+#include "fr_slam/mapping/fr_local_map.hpp"
 
 namespace
 {

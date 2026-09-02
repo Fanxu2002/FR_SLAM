@@ -1,5 +1,5 @@
 #pragma once
-#include "fr_slam/fr_lidar_adapter.hpp"
+#include "fr_slam/sensor/fr_lidar_adapter.hpp"
 
 class Mid360s_Adapter : public Lidar_Adapt
 {

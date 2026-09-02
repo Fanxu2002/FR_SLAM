@@ -1,4 +1,4 @@
-#include "fr_slam/fr_submap_manager.hpp"
+#include "fr_slam/mapping/fr_submap_manager.hpp"
 
 #include <algorithm>
 #include <cmath>

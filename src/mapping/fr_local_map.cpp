@@ -1,4 +1,4 @@
-#include "fr_slam/fr_local_map.hpp"
+#include "fr_slam/mapping/fr_local_map.hpp"
 
 #include <algorithm>
 #include <cmath>

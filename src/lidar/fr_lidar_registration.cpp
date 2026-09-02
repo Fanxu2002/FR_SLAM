@@ -1,4 +1,4 @@
-#include "fr_slam/fr_lidar_registration.hpp"
+#include "fr_slam/lidar/fr_lidar_registration.hpp"
 
 #include <algorithm>
 #include <cmath>

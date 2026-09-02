@@ -1,6 +1,6 @@
 #pragma once
 
-#include "fr_slam/fr_point_types.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
 
 #include <cstddef>
 #include <limits>

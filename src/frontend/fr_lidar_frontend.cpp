@@ -1,6 +1,6 @@
-#include "fr_slam/fr_registration_scan2localmap.hpp"
-#include "fr_slam/fr_ground_segmenter.hpp"
-#include "fr_slam/fr_ground_input_bridge.hpp"
+#include "fr_slam/frontend/fr_lidar_frontend.hpp"
+#include "fr_slam/frontend/fr_ground_segmenter.hpp"
+#include "fr_slam/frontend/fr_ground_input_bridge.hpp"
 
 #include <algorithm>
 #include <chrono>

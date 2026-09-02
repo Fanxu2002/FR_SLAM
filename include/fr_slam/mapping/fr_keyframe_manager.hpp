@@ -8,8 +8,8 @@
 
 #include <pcl/point_cloud.h>
 
-#include "fr_slam/fr_keyframe.hpp"
-#include "fr_slam/fr_point_types.hpp"
+#include "fr_slam/mapping/fr_keyframe.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
 
 // ============================================================================
 // Historical keyframe manager.

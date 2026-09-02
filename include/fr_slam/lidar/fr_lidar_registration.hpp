@@ -10,8 +10,8 @@
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 
-#include "fr_slam/fr_lidar_registration_config.hpp"
-#include "fr_slam/fr_point_types.hpp"
+#include "fr_slam/lidar/fr_lidar_registration_config.hpp"
+#include "fr_slam/common/fr_point_types.hpp"
 
 // ============================================================================
 // Prepared target frame for point-to-plane registration.

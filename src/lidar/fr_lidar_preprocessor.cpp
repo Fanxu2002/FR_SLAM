@@ -1,5 +1,5 @@
-#include "fr_slam/fr_lidar_preprocessor.hpp"
-#include "fr_slam/fr_ground_input_bridge.hpp"
+#include "fr_slam/lidar/fr_lidar_preprocessor.hpp"
+#include "fr_slam/frontend/fr_ground_input_bridge.hpp"
 
 #include <chrono>
 #include <cstdint>

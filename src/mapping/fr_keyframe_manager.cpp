@@ -1,4 +1,4 @@
-#include "fr_slam/fr_keyframe_manager.hpp"
+#include "fr_slam/mapping/fr_keyframe_manager.hpp"
 
 #include <cmath>
 #include <utility>
