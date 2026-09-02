@@ -106,9 +106,9 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 #                 APP
 # ============================================
 
-add_executable(lidar_registration_scan2localmap)
-target_sources(lidar_registration_scan2localmap PRIVATE
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_registration_scan2localmap.cpp
+add_executable(fr_slam_node)
+target_sources(fr_slam_node PRIVATE
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/app/fr_slam_node.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_initializer.cpp
@@ -116,6 +116,8 @@ target_sources(lidar_registration_scan2localmap PRIVATE
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_deskew.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_mid360s_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_hesai_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_hesai_adapter.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_preprocessor.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_registration.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/fr_local_map.cpp
@@ -133,16 +135,16 @@ target_sources(lidar_registration_scan2localmap PRIVATE
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_input_bridge.cpp
                                             )
 
-target_include_directories(lidar_registration_scan2localmap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(fr_slam_node PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(
-    lidar_registration_scan2localmap
+    fr_slam_node
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     /usr/local/include
 )
 
 ament_target_dependencies(
-    lidar_registration_scan2localmap
+    fr_slam_node
     rclcpp
     sensor_msgs
     std_srvs
@@ -153,9 +155,9 @@ ament_target_dependencies(
     tf2_ros
 )
 
-target_link_libraries(lidar_registration_scan2localmap ${PCL_LIBRARIES} ${G2O_LIBRARIES})
+target_link_libraries(fr_slam_node ${PCL_LIBRARIES} ${G2O_LIBRARIES})
 target_link_libraries(
-    lidar_registration_scan2localmap
+    fr_slam_node
 
     ${PCL_LIBRARIES}
 
@@ -169,7 +171,7 @@ target_link_libraries(
     ${LZ4_LIBRARY}
 )
 
-target_compile_definitions(lidar_registration_scan2localmap PRIVATE PCL_NO_PRECOMPILE)
+target_compile_definitions(fr_slam_node PRIVATE PCL_NO_PRECOMPILE)
 
 
 # ============================================
@@ -243,7 +245,7 @@ install(
 )
 install(
   TARGETS
-          lidar_registration_scan2localmap
+          fr_slam_node
           ground_segmentation_debug
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 

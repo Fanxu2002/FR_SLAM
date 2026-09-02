@@ -22,6 +22,13 @@
 #include "fr_slam/lidar/fr_preprocessor_config.hpp"
 
 
+enum class PreprocessorSorMode
+{
+    ALWAYS,
+    OFF,
+    ADAPTIVE
+};
+
 struct PreprocessorTiming
 {
     double deskew_ms = 0.0;
@@ -36,6 +43,9 @@ struct PreprocessorTiming
     std::size_t after_voxel_points = 0;
     std::size_t after_sor_points = 0;
     std::size_t after_ror_points = 0;
+
+    bool sor_executed = false;
+    bool ror_executed = false;
 };
 
 class PreProcessor
@@ -47,11 +57,29 @@ private:
     // The actual deskew mathematics remains inside LidarDeskewer.
     LidarDeskewer deskewer_;
 
-    // Runtime gates used by the real-time node.
-    // They allow expensive outlier filters to be disabled without changing
-    // the existing PreprocessorConfig file.
-    bool process_enable_sor_ = false;
+    // Runtime outlier-filter policy used by the real-time node.
+    //
+    // ALWAYS:
+    //     run SOR on every frame.
+    //
+    // OFF:
+    //     skip SOR entirely.
+    //
+    // ADAPTIVE:
+    //     run SOR only while the post-voxel cloud is not larger than
+    //     sor_adaptive_max_points_.  Dense 360-degree scans therefore avoid
+    //     the expensive StatisticalOutlierRemoval KNN pass and continue
+    //     directly to the much cheaper ROR stage.
+    PreprocessorSorMode sor_mode_ =
+        PreprocessorSorMode::OFF;
+
+    std::size_t sor_adaptive_max_points_ =
+        6000;
+
     bool process_enable_ror_ = false;
+
+    bool ShouldRunSor(
+        std::size_t after_voxel_points) const;
 
     PreprocessorTiming last_timing_;
 
@@ -75,12 +103,26 @@ public:
         const std::vector<IMU_POSE> &imu_poses,
         bool use_translation = false);
 
-    // Enable/disable the expensive SOR/ROR stages used by Process().
-    // The underlying SOR()/ROR() functions still keep their original
-    // PreprocessorConfig checks.
+    // Replace the complete preprocessing configuration.  Runtime SOR/ROR
+    // policy can still be applied afterwards with SetOutlierFilterPolicy().
+    void SetConfig(
+        const PreprocessorConfig &config);
+
+    // Legacy binary switch kept for compatibility.  enable_sor=true maps to
+    // ALWAYS and enable_sor=false maps to OFF.
     void SetOutlierFiltersEnabled(
         bool enable_sor,
         bool enable_ror);
+
+    // Preferred runtime policy for SOR performance experiments.
+    void SetOutlierFilterPolicy(
+        PreprocessorSorMode sor_mode,
+        bool enable_ror,
+        std::size_t sor_adaptive_max_points = 6000);
+
+    PreprocessorSorMode GetSorMode() const;
+
+    std::size_t GetSorAdaptiveMaxPoints() const;
 
     const PreprocessorTiming &GetLastTiming() const;
 

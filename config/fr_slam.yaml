@@ -1,0 +1,100 @@
+fr_slam:
+  ros__parameters:
+    # ============================================================
+    # Sensor selection
+    # ============================================================
+    # Supported now:
+    #   mid360s
+    #   hesai
+    #
+    # The selected adapter converts sensor-specific PointCloud2 data
+    # into the common LIDAR_FRAME used by the rest of FR-SLAM.
+    lidar_type: "mid360s"
+
+    # Current Livox Mid-360 topic.
+    # For Hesai, change this to the actual Hesai PointCloud2 topic.
+    lidar_topic: "/livox/lidar"
+
+    # Current IMU topic.
+    # At this stage FR-SLAM still expects sensor_msgs/msg/Imu.
+    # If the future GNSS/INS IMU also publishes sensor_msgs/msg/Imu,
+    # only this topic needs to change.  If it publishes a proprietary
+    # message, add a GNSS-IMU adapter later.
+    imu_topic: "/livox/imu"
+
+    # ============================================================
+    # Frames
+    # ============================================================
+    world_frame: "world"
+    odom_frame: "odom"
+
+    # ============================================================
+    # Realtime / synchronization
+    # ============================================================
+    max_lidar_queue_size: 3
+    imu_qos_depth: 1000
+    imu_initialization_sample_count: 200
+    imu_history_duration: 0.5
+
+    # ============================================================
+    # LocalMap
+    # ============================================================
+    local_map_max_frames: 10
+    local_map_voxel_leaf_size: 0.30
+
+    # ============================================================
+    # LiDAR preprocessing
+    # ============================================================
+    preprocessor_enable_range_filter: true
+    preprocessor_range_min: 1.0
+    preprocessor_range_max: 30.0
+
+    preprocessor_enable_passthrough: true
+    preprocessor_roi_min_x: -30.0
+    preprocessor_roi_max_x: 30.0
+    preprocessor_roi_min_y: -15.0
+    preprocessor_roi_max_y: 15.0
+    preprocessor_roi_min_z: -2.0
+    preprocessor_roi_max_z: 10.0
+
+    # Self-body exclusion box.
+    # PCL CropBox is used with negative=true in the current preprocessor,
+    # so points INSIDE this box are removed.
+    preprocessor_enable_cropbox: true
+    preprocessor_cropbox_min_x: -0.15
+    preprocessor_cropbox_max_x: 0.15
+    preprocessor_cropbox_min_y: -0.15
+    preprocessor_cropbox_max_y: 0.15
+    preprocessor_cropbox_min_z: -0.15
+    preprocessor_cropbox_max_z: 0.15
+
+    preprocessor_enable_voxel: true
+    preprocessor_voxel_leaf_size: 0.30
+    preprocessor_voxel_min_points: 1
+
+    # SOR:
+    #   always   -> run every frame
+    #   off      -> skip SOR
+    #   adaptive -> run only when post-voxel points <= threshold
+    #
+    # Current A/B test result recommends OFF + ROR ON.
+    preprocessor_sor_mode: "off"
+    preprocessor_sor_adaptive_max_points: 6000
+    preprocessor_sor_mean_k: 50
+    preprocessor_sor_stddev_mul_thresh: 1.0
+
+    preprocessor_enable_ror: true
+    preprocessor_ror_radius: 0.30
+    preprocessor_ror_min_neighbors: 1
+
+    # ============================================================
+    # LiDAR -> IMU extrinsic
+    # ============================================================
+    # Not parameterized yet on purpose.
+    #
+    # Current code continues to use:
+    #   Q_IL = Identity
+    #   P_IL = Zero
+    #
+    # After LiDAR-IMU calibration, add the calibrated transform here
+    # and wire it into Q_IL_/P_IL_.

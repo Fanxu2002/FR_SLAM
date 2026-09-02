@@ -5,8 +5,11 @@
 #include "fr_slam/lidar/fr_lidar_preprocessor.hpp"
 #include "fr_slam/common/fr_point_types.hpp"
 #include "fr_slam/frontend/fr_lidar_frontend.hpp"
+#include "fr_slam/mapping/fr_keyframe.hpp"
 
+#include "fr_slam/sensor/fr_lidar_adapter.hpp"
 #include "fr_slam/sensor/fr_mid360s_adapter.hpp"
+#include "fr_slam/sensor/fr_hesai_adapter.hpp"
 #include "fr_slam/sensor/fr_imu_adapter.hpp"
 
 #include "fr_slam/imu/fr_imu_buffer.hpp"
@@ -38,17 +41,24 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <condition_variable>
+#include <ctime>
 #include <cstdlib>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -188,28 +198,35 @@ private:
         pose_graph_marker_pub_;
 
     // ============================================================
-    // On-demand PCD export service.
+    // On-demand SLAM output export service.
     //
     // Service:
     //     /save_slam_maps   [std_srvs/srv/Trigger]
     //
-    // Files:
+    // Maps:
     //     raw_keyframe_map.pcd
     //     optimized_map.pcd
     //     refined_map.pcd
     //
-    // The callback reads one coherent BackendMapSnapshot and saves the
-    // three immutable shared snapshots as binary PCD files.
+    // Trajectories:
+    //     frontend_trajectory.csv
+    //     pose_graph_before_trajectory.csv
+    //     optimized_trajectory.csv
     // ============================================================
     rclcpp::Service<
         std_srvs::srv::Trigger>::SharedPtr
         save_maps_service_;
 
     std::string
-        pcd_save_directory_;
+        save_root_directory_;
 
     std::mutex
         map_save_mutex_;
+
+    // Protects all persistent Path messages that can also be read by the
+    // save service while the LiDAR worker is still running.
+    std::mutex
+        trajectory_mutex_;
 
     // ============================================================
     // TF broadcaster
@@ -238,12 +255,41 @@ private:
 
     // ============================================================
     // Sensor adapters
+    //
+    // Both concrete LiDAR adapters already implement the common
+    // Lidar_Adapt interface.  The YAML parameter "lidar_type"
+    // selects which adapter is used at runtime.
+    //
+    // Keep the concrete adapters as normal members and store only a
+    // non-owning base pointer.  No dynamic allocation is required.
     // ============================================================
     Mid360s_Adapter
-        lidar_adapter_;
+        mid360s_adapter_;
+
+    HESAI_Adapter
+        hesai_adapter_;
+
+    Lidar_Adapt *
+        lidar_adapter_ =
+            nullptr;
 
     ImuAdapter
         imu_adapter_;
+
+    // ============================================================
+    // Sensor configuration loaded from config/fr_slam.yaml
+    // ============================================================
+    std::string
+        lidar_type_ =
+            "mid360s";
+
+    std::string
+        lidar_topic_ =
+            "/livox/lidar";
+
+    std::string
+        imu_topic_ =
+            "/livox/imu";
 
     // ============================================================
     // IMU modules
@@ -423,9 +469,13 @@ private:
     std::size_t
         imu_qos_depth_ = 1000;
 
-    bool
-        preprocessor_enable_sor_ =
-            false;
+    std::string
+        preprocessor_sor_mode_ =
+            "always";
+
+    std::size_t
+        preprocessor_sor_adaptive_max_points_ =
+            6000;
 
     bool
         preprocessor_enable_ror_ =
@@ -460,10 +510,25 @@ private:
             Eigen::Isometry3d::Identity();
 
     // ============================================================
-    // Path
+    // Persistent trajectories.
+    //
+    // path_msg_:
+    //     accepted ordinary LiDAR frames in odom.
+    //
+    // pose_graph_before_path_msg_:
+    //     odometry-only Keyframe trajectory reconstructed from PoseGraph.
+    //
+    // optimized_path_msg_:
+    //     current optimized Keyframe trajectory in world.
     // ============================================================
     nav_msgs::msg::Path
         path_msg_;
+
+    nav_msgs::msg::Path
+        pose_graph_before_path_msg_;
+
+    nav_msgs::msg::Path
+        optimized_path_msg_;
 
     // Last backend-map revision already converted to PointCloud2 and
     // published.  This prevents expensive million-point conversions on every
@@ -477,14 +542,14 @@ private:
         last_seen_map_odom_revision_ =
             0;
 
-    const std::string
+    std::string
         world_frame_ =
             "world";
 
     // Continuous local frame owned by the realtime frontend.
     // Loop closure must never jump this frame; the backend correction is
     // represented by the dynamic world -> odom transform instead.
-    const std::string
+    std::string
         odom_frame_ =
             "odom";
 
@@ -658,8 +723,17 @@ private:
             return;
         }
 
+        if (lidar_adapter_ == nullptr)
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "LiDAR adapter is not initialized.");
+
+            return;
+        }
+
         const LIDAR_FRAME raw_frame =
-            lidar_adapter_.convert(
+            lidar_adapter_->convert(
                 *msg);
 
         if (!raw_frame.cloud ||
@@ -1407,17 +1481,24 @@ private:
         pose_msg.pose.orientation.z =
             Q_odom_L.z();
 
-        path_msg_.header.stamp =
-            stamp;
+        // Keep the persistent frontend trajectory coherent with the save
+        // service.  The same mutex protects the snapshot copy during export.
+        {
+            std::lock_guard<std::mutex> trajectory_lock(
+                trajectory_mutex_);
 
-        path_msg_.header.frame_id =
-            odom_frame_;
+            path_msg_.header.stamp =
+                stamp;
 
-        path_msg_.poses.push_back(
-            pose_msg);
+            path_msg_.header.frame_id =
+                odom_frame_;
 
-        path_pub_->publish(
-            path_msg_);
+            path_msg_.poses.push_back(
+                pose_msg);
+
+            path_pub_->publish(
+                path_msg_);
+        }
     }
 
     // ============================================================
@@ -1792,6 +1873,34 @@ private:
             return;
         }
 
+        // PoseGraph Path messages used to stamp every Keyframe with the time
+        // at which the path happened to be published.  That is fine for RViz,
+        // but wrong for trajectory export.  Recover each real LiDAR Keyframe
+        // timestamp here so the CSV can be used for quantitative evaluation.
+        std::unordered_map<
+            std::size_t,
+            double>
+            keyframe_timestamp_by_id;
+
+        const std::vector<Keyframe> &keyframes =
+            scan_to_local_map_->GetKeyframes();
+
+        keyframe_timestamp_by_id.reserve(
+            keyframes.size());
+
+        for (const Keyframe &keyframe :
+             keyframes)
+        {
+            if (!std::isfinite(keyframe.timestamp))
+            {
+                continue;
+            }
+
+            keyframe_timestamp_by_id.emplace(
+                keyframe.id,
+                keyframe.timestamp);
+        }
+
         nav_msgs::msg::Path before_path;
         nav_msgs::msg::Path optimized_path;
 
@@ -1816,6 +1925,60 @@ private:
         for (const PoseGraphNode &node :
              nodes)
         {
+            builtin_interfaces::msg::Time pose_stamp =
+                stamp;
+
+            const auto timestamp_iterator =
+                keyframe_timestamp_by_id.find(
+                    node.id);
+
+            if (timestamp_iterator !=
+                keyframe_timestamp_by_id.end())
+            {
+                const double timestamp =
+                    timestamp_iterator->second;
+
+                const double seconds_floor =
+                    std::floor(timestamp);
+
+                std::int64_t nanoseconds =
+                    static_cast<std::int64_t>(
+                        std::llround(
+                            (timestamp - seconds_floor) *
+                            1.0e9));
+
+                std::int64_t seconds =
+                    static_cast<std::int64_t>(
+                        seconds_floor);
+
+                if (nanoseconds >= 1000000000LL)
+                {
+                    ++seconds;
+                    nanoseconds -= 1000000000LL;
+                }
+                else if (nanoseconds < 0)
+                {
+                    --seconds;
+                    nanoseconds += 1000000000LL;
+                }
+
+                if (seconds >=
+                        static_cast<std::int64_t>(
+                            std::numeric_limits<std::int32_t>::min()) &&
+                    seconds <=
+                        static_cast<std::int64_t>(
+                            std::numeric_limits<std::int32_t>::max()))
+                {
+                    pose_stamp.sec =
+                        static_cast<std::int32_t>(
+                            seconds);
+
+                    pose_stamp.nanosec =
+                        static_cast<std::uint32_t>(
+                            nanoseconds);
+                }
+            }
+
             const auto before_iterator =
                 before_poses.find(
                     node.id);
@@ -1826,7 +1989,7 @@ private:
                 before_path.poses.push_back(
                     MakePoseStamped(
                         before_iterator->second,
-                        stamp));
+                        pose_stamp));
             }
 
             if (node.T_WK
@@ -1836,8 +1999,22 @@ private:
                 optimized_path.poses.push_back(
                     MakePoseStamped(
                         node.T_WK,
-                        stamp));
+                        pose_stamp));
             }
+        }
+
+        // Store the exact paths that were just generated.  The save service
+        // only copies these immutable snapshots; it never reads or modifies
+        // the live backend graph directly.
+        {
+            std::lock_guard<std::mutex> trajectory_lock(
+                trajectory_mutex_);
+
+            pose_graph_before_path_msg_ =
+                before_path;
+
+            optimized_path_msg_ =
+                optimized_path;
         }
 
         if (!before_path.poses.empty())
@@ -2634,10 +2811,8 @@ private:
         const std::vector<IMU_POSE> &imu_poses,
         const IMU_STATE &state_at_scan_start)
     {
-        using Clock = std::chrono::steady_clock;
-
-        const Clock::time_point frame_start =
-            Clock::now();
+        const std::chrono::steady_clock::time_point frame_start =
+            std::chrono::steady_clock::now();
 
         const LIDAR_FRAME &raw_frame =
             pending.frame;
@@ -2645,8 +2820,8 @@ private:
         // ========================================================
         // 1. Rotation-only Deskew + preprocessing + voxel
         // ========================================================
-        const Clock::time_point preprocess_start =
-            Clock::now();
+        const std::chrono::steady_clock::time_point preprocess_start =
+            std::chrono::steady_clock::now();
 
         const LIDAR_FRAME processed_frame =
             preprocessor_.Process(
@@ -2654,8 +2829,8 @@ private:
                 imu_poses,
                 false);
 
-        const Clock::time_point preprocess_end =
-            Clock::now();
+        const std::chrono::steady_clock::time_point preprocess_end =
+            std::chrono::steady_clock::now();
 
         const double preprocess_ms =
             std::chrono::duration<double, std::milli>(
@@ -2755,8 +2930,8 @@ private:
         // ========================================================
         // 4. Scan-to-LocalMap + Keyframe / Loop / PoseGraph work.
         // ========================================================
-        const Clock::time_point registration_start =
-            Clock::now();
+        const std::chrono::steady_clock::time_point registration_start =
+            std::chrono::steady_clock::now();
 
         const bool success =
             scan_to_local_map_->AddFrame(
@@ -2766,8 +2941,8 @@ private:
                 result,
                 imu_rotation_ptr);
 
-        const Clock::time_point registration_end =
-            Clock::now();
+        const std::chrono::steady_clock::time_point registration_end =
+            std::chrono::steady_clock::now();
 
         const double registration_ms =
             std::chrono::duration<double, std::milli>(
@@ -2787,8 +2962,8 @@ private:
                     lidar_queue_.size();
             }
 
-            const Clock::time_point frame_end =
-                Clock::now();
+            const std::chrono::steady_clock::time_point frame_end =
+                std::chrono::steady_clock::now();
 
             const double total_ms =
                 std::chrono::duration<double, std::milli>(
@@ -2810,6 +2985,7 @@ private:
                 "Pipeline timing | "
                 "deskew=%.2f basic=%.2f voxel=%.2f sor=%.2f ror=%.2f "
                 "preprocess=%.2f registration=%.2f publish=0.00 total=%.2f ms | "
+                "sor_run=%s points=[basic:%zu voxel:%zu sor:%zu final:%zu] | "
                 "queue=%zu dropped=%zu",
                 preprocess_timing.deskew_ms,
                 preprocess_timing.basic_ms,
@@ -2819,6 +2995,13 @@ private:
                 preprocess_ms,
                 registration_ms,
                 total_ms,
+                preprocess_timing.sor_executed
+                    ? "true"
+                    : "false",
+                preprocess_timing.after_basic_points,
+                preprocess_timing.after_voxel_points,
+                preprocess_timing.after_sor_points,
+                preprocess_timing.after_ror_points,
                 queue_size,
                 dropped_lidar_frames_.load());
 
@@ -2886,8 +3069,8 @@ private:
         // 7. Publish. Measure it because PointCloud2 conversion and RViz
         // publication can also become a real-time bottleneck.
         // ========================================================
-        const Clock::time_point publish_start =
-            Clock::now();
+        const std::chrono::steady_clock::time_point publish_start =
+            std::chrono::steady_clock::now();
 
         PublishPose(
             pending.stamp,
@@ -2909,8 +3092,8 @@ private:
         PublishGlobalMapSnapshots(
             pending.stamp);
 
-        const Clock::time_point publish_end =
-            Clock::now();
+        const std::chrono::steady_clock::time_point publish_end =
+            std::chrono::steady_clock::now();
 
         const double publish_ms =
             std::chrono::duration<double, std::milli>(
@@ -2938,6 +3121,7 @@ private:
             "Pipeline timing | "
             "deskew=%.2f basic=%.2f voxel=%.2f sor=%.2f ror=%.2f "
             "preprocess=%.2f registration=%.2f publish=%.2f total=%.2f ms | "
+            "sor_run=%s points=[basic:%zu voxel:%zu sor:%zu final:%zu] | "
             "queue=%zu dropped=%zu",
             preprocess_timing.deskew_ms,
             preprocess_timing.basic_ms,
@@ -2948,6 +3132,13 @@ private:
             registration_ms,
             publish_ms,
             total_ms,
+            preprocess_timing.sor_executed
+                ? "true"
+                : "false",
+            preprocess_timing.after_basic_points,
+            preprocess_timing.after_voxel_points,
+            preprocess_timing.after_sor_points,
+            preprocess_timing.after_ror_points,
             queue_size,
             dropped_lidar_frames_.load());
     }
@@ -3242,6 +3433,154 @@ private:
     }
 
     // ============================================================
+    // Build one unique snapshot directory name.
+    //
+    // Example:
+    //
+    //     20260902_183501_327
+    //
+    // Format:
+    //
+    //     YYYYMMDD_HHMMSS_mmm
+    //
+    // Each /save_slam_maps call therefore receives its own directory
+    // and never overwrites a previous SLAM export.
+    // ============================================================
+    std::string BuildSaveSnapshotId() const
+    {
+        const std::chrono::system_clock::time_point now =
+            std::chrono::system_clock::now();
+
+        const std::time_t current_time =
+            std::chrono::system_clock::to_time_t(
+                now);
+
+        std::tm local_time{};
+
+        localtime_r(
+            &current_time,
+            &local_time);
+
+        const std::int64_t milliseconds_since_epoch =
+            std::chrono::duration_cast<
+                std::chrono::milliseconds>(
+                now.time_since_epoch())
+                .count();
+
+        const int milliseconds =
+            static_cast<int>(
+                milliseconds_since_epoch %
+                1000);
+
+        std::ostringstream stream;
+
+        stream
+            << std::put_time(
+                   &local_time,
+                   "%Y%m%d_%H%M%S")
+            << "_"
+            << std::setw(3)
+            << std::setfill('0')
+            << milliseconds;
+
+        return stream.str();
+    }
+
+    // ============================================================
+    // Save one ROS Path as a CSV trajectory.
+    //
+    // Format:
+    //     timestamp,x,y,z,qx,qy,qz,qw
+    //
+    // Quaternion order intentionally follows the common TUM / SLAM
+    // convention qx qy qz qw.
+    // ============================================================
+    bool SavePathCsv(
+        const nav_msgs::msg::Path &path,
+        const std::filesystem::path &file_path) const
+    {
+        if (path.poses.empty())
+        {
+            return false;
+        }
+
+        std::ofstream output(
+            file_path,
+            std::ios::out |
+                std::ios::trunc);
+
+        if (!output.is_open())
+        {
+            return false;
+        }
+
+        output
+            << "timestamp,x,y,z,qx,qy,qz,qw\n";
+
+        output
+            << std::setprecision(16);
+
+        std::size_t written_rows = 0;
+
+        for (const geometry_msgs::msg::PoseStamped &pose_stamped :
+             path.poses)
+        {
+            const geometry_msgs::msg::Pose &pose =
+                pose_stamped.pose;
+
+            const double timestamp =
+                static_cast<double>(
+                    pose_stamped.header.stamp.sec) +
+                1.0e-9 *
+                    static_cast<double>(
+                        pose_stamped.header.stamp.nanosec);
+
+            if (!std::isfinite(timestamp) ||
+                !std::isfinite(pose.position.x) ||
+                !std::isfinite(pose.position.y) ||
+                !std::isfinite(pose.position.z) ||
+                !std::isfinite(pose.orientation.x) ||
+                !std::isfinite(pose.orientation.y) ||
+                !std::isfinite(pose.orientation.z) ||
+                !std::isfinite(pose.orientation.w))
+            {
+                continue;
+            }
+
+            Eigen::Quaterniond quaternion(
+                pose.orientation.w,
+                pose.orientation.x,
+                pose.orientation.y,
+                pose.orientation.z);
+
+            if (!quaternion.coeffs().allFinite() ||
+                quaternion.norm() <= 1.0e-12)
+            {
+                continue;
+            }
+
+            quaternion.normalize();
+
+            output
+                << timestamp << ','
+                << pose.position.x << ','
+                << pose.position.y << ','
+                << pose.position.z << ','
+                << quaternion.x() << ','
+                << quaternion.y() << ','
+                << quaternion.z() << ','
+                << quaternion.w() << '\n';
+
+            ++written_rows;
+        }
+
+        output.flush();
+
+        return output.good() &&
+               written_rows > 0;
+    }
+
+    // ============================================================
     // SaveRawOptimizedRefinedMaps()
     //
     // This service is intentionally on-demand.  PCD disk I/O can take
@@ -3290,22 +3629,103 @@ private:
             return;
         }
 
+        // Copy all trajectory messages before disk I/O.  The LiDAR worker is
+        // blocked only for the short memory-copy window, not while files are
+        // being written to disk.
+        nav_msgs::msg::Path frontend_path_snapshot;
+        nav_msgs::msg::Path pose_graph_before_path_snapshot;
+        nav_msgs::msg::Path optimized_path_snapshot;
+
+        {
+            std::lock_guard<std::mutex> trajectory_lock(
+                trajectory_mutex_);
+
+            frontend_path_snapshot =
+                path_msg_;
+
+            pose_graph_before_path_snapshot =
+                pose_graph_before_path_msg_;
+
+            optimized_path_snapshot =
+                optimized_path_msg_;
+        }
+
+        if (frontend_path_snapshot.poses.empty() ||
+            pose_graph_before_path_snapshot.poses.empty() ||
+            optimized_path_snapshot.poses.empty())
+        {
+            response->success = false;
+            response->message =
+                "One or more trajectory snapshots are empty. "
+                "Wait until SLAM has produced Keyframes and try again.";
+            return;
+        }
+
         try
         {
-            const std::filesystem::path save_directory(
-                pcd_save_directory_);
+            // ========================================================
+            // One service call = one immutable SLAM snapshot.
+            //
+            // Current launch configuration:
+            //
+            //     pcd_save_directory_
+            //         = <output>/maps
+            //
+            // Therefore:
+            //
+            //     parent_path()
+            //         = <output>
+            //
+            // New export layout:
+            //
+            //     <output>/saves/<timestamp>/
+            //         maps/
+            //         trajectory/
+            // ========================================================
+
+            const std::filesystem::path save_root_directory(
+                save_root_directory_);
+
+            const std::string snapshot_id =
+                BuildSaveSnapshotId();
+
+            const std::filesystem::path snapshot_directory =
+                save_root_directory /
+                snapshot_id;
+
+            const std::filesystem::path map_directory =
+                snapshot_directory /
+                "maps";
+
+            const std::filesystem::path trajectory_directory =
+                snapshot_directory /
+                "trajectory";
 
             std::filesystem::create_directories(
-                save_directory);
+                map_directory);
+
+            std::filesystem::create_directories(
+                trajectory_directory);
 
             const std::filesystem::path raw_path =
-                save_directory / "raw_keyframe_map.pcd";
+                map_directory / "raw_keyframe_map.pcd";
 
-            const std::filesystem::path optimized_path =
-                save_directory / "optimized_map.pcd";
+            const std::filesystem::path optimized_map_path =
+                map_directory / "optimized_map.pcd";
 
             const std::filesystem::path refined_path =
-                save_directory / "refined_map.pcd";
+                map_directory / "refined_map.pcd";
+
+            const std::filesystem::path frontend_trajectory_path =
+                trajectory_directory / "frontend_trajectory.csv";
+
+            const std::filesystem::path pose_graph_before_trajectory_path =
+                trajectory_directory /
+                "pose_graph_before_trajectory.csv";
+
+            const std::filesystem::path optimized_trajectory_path =
+                trajectory_directory /
+                "optimized_trajectory.csv";
 
             // Binary PCD is intentionally used instead of ASCII: it is much
             // faster to write and substantially smaller for a global map.
@@ -3316,7 +3736,7 @@ private:
 
             const int optimized_result =
                 pcl::io::savePCDFileBinary(
-                    optimized_path.string(),
+                    optimized_map_path.string(),
                     *snapshot.optimized_map);
 
             const int refined_result =
@@ -3324,51 +3744,82 @@ private:
                     refined_path.string(),
                     *snapshot.refined_map);
 
+            const bool frontend_trajectory_ok =
+                SavePathCsv(
+                    frontend_path_snapshot,
+                    frontend_trajectory_path);
+
+            const bool pose_graph_before_trajectory_ok =
+                SavePathCsv(
+                    pose_graph_before_path_snapshot,
+                    pose_graph_before_trajectory_path);
+
+            const bool optimized_trajectory_ok =
+                SavePathCsv(
+                    optimized_path_snapshot,
+                    optimized_trajectory_path);
+
             if (raw_result != 0 ||
                 optimized_result != 0 ||
-                refined_result != 0)
+                refined_result != 0 ||
+                !frontend_trajectory_ok ||
+                !pose_graph_before_trajectory_ok ||
+                !optimized_trajectory_ok)
             {
                 response->success = false;
                 response->message =
-                    "PCL failed to write one or more PCD files.";
+                    "Failed to write one or more SLAM output files.";
 
                 RCLCPP_ERROR(
                     this->get_logger(),
-                    "PCD export failed | raw=%d optimized=%d refined=%d | directory=%s",
+                    "SLAM export failed | "
+                    "pcd=[raw:%d optimized:%d refined:%d] | "
+                    "trajectory=[frontend:%s before:%s optimized:%s]",
                     raw_result,
                     optimized_result,
                     refined_result,
-                    pcd_save_directory_.c_str());
+                    frontend_trajectory_ok ? "ok" : "failed",
+                    pose_graph_before_trajectory_ok ? "ok" : "failed",
+                    optimized_trajectory_ok ? "ok" : "failed");
                 return;
             }
 
             response->success = true;
+
             response->message =
-                "Saved raw_keyframe_map.pcd, optimized_map.pcd and refined_map.pcd to " +
-                save_directory.string();
+                "Saved SLAM snapshot: " +
+                snapshot_directory.string();
 
             RCLCPP_INFO(
                 this->get_logger(),
-                "PCD export SUCCESS | directory=%s | "
+                "SLAM export SUCCESS | "
+                "snapshot=%s | "
+                "maps=%s | trajectories=%s | "
                 "global_revision=%zu refined_revision=%zu | "
-                "raw_points=%zu optimized_points=%zu refined_points=%zu",
-                save_directory.string().c_str(),
+                "raw_points=%zu optimized_points=%zu refined_points=%zu | "
+                "frontend_poses=%zu before_kf_poses=%zu optimized_kf_poses=%zu",
+                snapshot_directory.string().c_str(),
+                map_directory.string().c_str(),
+                trajectory_directory.string().c_str(),
                 snapshot.global_revision,
                 snapshot.refined_revision,
                 snapshot.raw_map->size(),
                 snapshot.optimized_map->size(),
-                snapshot.refined_map->size());
+                snapshot.refined_map->size(),
+                frontend_path_snapshot.poses.size(),
+                pose_graph_before_path_snapshot.poses.size(),
+                optimized_path_snapshot.poses.size());
         }
         catch (const std::exception &exception)
         {
             response->success = false;
             response->message =
-                std::string("PCD export exception: ") +
+                std::string("SLAM export exception: ") +
                 exception.what();
 
             RCLCPP_ERROR(
                 this->get_logger(),
-                "PCD export exception: %s",
+                "SLAM export exception: %s",
                 exception.what());
         }
     }
@@ -3382,7 +3833,81 @@ public:
               "scan2local_map")
     {
         // ========================================================
-        // 1. Scan-to-LocalMap configuration
+        // 1. Sensor configuration
+        //
+        // Sensor-specific ROS data is normalized by the adapter layer:
+        //
+        //   Mid360 PointCloud2 -> Mid360s_Adapter --+
+        //                                           +-> LIDAR_FRAME
+        //   Hesai PointCloud2  -> HESAI_Adapter ----+
+        //
+        // Everything after LIDAR_FRAME is sensor-independent.
+        // ========================================================
+        lidar_type_ =
+            this->declare_parameter<std::string>(
+                "lidar_type",
+                "mid360s");
+
+        std::transform(
+            lidar_type_.begin(),
+            lidar_type_.end(),
+            lidar_type_.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(
+                    std::tolower(character));
+            });
+
+        lidar_topic_ =
+            this->declare_parameter<std::string>(
+                "lidar_topic",
+                "/livox/lidar");
+
+        imu_topic_ =
+            this->declare_parameter<std::string>(
+                "imu_topic",
+                "/livox/imu");
+
+        world_frame_ =
+            this->declare_parameter<std::string>(
+                "world_frame",
+                "world");
+
+        odom_frame_ =
+            this->declare_parameter<std::string>(
+                "odom_frame",
+                "odom");
+
+        if (lidar_type_ == "mid360s" ||
+            lidar_type_ == "mid360" ||
+            lidar_type_ == "livox_mid360")
+        {
+            lidar_type_ =
+                "mid360s";
+
+            lidar_adapter_ =
+                &mid360s_adapter_;
+        }
+        else if (lidar_type_ == "hesai")
+        {
+            lidar_adapter_ =
+                &hesai_adapter_;
+        }
+        else
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Unsupported lidar_type='%s'. "
+                "Valid values: mid360s, hesai.",
+                lidar_type_.c_str());
+
+            throw std::runtime_error(
+                "Unsupported lidar_type: " +
+                lidar_type_);
+        }
+
+        // ========================================================
+        // 2. Scan-to-LocalMap configuration
         // ========================================================
         LidarRegistrationConfig
             registration_config;
@@ -3390,14 +3915,27 @@ public:
         LocalMapConfig
             local_map_config;
 
+        const int configured_local_map_max_frames =
+            this->declare_parameter<int>(
+                "local_map_max_frames",
+                10);
+
         local_map_config.max_frames =
-            10;
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_local_map_max_frames));
 
         local_map_config.voxel_leaf_size =
-            0.30f;
+            static_cast<float>(
+                std::max(
+                    0.01,
+                    this->declare_parameter<double>(
+                        "local_map_voxel_leaf_size",
+                        0.30)));
 
         // ========================================================
-        // 2. Create Scan-to-LocalMap module
+        // 3. Create Scan-to-LocalMap module
         // ========================================================
         scan_to_local_map_ =
             std::make_unique<
@@ -3406,26 +3944,31 @@ public:
                 local_map_config);
 
         // ========================================================
-        // 2.1 PCD export configuration.
+        // 2.1 SLAM output export configuration.
         //
-        // ROS parameters do not expand '~', so build an absolute default
-        // directory from HOME.  It can still be overridden from launch:
-        //
-        //     pcd_save_directory:=/some/other/path
+        // fr_slam.launch.py sets FR_SLAM_OUTPUT_DIR and also passes explicit
+        // map / trajectory directories.  These defaults are only fallbacks
+        // for running the executable directly.
         // ========================================================
-        const char *home_directory =
-            std::getenv("HOME");
+        const char *output_directory_environment =
+            std::getenv("FR_SLAM_OUTPUT_DIR");
 
-        const std::string default_pcd_save_directory =
-            home_directory != nullptr
-                ? std::string(home_directory) +
-                      "/ros2_ws/src/fr_slam/output/maps"
-                : std::string("/tmp/fr_slam_output/maps");
+        const std::filesystem::path default_output_directory =
+            output_directory_environment != nullptr
+                ? std::filesystem::path(
+                      output_directory_environment)
+                : std::filesystem::temp_directory_path() /
+                      "fr_slam";
 
-        pcd_save_directory_ =
+        const std::string default_save_root_directory =
+            (default_output_directory /
+             "saves")
+                .string();
+
+        save_root_directory_ =
             this->declare_parameter<std::string>(
-                "pcd_save_directory",
-                default_pcd_save_directory);
+                "save_root_directory",
+                default_save_root_directory);
 
         save_maps_service_ =
             this->create_service<std_srvs::srv::Trigger>(
@@ -3462,19 +4005,250 @@ public:
                     50,
                     configured_imu_qos_depth));
 
-        preprocessor_enable_sor_ =
+        const int configured_initialization_sample_count =
+            this->declare_parameter<int>(
+                "imu_initialization_sample_count",
+                200);
+
+        initialization_sample_count_ =
+            static_cast<std::size_t>(
+                std::max(
+                    20,
+                    configured_initialization_sample_count));
+
+        imu_history_duration_ =
+            std::max(
+                0.10,
+                this->declare_parameter<double>(
+                    "imu_history_duration",
+                    0.50));
+
+        // ========================================================
+        // 3.1 LiDAR preprocessing parameters from YAML.
+        // ========================================================
+        PreprocessorConfig
+            preprocessor_config;
+
+        preprocessor_config.range_min =
+            this->declare_parameter<double>(
+                "preprocessor_range_min",
+                1.0);
+
+        preprocessor_config.range_max =
+            this->declare_parameter<double>(
+                "preprocessor_range_max",
+                30.0);
+
+        preprocessor_config.enable_ROI =
             this->declare_parameter<bool>(
-                "preprocessor_enable_sor",
-                false);
+                "preprocessor_enable_range_filter",
+                true);
+
+        preprocessor_config.enable_passthrough =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_passthrough",
+                true);
+
+        preprocessor_config.ROI_min_x =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_x",
+                -30.0);
+
+        preprocessor_config.ROI_max_x =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_x",
+                30.0);
+
+        preprocessor_config.ROI_min_y =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_y",
+                -15.0);
+
+        preprocessor_config.ROI_max_y =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_y",
+                15.0);
+
+        preprocessor_config.ROI_min_z =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_z",
+                -2.0);
+
+        preprocessor_config.ROI_max_z =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_z",
+                10.0);
+
+        preprocessor_config.enable_cropbox =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_cropbox",
+                true);
+
+        preprocessor_config.cropbox_min_x =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_x",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_x =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_x",
+                    0.15));
+
+        preprocessor_config.cropbox_min_y =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_y",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_y =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_y",
+                    0.15));
+
+        preprocessor_config.cropbox_min_z =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_z",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_z =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_z",
+                    0.15));
+
+        preprocessor_config.enable_voxel =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_voxel",
+                true);
+
+        preprocessor_config.voxel_leaf_size =
+            static_cast<float>(
+                std::max(
+                    0.01,
+                    this->declare_parameter<double>(
+                        "preprocessor_voxel_leaf_size",
+                        0.30)));
+
+        const std::int64_t configured_voxel_min_points =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_voxel_min_points",
+                1);
+
+        preprocessor_config.voxel_min_points =
+            static_cast<unsigned int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_voxel_min_points));
+
+        const std::int64_t configured_sor_mean_k =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_sor_mean_k",
+                50);
+
+        preprocessor_config.sor_mean_k =
+            static_cast<int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_sor_mean_k));
+
+        preprocessor_config.sor_stddev_mul_thresh =
+            std::max(
+                0.01,
+                this->declare_parameter<double>(
+                    "preprocessor_sor_stddev_mul_thresh",
+                    1.0));
+
+        preprocessor_config.ror_RadiusSearch =
+            std::max(
+                0.01,
+                this->declare_parameter<double>(
+                    "preprocessor_ror_radius",
+                    0.30));
+
+        const std::int64_t configured_ror_min_neighbors =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_ror_min_neighbors",
+                1);
+
+        preprocessor_config.ror_MinNeighborsInRadius =
+            static_cast<int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_ror_min_neighbors));
+
+        preprocessor_.SetConfig(
+            preprocessor_config);
+
+        preprocessor_sor_mode_ =
+            this->declare_parameter<std::string>(
+                "preprocessor_sor_mode",
+                "always");
+
+        std::transform(
+            preprocessor_sor_mode_.begin(),
+            preprocessor_sor_mode_.end(),
+            preprocessor_sor_mode_.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(
+                    std::tolower(character));
+            });
+
+        PreprocessorSorMode preprocessor_sor_mode =
+            PreprocessorSorMode::ALWAYS;
+
+        if (preprocessor_sor_mode_ ==
+            "off")
+        {
+            preprocessor_sor_mode =
+                PreprocessorSorMode::OFF;
+        }
+        else if (preprocessor_sor_mode_ ==
+                 "adaptive")
+        {
+            preprocessor_sor_mode =
+                PreprocessorSorMode::ADAPTIVE;
+        }
+        else if (preprocessor_sor_mode_ !=
+                 "always")
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Unknown preprocessor_sor_mode='%s'. "
+                "Falling back to 'always'. Valid modes: always, off, adaptive.",
+                preprocessor_sor_mode_.c_str());
+
+            preprocessor_sor_mode_ =
+                "always";
+
+            preprocessor_sor_mode =
+                PreprocessorSorMode::ALWAYS;
+        }
+
+        const int configured_sor_adaptive_max_points =
+            this->declare_parameter<int>(
+                "preprocessor_sor_adaptive_max_points",
+                6000);
+
+        preprocessor_sor_adaptive_max_points_ =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_sor_adaptive_max_points));
 
         preprocessor_enable_ror_ =
             this->declare_parameter<bool>(
                 "preprocessor_enable_ror",
                 false);
 
-        preprocessor_.SetOutlierFiltersEnabled(
-            preprocessor_enable_sor_,
-            preprocessor_enable_ror_);
+        preprocessor_.SetOutlierFilterPolicy(
+            preprocessor_sor_mode,
+            preprocessor_enable_ror_,
+            preprocessor_sor_adaptive_max_points_);
 
         // ========================================================
         // 4. Deskew extrinsic
@@ -3521,7 +4295,7 @@ public:
         imu_sub_ =
             this->create_subscription<
                 sensor_msgs::msg::Imu>(
-                "/livox/imu",
+                imu_topic_,
                 imu_qos,
                 std::bind(
                     &lidar_registration_scan2localmap::
@@ -3542,7 +4316,7 @@ public:
         lidar_sub_ =
             this->create_subscription<
                 sensor_msgs::msg::PointCloud2>(
-                "/livox/lidar",
+                lidar_topic_,
                 rclcpp::SensorDataQoS(),
                 std::bind(
                     &lidar_registration_scan2localmap::
@@ -3649,6 +4423,12 @@ public:
         path_msg_.header.frame_id =
             odom_frame_;
 
+        pose_graph_before_path_msg_.header.frame_id =
+            world_frame_;
+
+        optimized_path_msg_.header.frame_id =
+            world_frame_;
+
         // ========================================================
         // 9. Start worker
         // ========================================================
@@ -3671,11 +4451,14 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "IMU   : /livox/imu");
+            "LiDAR : type=%s topic=%s",
+            lidar_type_.c_str(),
+            lidar_topic_.c_str());
 
         RCLCPP_INFO(
             this->get_logger(),
-            "LiDAR : /livox/lidar");
+            "IMU   : topic=%s",
+            imu_topic_.c_str());
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -3767,8 +4550,12 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "SavePCD  : ros2 service call /save_slam_maps std_srvs/srv/Trigger {} -> %s",
-            pcd_save_directory_.c_str());
+            "SaveRoot : %s",
+            save_root_directory_.c_str());
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "SaveCmd  : ros2 service call /save_slam_maps std_srvs/srv/Trigger {}");
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -3802,10 +4589,21 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "Preprocessor SOR: %s | ROR: %s",
-            preprocessor_enable_sor_
-                ? "ON"
-                : "OFF",
+            "IMU init samples: %zu | history=%.3f s",
+            initialization_sample_count_,
+            imu_history_duration_);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Frames: world=%s odom=%s",
+            world_frame_.c_str(),
+            odom_frame_.c_str());
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Preprocessor SOR mode: %s | adaptive_max_points=%zu | ROR: %s",
+            preprocessor_sor_mode_.c_str(),
+            preprocessor_sor_adaptive_max_points_,
             preprocessor_enable_ror_
                 ? "ON"
                 : "OFF");

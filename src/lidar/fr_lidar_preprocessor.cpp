@@ -1,6 +1,7 @@
 #include "fr_slam/lidar/fr_lidar_preprocessor.hpp"
 #include "fr_slam/frontend/fr_ground_input_bridge.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iostream>
@@ -11,13 +12,11 @@
 
 namespace
 {
-    using PreprocessorClock = std::chrono::steady_clock;
-
     thread_local PreprocessorTiming g_last_preprocessor_timing;
 
     double ElapsedMilliseconds(
-        const PreprocessorClock::time_point &begin,
-        const PreprocessorClock::time_point &end)
+        const std::chrono::steady_clock::time_point &begin,
+        const std::chrono::steady_clock::time_point &end)
     {
         return std::chrono::duration<double, std::milli>(
                    end - begin)
@@ -32,6 +31,17 @@ namespace
 }
 
 // ============================================================================
+// Runtime configuration used by the ROS node.
+// ============================================================================
+
+void PreProcessor::SetConfig(
+    const PreprocessorConfig &config)
+{
+    config_ =
+        config;
+}
+
+// ============================================================================
 // Runtime switches used by the ROS node.
 // ============================================================================
 
@@ -39,11 +49,73 @@ void PreProcessor::SetOutlierFiltersEnabled(
     bool enable_sor,
     bool enable_ror)
 {
+    SetOutlierFilterPolicy(
+        enable_sor
+            ? PreprocessorSorMode::ALWAYS
+            : PreprocessorSorMode::OFF,
+        enable_ror,
+        sor_adaptive_max_points_);
+}
+
+void PreProcessor::SetOutlierFilterPolicy(
+    PreprocessorSorMode sor_mode,
+    bool enable_ror,
+    std::size_t sor_adaptive_max_points)
+{
+    sor_mode_ =
+        sor_mode;
+
+    sor_adaptive_max_points_ =
+        std::max<std::size_t>(
+            1,
+            sor_adaptive_max_points);
+
+    process_enable_ror_ =
+        enable_ror;
+
+    // Keep the standalone SOR()/ROR() functions consistent with the runtime
+    // policy.  ADAPTIVE still enables SOR internally; Process() decides on a
+    // frame-by-frame basis whether the expensive SOR call is actually made.
     config_.enable_SOR =
-        enable_sor;
+        sor_mode_ !=
+        PreprocessorSorMode::OFF;
 
     config_.enable_ROR =
-        enable_ror;
+        process_enable_ror_;
+}
+
+bool PreProcessor::ShouldRunSor(
+    std::size_t after_voxel_points) const
+{
+    if (!config_.enable_SOR)
+    {
+        return false;
+    }
+
+    if (sor_mode_ ==
+        PreprocessorSorMode::ALWAYS)
+    {
+        return true;
+    }
+
+    if (sor_mode_ ==
+        PreprocessorSorMode::OFF)
+    {
+        return false;
+    }
+
+    return after_voxel_points <=
+           sor_adaptive_max_points_;
+}
+
+PreprocessorSorMode PreProcessor::GetSorMode() const
+{
+    return sor_mode_;
+}
+
+std::size_t PreProcessor::GetSorAdaptiveMaxPoints() const
+{
+    return sor_adaptive_max_points_;
 }
 
 const PreprocessorTiming &PreProcessor::GetLastTiming() const
@@ -111,6 +183,12 @@ LIDAR_FRAME PreProcessor::Process(
 {
     ResetPreprocessorTiming();
 
+    if (lidar_frame.cloud)
+    {
+        g_last_preprocessor_timing.input_points =
+            lidar_frame.cloud->size();
+    }
+
     // Never allow an older Basic cloud to survive a failed frame.
     fr_slam::ClearGroundIcpDenseInput();
 
@@ -120,8 +198,8 @@ LIDAR_FRAME PreProcessor::Process(
 
     LIDAR_FRAME deskewed_frame;
 
-    const PreprocessorClock::time_point deskew_begin =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point deskew_begin =
+        std::chrono::steady_clock::now();
 
     const bool deskew_ok =
         Deskew(
@@ -130,8 +208,8 @@ LIDAR_FRAME PreProcessor::Process(
             deskewed_frame,
             use_translation);
 
-    const PreprocessorClock::time_point deskew_end =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point deskew_end =
+        std::chrono::steady_clock::now();
 
     g_last_preprocessor_timing.deskew_ms =
         ElapsedMilliseconds(
@@ -154,15 +232,15 @@ LIDAR_FRAME PreProcessor::Process(
     // Ground ICP bridge before the registration branch is downsampled.
     // ============================================================
 
-    const PreprocessorClock::time_point basic_begin =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point basic_begin =
+        std::chrono::steady_clock::now();
 
     LIDAR_FRAME clean_frame =
         preprocess(
             deskewed_frame);
 
-    const PreprocessorClock::time_point basic_end =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point basic_end =
+        std::chrono::steady_clock::now();
 
     g_last_preprocessor_timing.basic_ms =
         ElapsedMilliseconds(
@@ -189,15 +267,15 @@ LIDAR_FRAME PreProcessor::Process(
     // 3. Registration VoxelGrid
     // ============================================================
 
-    const PreprocessorClock::time_point voxel_begin =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point voxel_begin =
+        std::chrono::steady_clock::now();
 
     LIDAR_FRAME voxel_frame =
         VoxelGrid(
             clean_frame);
 
-    const PreprocessorClock::time_point voxel_end =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point voxel_end =
+        std::chrono::steady_clock::now();
 
     g_last_preprocessor_timing.voxel_ms =
         ElapsedMilliseconds(
@@ -222,22 +300,43 @@ LIDAR_FRAME PreProcessor::Process(
 
     // ============================================================
     // 4. Statistical outlier removal
+    //
+    // Runtime modes:
+    //
+    // ALWAYS   -> run SOR every frame.
+    // OFF      -> skip SOR every frame.
+    // ADAPTIVE -> run SOR only when the post-voxel cloud is not larger than
+    //             sor_adaptive_max_points_.  Dense 360-degree scans can
+    //             therefore skip the expensive KNN statistics pass.
     // ============================================================
 
-    const PreprocessorClock::time_point sor_begin =
-        PreprocessorClock::now();
+    const bool run_sor =
+        ShouldRunSor(
+            voxel_frame.cloud->size());
 
     LIDAR_FRAME sor_frame =
-        SOR(
-            voxel_frame);
+        voxel_frame;
 
-    const PreprocessorClock::time_point sor_end =
-        PreprocessorClock::now();
+    if (run_sor)
+    {
+        const std::chrono::steady_clock::time_point sor_begin =
+            std::chrono::steady_clock::now();
 
-    g_last_preprocessor_timing.sor_ms =
-        ElapsedMilliseconds(
-            sor_begin,
-            sor_end);
+        sor_frame =
+            SOR(
+                voxel_frame);
+
+        const std::chrono::steady_clock::time_point sor_end =
+            std::chrono::steady_clock::now();
+
+        g_last_preprocessor_timing.sor_ms =
+            ElapsedMilliseconds(
+                sor_begin,
+                sor_end);
+    }
+
+    g_last_preprocessor_timing.sor_executed =
+        run_sor;
 
     if (!sor_frame.cloud ||
         sor_frame.cloud->empty())
@@ -246,30 +345,36 @@ LIDAR_FRAME PreProcessor::Process(
 
         std::cerr
             << "PreProcessor::Process(): "
-            << "cloud is empty after SOR."
+            << "cloud is empty after SOR stage."
             << std::endl;
 
         return LIDAR_FRAME();
     }
 
+    g_last_preprocessor_timing.after_sor_points =
+        sor_frame.cloud->size();
+
     // ============================================================
     // 5. Radius outlier removal
     // ============================================================
 
-    const PreprocessorClock::time_point ror_begin =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point ror_begin =
+        std::chrono::steady_clock::now();
 
     LIDAR_FRAME ror_frame =
         ROR(
             sor_frame);
 
-    const PreprocessorClock::time_point ror_end =
-        PreprocessorClock::now();
+    const std::chrono::steady_clock::time_point ror_end =
+        std::chrono::steady_clock::now();
 
     g_last_preprocessor_timing.ror_ms =
         ElapsedMilliseconds(
             ror_begin,
             ror_end);
+
+    g_last_preprocessor_timing.ror_executed =
+        config_.enable_ROR;
 
     if (!ror_frame.cloud ||
         ror_frame.cloud->empty())
@@ -283,6 +388,9 @@ LIDAR_FRAME PreProcessor::Process(
 
         return LIDAR_FRAME();
     }
+
+    g_last_preprocessor_timing.after_ror_points =
+        ror_frame.cloud->size();
 
     return ror_frame;
 }

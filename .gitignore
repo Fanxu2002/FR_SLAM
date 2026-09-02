@@ -23,3 +23,5 @@ cmake_install.cmake
 *.swp
 *~
 .DS_Store
+output/
+*.pcd

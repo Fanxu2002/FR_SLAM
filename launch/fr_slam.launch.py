@@ -1,5 +1,4 @@
 from launch import LaunchDescription
-
 from launch_ros.actions import Node
 
 from ament_index_python.packages import get_package_share_directory
@@ -13,7 +12,7 @@ def generate_launch_description():
     #
     # After colcon build:
     #
-    #   ~/ros2_ws/install/fr_slam/share/fr_slam
+    #   <workspace>/install/fr_slam/share/fr_slam
     #
     # ============================================================
     package_share_directory = get_package_share_directory(
@@ -21,16 +20,28 @@ def generate_launch_description():
     )
 
     # ============================================================
+    # Workspace directory
+    #
+    # package_share_directory:
+    #   <workspace>/install/fr_slam/share/fr_slam
+    #
+    # workspace_directory:
+    #   <workspace>
+    #
+    # No user-specific absolute path is hard-coded here.
+    # ============================================================
+    workspace_directory = os.path.abspath(
+        os.path.join(
+            package_share_directory,
+            '..',
+            '..',
+            '..',
+            '..'
+        )
+    )
+
+    # ============================================================
     # RViz config
-    #
-    # Source:
-    #
-    #   ~/ros2_ws/src/fr_slam/config/FR_SLAM.rviz
-    #
-    # Installed:
-    #
-    #   ~/ros2_ws/install/fr_slam/share/fr_slam/config/FR_SLAM.rviz
-    #
     # ============================================================
     rviz_config_path = os.path.join(
         package_share_directory,
@@ -39,26 +50,30 @@ def generate_launch_description():
     )
 
     # ============================================================
-    # FR-SLAM log directory
+    # FR-SLAM YAML configuration
     # ============================================================
-    log_directory = os.path.expanduser(
-        '~/ros2_ws/log/fr_slam'
+    slam_config_path = os.path.join(
+        package_share_directory,
+        'config',
+        'fr_slam.yaml'
     )
+
     # ============================================================
     # FR-SLAM output directory
+    #
+    #   <workspace>/src/fr_slam/output
+    #
     # ============================================================
-    output_directory = os.path.expanduser(
-        '~/ros2_ws/src/fr_slam/output'
+    output_directory = os.path.join(
+        workspace_directory,
+        'src',
+        'fr_slam',
+        'output'
     )
 
-    maps_directory = os.path.join(
+    saves_directory = os.path.join(
         output_directory,
-        'maps'
-    )
-
-    trajectory_directory = os.path.join(
-        output_directory,
-        'trajectory'
+        'saves'
     )
 
     loop_directory = os.path.join(
@@ -71,13 +86,33 @@ def generate_launch_description():
         'diagnostics'
     )
 
-    os.makedirs(
-        maps_directory,
-        exist_ok=True
+    frontend_diagnostics_directory = os.path.join(
+        diagnostics_directory,
+        'frontend'
     )
 
+    backend_diagnostics_directory = os.path.join(
+        diagnostics_directory,
+        'backend'
+    )
+
+    # ============================================================
+    # FR-SLAM log directory
+    #
+    #   <workspace>/log/fr_slam
+    #
+    # ============================================================
+    log_directory = os.path.join(
+        workspace_directory,
+        'log',
+        'fr_slam'
+    )
+
+    # ============================================================
+    # Create runtime directories
+    # ============================================================
     os.makedirs(
-        trajectory_directory,
+        saves_directory,
         exist_ok=True
     )
 
@@ -87,7 +122,12 @@ def generate_launch_description():
     )
 
     os.makedirs(
-        diagnostics_directory,
+        frontend_diagnostics_directory,
+        exist_ok=True
+    )
+
+    os.makedirs(
+        backend_diagnostics_directory,
         exist_ok=True
     )
 
@@ -96,49 +136,29 @@ def generate_launch_description():
         exist_ok=True
     )
 
-
-    # ============================================================
-    # PCD map output directory
-    #
-    #   ~/ros2_ws/src/fr_slam/Map
-    #
-    # This path is passed to the C++ node through the ROS parameter
-    # "pcd_save_directory".
-    # ============================================================
-    map_directory = os.path.expanduser(
-        '~/ros2_ws/src/fr_slam/Map'
-    )
-
-    os.makedirs(
-        map_directory,
-        exist_ok=True
-    )
-
     # ============================================================
     # FR-SLAM node
     # ============================================================
     slam_node = Node(
         package='fr_slam',
-        executable='lidar_registration_scan2localmap',
+        executable='fr_slam_node',
         name='fr_slam',
 
         output='both',
 
-        parameters=[
-            {
-                'preprocessor_enable_sor': True,
-                'preprocessor_enable_ror': True,
-                'max_lidar_queue_size': 3,
-                'pcd_save_directory': map_directory
-            }
-        ],
+    parameters=[
+        slam_config_path,
+        {
+            'save_root_directory': saves_directory
+        }
+    ],
 
         emulate_tty=True,
 
-    additional_env={
-        'ROS_LOG_DIR': log_directory,
-        'FR_SLAM_OUTPUT_DIR': output_directory
-    }
+        additional_env={
+            'ROS_LOG_DIR': log_directory,
+            'FR_SLAM_OUTPUT_DIR': output_directory
+        }
     )
 
     # ============================================================
