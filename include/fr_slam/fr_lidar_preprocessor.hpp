@@ -18,7 +18,7 @@
 #include "fr_slam/fr_point_types.hpp"
 #include "fr_slam/fr_lidar_frame.hpp"
 #include "fr_slam/fr_imu_types.hpp"
-#include "fr_slam/fr_lidar_deskewer.hpp"
+#include "fr_slam/fr_lidar_deskew.hpp"
 #include "fr_slam/fr_PreprocessorConfig.hpp"
 
 

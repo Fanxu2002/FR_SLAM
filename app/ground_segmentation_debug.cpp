@@ -3,7 +3,7 @@
 #include "fr_slam/fr_ground_segmenter.hpp"
 #include "fr_slam/fr_lidar_frame.hpp"
 #include "fr_slam/fr_point_types.hpp"
-#include "fr_slam/mid360s_adapter.hpp"
+#include "fr_slam/fr_mid360s_adapter.hpp"
 
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <visualization_msgs/msg/marker.hpp>

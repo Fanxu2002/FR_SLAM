@@ -1,4 +1,4 @@
-#include "fr_slam/fr_ground_icp_input_bridge.hpp"
+#include "fr_slam/fr_ground_input_bridge.hpp"
 
 #include <utility>
 

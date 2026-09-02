@@ -3,8 +3,8 @@
 #include "fr_slam/fr_point_types.hpp"
 #include "fr_slam/fr_lidar_frame.hpp"
 
-#include "fr_slam/mid360s_adapter.hpp"
-#include "fr_slam/imu_adapter.hpp"
+#include "fr_slam/fr_mid360s_adapter.hpp"
+#include "fr_slam/fr_imu_adapter.hpp"
 
 #include "fr_slam/fr_imu_buffer.hpp"
 #include "fr_slam/fr_imu_initializer.hpp"

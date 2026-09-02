@@ -1,4 +1,4 @@
-#include "fr_slam/imu_adapter.hpp"
+#include "fr_slam/fr_imu_adapter.hpp"
 #include "fr_slam/fr_imu_buffer.hpp"
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>

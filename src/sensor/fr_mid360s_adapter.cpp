@@ -1,4 +1,4 @@
-#include "fr_slam/mid360s_adapter.hpp"
+#include "fr_slam/fr_mid360s_adapter.hpp"
 #include <pcl_conversions/pcl_conversions.h>
 #include <cstdint>
 #include <limits>

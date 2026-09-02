@@ -44,6 +44,52 @@ def generate_launch_description():
     log_directory = os.path.expanduser(
         '~/ros2_ws/log/fr_slam'
     )
+    # ============================================================
+    # FR-SLAM output directory
+    # ============================================================
+    output_directory = os.path.expanduser(
+        '~/ros2_ws/src/fr_slam/output'
+    )
+
+    maps_directory = os.path.join(
+        output_directory,
+        'maps'
+    )
+
+    trajectory_directory = os.path.join(
+        output_directory,
+        'trajectory'
+    )
+
+    loop_directory = os.path.join(
+        output_directory,
+        'loop'
+    )
+
+    diagnostics_directory = os.path.join(
+        output_directory,
+        'diagnostics'
+    )
+
+    os.makedirs(
+        maps_directory,
+        exist_ok=True
+    )
+
+    os.makedirs(
+        trajectory_directory,
+        exist_ok=True
+    )
+
+    os.makedirs(
+        loop_directory,
+        exist_ok=True
+    )
+
+    os.makedirs(
+        diagnostics_directory,
+        exist_ok=True
+    )
 
     os.makedirs(
         log_directory,
@@ -89,10 +135,10 @@ def generate_launch_description():
 
         emulate_tty=True,
 
-        additional_env={
-            'ROS_LOG_DIR': log_directory,
-            'FR_SLAM_MAP_DIR': map_directory
-        }
+    additional_env={
+        'ROS_LOG_DIR': log_directory,
+        'FR_SLAM_OUTPUT_DIR': output_directory
+    }
     )
 
     # ============================================================

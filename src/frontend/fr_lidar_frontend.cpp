@@ -1,6 +1,6 @@
 #include "fr_slam/fr_registration_scan2localmap.hpp"
 #include "fr_slam/fr_ground_segmenter.hpp"
-#include "fr_slam/fr_ground_icp_input_bridge.hpp"
+#include "fr_slam/fr_ground_input_bridge.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -37,17 +37,16 @@
 
 namespace
 {
-
     const rclcpp::Logger kRecoveryLogger =
         rclcpp::get_logger("scan2local_map.recovery");
 
     const rclcpp::Logger kTimingLogger =
         rclcpp::get_logger("scan2local_map.timing");
 
-    std::filesystem::path FrontendDiagnosticDirectory()
+    std::filesystem::path FrSlamOutputDirectory()
     {
         const char *configured_directory =
-            std::getenv("FR_SLAM_MAP_DIR");
+            std::getenv("FR_SLAM_OUTPUT_DIR");
 
         if (configured_directory != nullptr &&
             configured_directory[0] != '\0')
@@ -67,11 +66,17 @@ namespace
                    "ros2_ws" /
                    "src" /
                    "fr_slam" /
-                   "Map";
+                   "output";
         }
 
         return std::filesystem::path(
-            "/tmp/fr_slam_maps");
+            "/tmp/fr_slam_output");
+    }
+
+    std::filesystem::path FrontendLoopDirectory()
+    {
+        return FrSlamOutputDirectory() /
+               "loop";
     }
 
     Eigen::Vector3d FrontendRotationToRpy(
@@ -127,581 +132,7 @@ namespace
             yaw);
     }
 
-    bool WriteFrontendZDriftDiagnostic(
-        bool reset_file,
-        std::size_t keyframe_id,
-        long long previous_keyframe_id,
-        double timestamp,
-        const Eigen::Isometry3d &T_WL_current,
-        const Eigen::Isometry3d *T_WL_previous,
-        const LidarRegistrationResult &registration_result)
-    {
-        if (!T_WL_current.matrix().allFinite())
-        {
-            return false;
-        }
-
-        constexpr double kRadToDeg =
-            180.0 /
-            3.14159265358979323846;
-
-        try
-        {
-            const std::filesystem::path directory =
-                FrontendDiagnosticDirectory();
-
-            std::filesystem::create_directories(
-                directory);
-
-            const std::filesystem::path csv_path =
-                directory /
-                "frontend_z_drift.csv";
-
-            std::ios_base::openmode mode =
-                std::ios::out;
-
-            if (reset_file)
-            {
-                mode |=
-                    std::ios::trunc;
-            }
-            else
-            {
-                mode |=
-                    std::ios::app;
-            }
-
-            std::ofstream file(
-                csv_path,
-                mode);
-
-            if (!file.is_open())
-            {
-                return false;
-            }
-
-            file
-                << std::fixed
-                << std::setprecision(9);
-
-            if (reset_file)
-            {
-                file
-                    << "kf_id,prev_kf,timestamp,"
-                    << "world_x,world_y,world_z,"
-                    << "world_roll_deg,world_pitch_deg,world_yaw_deg,"
-                    << "world_dx,world_dy,world_dz,"
-                    << "horizontal_step_m,"
-                    << "local_dx,local_dy,local_dz,"
-                    << "local_translation_m,"
-                    << "local_roll_deg,local_pitch_deg,local_yaw_deg,"
-                    << "effective_world_slope_deg,"
-                    << "icp_correspondences,icp_rmse\n";
-            }
-
-            Eigen::Vector3d world_delta =
-                Eigen::Vector3d::Zero();
-
-            Eigen::Isometry3d T_previous_current =
-                Eigen::Isometry3d::Identity();
-
-            if (T_WL_previous != nullptr)
-            {
-                if (!T_WL_previous->matrix().allFinite())
-                {
-                    return false;
-                }
-
-                world_delta =
-                    T_WL_current.translation() -
-                    T_WL_previous->translation();
-
-                T_previous_current =
-                    T_WL_previous->inverse() *
-                    T_WL_current;
-            }
-
-            const Eigen::Vector3d world_rpy =
-                FrontendRotationToRpy(
-                    T_WL_current.rotation());
-
-            const Eigen::Vector3d local_rpy =
-                FrontendRotationToRpy(
-                    T_previous_current.rotation());
-
-            const Eigen::Vector3d local_translation =
-                T_previous_current.translation();
-
-            const double horizontal_step =
-                std::hypot(
-                    world_delta.x(),
-                    world_delta.y());
-
-            double effective_world_slope_deg =
-                0.0;
-
-            if (T_WL_previous != nullptr &&
-                (horizontal_step > 1.0e-9 ||
-                 std::abs(world_delta.z()) > 1.0e-9))
-            {
-                effective_world_slope_deg =
-                    std::atan2(
-                        world_delta.z(),
-                        horizontal_step) *
-                    kRadToDeg;
-            }
-
-            file
-                << keyframe_id << ","
-                << previous_keyframe_id << ","
-                << timestamp << ","
-                << T_WL_current.translation().x() << ","
-                << T_WL_current.translation().y() << ","
-                << T_WL_current.translation().z() << ","
-                << world_rpy.x() * kRadToDeg << ","
-                << world_rpy.y() * kRadToDeg << ","
-                << world_rpy.z() * kRadToDeg << ","
-                << world_delta.x() << ","
-                << world_delta.y() << ","
-                << world_delta.z() << ","
-                << horizontal_step << ","
-                << local_translation.x() << ","
-                << local_translation.y() << ","
-                << local_translation.z() << ","
-                << local_translation.norm() << ","
-                << local_rpy.x() * kRadToDeg << ","
-                << local_rpy.y() * kRadToDeg << ","
-                << local_rpy.z() * kRadToDeg << ","
-                << effective_world_slope_deg << ","
-                << registration_result.correspondences << ","
-                << registration_result.rmse
-                << "\n";
-
-            return true;
-        }
-        catch (const std::exception &)
-        {
-            return false;
-        }
-    }
-
-
-
     // ========================================================================
-    // FR_Z_DECOMP_V11_RUNTIME
-    //
-    // Frontend World-Z decomposition diagnostic.
-    //
-    // For every FINAL ACCEPTED frontend pose pair:
-    //
-    //     T_previous_current = T_WL_previous^-1 * T_WL_current
-    //
-    // with local translation t = [dx dy dz]^T and previous world rotation R,
-    // the exact World-Z increment is:
-    //
-    //     dZ_world = R(2,0) * dx
-    //              + R(2,1) * dy
-    //              + R(2,2) * dz
-    //
-    // Under the existing ZYX convention:
-    //
-    //     R(2,0) = -sin(pitch)
-    //     R(2,1) =  cos(pitch) * sin(roll)
-    //     R(2,2) =  cos(pitch) * cos(roll)
-    //
-    // so the three terms are reported as:
-    //
-    //     pitch contribution
-    //     roll contribution
-    //     local-z contribution
-    //
-    // IMPORTANT:
-    //   * Ground refinement has already finished before this diagnostic runs.
-    //   * The final frontend Quality Gate has already passed.
-    //   * Keyframe/Submap updates have already succeeded.
-    //   * Rejected/uncommitted poses are NEVER accumulated.
-    //   * No header/ABI change is required; runtime state is kept in this .cpp.
-    // ========================================================================
-
-    const rclcpp::Logger kWorldZDecompositionLogger =
-        rclcpp::get_logger("scan2local_map.z_decomposition");
-
-    struct WorldZDecompositionRuntime
-    {
-        bool initialized = false;
-
-        std::size_t accepted_steps = 0;
-
-        double start_timestamp =
-            std::numeric_limits<double>::quiet_NaN();
-
-        double previous_timestamp =
-            std::numeric_limits<double>::quiet_NaN();
-
-        double initial_world_z = 0.0;
-
-        double pitch_contribution_m = 0.0;
-        double roll_contribution_m = 0.0;
-        double local_z_contribution_m = 0.0;
-        double world_z_m = 0.0;
-
-        double maximum_absolute_step_closure_error_m = 0.0;
-    };
-
-    std::mutex &WorldZDecompositionRuntimeMutex()
-    {
-        static std::mutex mutex;
-        return mutex;
-    }
-
-    std::unordered_map<
-        const RegistrationScan2LocalMap *,
-        WorldZDecompositionRuntime> &
-    WorldZDecompositionRuntimeMap()
-    {
-        static std::unordered_map<
-            const RegistrationScan2LocalMap *,
-            WorldZDecompositionRuntime>
-            runtime_map;
-
-        return runtime_map;
-    }
-
-    std::filesystem::path WorldZDecompositionCsvPath()
-    {
-        return
-            FrontendDiagnosticDirectory() /
-            "frontend_world_z_decomposition.csv";
-    }
-
-    void ClearWorldZDecompositionRuntime(
-        const RegistrationScan2LocalMap *owner)
-    {
-        if (owner == nullptr)
-        {
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(
-            WorldZDecompositionRuntimeMutex());
-
-        WorldZDecompositionRuntimeMap().erase(owner);
-    }
-
-    void RemoveWorldZDecompositionRuntime(
-        const RegistrationScan2LocalMap *owner)
-    {
-        ClearWorldZDecompositionRuntime(owner);
-    }
-
-    bool ResetWorldZDecompositionRuntime(
-        const RegistrationScan2LocalMap *owner,
-        double timestamp,
-        const Eigen::Isometry3d &T_WL_initial)
-    {
-        if (owner == nullptr ||
-            !std::isfinite(timestamp) ||
-            !T_WL_initial.matrix().allFinite())
-        {
-            return false;
-        }
-
-        std::lock_guard<std::mutex> lock(
-            WorldZDecompositionRuntimeMutex());
-
-        WorldZDecompositionRuntime runtime;
-        runtime.initialized = true;
-        runtime.start_timestamp = timestamp;
-        runtime.previous_timestamp = timestamp;
-        runtime.initial_world_z =
-            T_WL_initial.translation().z();
-
-        WorldZDecompositionRuntimeMap()[owner] =
-            runtime;
-
-        try
-        {
-            const std::filesystem::path directory =
-                FrontendDiagnosticDirectory();
-
-            std::filesystem::create_directories(
-                directory);
-
-            std::ofstream file(
-                WorldZDecompositionCsvPath(),
-                std::ios::out |
-                    std::ios::trunc);
-
-            if (!file.is_open())
-            {
-                return false;
-            }
-
-            file
-                << std::fixed
-                << std::setprecision(9);
-
-            file
-                << "accepted_step,timestamp,dt_from_previous_s,"
-                << "previous_world_z,current_world_z,"
-                << "previous_roll_deg,previous_pitch_deg,previous_yaw_deg,"
-                << "local_dx,local_dy,local_dz,"
-                << "pitch_step_m,roll_step_m,local_z_step_m,"
-                << "world_z_step_m,reconstructed_step_m,step_closure_error_m,"
-                << "cumulative_pitch_m,cumulative_roll_m,cumulative_local_z_m,"
-                << "cumulative_world_z_m,cumulative_sum_m,cumulative_closure_error_m,"
-                << "max_abs_step_closure_error_m\n";
-
-            // Origin row.  It makes the exact common LiDAR start timestamp
-            // explicit and allows two runs to be aligned without guessing.
-            const Eigen::Vector3d initial_rpy =
-                FrontendRotationToRpy(
-                    T_WL_initial.rotation());
-
-            constexpr double kRadToDeg =
-                180.0 /
-                3.14159265358979323846;
-
-            file
-                << 0 << ","
-                << timestamp << ","
-                << 0.0 << ","
-                << T_WL_initial.translation().z() << ","
-                << T_WL_initial.translation().z() << ","
-                << initial_rpy.x() * kRadToDeg << ","
-                << initial_rpy.y() * kRadToDeg << ","
-                << initial_rpy.z() * kRadToDeg << ","
-                << 0.0 << "," << 0.0 << "," << 0.0 << ","
-                << 0.0 << "," << 0.0 << "," << 0.0 << ","
-                << 0.0 << "," << 0.0 << "," << 0.0 << ","
-                << 0.0 << "," << 0.0 << "," << 0.0 << ","
-                << 0.0 << "," << 0.0 << "," << 0.0 << ","
-                << 0.0
-                << "\n";
-        }
-        catch (const std::exception &)
-        {
-            return false;
-        }
-
-        RCLCPP_INFO(
-            kWorldZDecompositionLogger,
-            "FR_Z_DECOMP RESET"
-            " | timestamp=%.9f"
-            " | world_z0=%.9f"
-            " | csv=%s",
-            timestamp,
-            T_WL_initial.translation().z(),
-            WorldZDecompositionCsvPath()
-                .string()
-                .c_str());
-
-        return true;
-    }
-
-    bool AccumulateWorldZDecomposition(
-        const RegistrationScan2LocalMap *owner,
-        double timestamp,
-        const Eigen::Isometry3d &T_WL_previous,
-        const Eigen::Isometry3d &T_WL_current)
-    {
-        if (owner == nullptr ||
-            !std::isfinite(timestamp) ||
-            !T_WL_previous.matrix().allFinite() ||
-            !T_WL_current.matrix().allFinite())
-        {
-            return false;
-        }
-
-        const Eigen::Isometry3d T_previous_current =
-            T_WL_previous.inverse() *
-            T_WL_current;
-
-        if (!T_previous_current.matrix().allFinite())
-        {
-            return false;
-        }
-
-        const Eigen::Vector3d local_translation =
-            T_previous_current.translation();
-
-        const Eigen::Matrix3d R_WL_previous =
-            T_WL_previous.rotation();
-
-        // Exact algebraic decomposition of world-frame Z displacement.
-        const double pitch_step_m =
-            R_WL_previous(2, 0) *
-            local_translation.x();
-
-        const double roll_step_m =
-            R_WL_previous(2, 1) *
-            local_translation.y();
-
-        const double local_z_step_m =
-            R_WL_previous(2, 2) *
-            local_translation.z();
-
-        const double reconstructed_step_m =
-            pitch_step_m +
-            roll_step_m +
-            local_z_step_m;
-
-        const double world_z_step_m =
-            T_WL_current.translation().z() -
-            T_WL_previous.translation().z();
-
-        const double step_closure_error_m =
-            world_z_step_m -
-            reconstructed_step_m;
-
-        if (!std::isfinite(pitch_step_m) ||
-            !std::isfinite(roll_step_m) ||
-            !std::isfinite(local_z_step_m) ||
-            !std::isfinite(reconstructed_step_m) ||
-            !std::isfinite(world_z_step_m) ||
-            !std::isfinite(step_closure_error_m))
-        {
-            return false;
-        }
-
-        std::lock_guard<std::mutex> lock(
-            WorldZDecompositionRuntimeMutex());
-
-        auto iterator =
-            WorldZDecompositionRuntimeMap().find(owner);
-
-        if (iterator ==
-                WorldZDecompositionRuntimeMap().end() ||
-            !iterator->second.initialized)
-        {
-            return false;
-        }
-
-        WorldZDecompositionRuntime &runtime =
-            iterator->second;
-
-        ++runtime.accepted_steps;
-
-        runtime.pitch_contribution_m +=
-            pitch_step_m;
-
-        runtime.roll_contribution_m +=
-            roll_step_m;
-
-        runtime.local_z_contribution_m +=
-            local_z_step_m;
-
-        // Use endpoint displacement for the reported net World-Z.  This keeps
-        // the diagnostic independent of tiny cumulative floating-point drift.
-        runtime.world_z_m =
-            T_WL_current.translation().z() -
-            runtime.initial_world_z;
-
-        runtime.maximum_absolute_step_closure_error_m =
-            std::max(
-                runtime.maximum_absolute_step_closure_error_m,
-                std::abs(step_closure_error_m));
-
-        const double cumulative_sum_m =
-            runtime.pitch_contribution_m +
-            runtime.roll_contribution_m +
-            runtime.local_z_contribution_m;
-
-        const double cumulative_closure_error_m =
-            runtime.world_z_m -
-            cumulative_sum_m;
-
-        const double dt_from_previous_s =
-            std::isfinite(runtime.previous_timestamp)
-                ? timestamp - runtime.previous_timestamp
-                : std::numeric_limits<double>::quiet_NaN();
-
-        const Eigen::Vector3d previous_rpy =
-            FrontendRotationToRpy(
-                T_WL_previous.rotation());
-
-        constexpr double kRadToDeg =
-            180.0 /
-            3.14159265358979323846;
-
-        try
-        {
-            std::ofstream file(
-                WorldZDecompositionCsvPath(),
-                std::ios::out |
-                    std::ios::app);
-
-            if (file.is_open())
-            {
-                file
-                    << std::fixed
-                    << std::setprecision(9)
-                    << runtime.accepted_steps << ","
-                    << timestamp << ","
-                    << dt_from_previous_s << ","
-                    << T_WL_previous.translation().z() << ","
-                    << T_WL_current.translation().z() << ","
-                    << previous_rpy.x() * kRadToDeg << ","
-                    << previous_rpy.y() * kRadToDeg << ","
-                    << previous_rpy.z() * kRadToDeg << ","
-                    << local_translation.x() << ","
-                    << local_translation.y() << ","
-                    << local_translation.z() << ","
-                    << pitch_step_m << ","
-                    << roll_step_m << ","
-                    << local_z_step_m << ","
-                    << world_z_step_m << ","
-                    << reconstructed_step_m << ","
-                    << step_closure_error_m << ","
-                    << runtime.pitch_contribution_m << ","
-                    << runtime.roll_contribution_m << ","
-                    << runtime.local_z_contribution_m << ","
-                    << runtime.world_z_m << ","
-                    << cumulative_sum_m << ","
-                    << cumulative_closure_error_m << ","
-                    << runtime.maximum_absolute_step_closure_error_m
-                    << "\n";
-            }
-        }
-        catch (const std::exception &)
-        {
-            // Keep the realtime frontend running even if CSV output fails.
-        }
-
-        runtime.previous_timestamp =
-            timestamp;
-
-        RCLCPP_INFO(
-            kWorldZDecompositionLogger,
-            "FR_Z_DECOMP"
-            " | step=%zu"
-            " | timestamp=%.9f"
-            " | pitch=%.9f"
-            " | roll=%.9f"
-            " | local_z=%.9f"
-            " | world_z=%.9f"
-            " | sum=%.9f"
-            " | closure=%.3e"
-            " | step_pitch=%.9f"
-            " | step_roll=%.9f"
-            " | step_local_z=%.9f"
-            " | step_world_z=%.9f",
-            runtime.accepted_steps,
-            timestamp,
-            runtime.pitch_contribution_m,
-            runtime.roll_contribution_m,
-            runtime.local_z_contribution_m,
-            runtime.world_z_m,
-            cumulative_sum_m,
-            cumulative_closure_error_m,
-            pitch_step_m,
-            roll_step_m,
-            local_z_step_m,
-            world_z_step_m);
-
-        return true;
-    }
-
     // Frontend Robust ICP V1 experiment isolation.
     //
     // The realtime Scan-to-LocalMap registration uses the caller-provided
@@ -778,60 +209,7 @@ namespace
         {
         }
 
-        ~FrameTimingReporter()
-        {
-            const double total_ms =
-                ElapsedMilliseconds(
-                    diagnostics_.start,
-                    std::chrono::steady_clock::now());
-
-            RCLCPP_INFO(
-                kTimingLogger,
-                "FR_TIMING ADD_FRAME"
-                " | total=%.3f ms"
-                " | ground_segment=%.3f"
-                " | primary_align=%.3f"
-                " | ground_refine=%.3f"
-                " | recovery_coarse=%.3f"
-                " | recovery_refine=%.3f"
-                " | keyframe_decision=%.3f"
-                " | keyframe_store=%.3f"
-                " | pose_graph_insert=%.3f"
-                " | global_map_incremental=%.3f"
-                " | submap_insert=%.3f"
-                " | scan_context_insert=%.3f"
-                " | loop_backend=%.3f"
-                " | backend_enqueue=%.3f"
-                " | prepare_target=%.3f"
-                " | first_frame=%s"
-                " | accepted=%s"
-                " | keyframe=%s"
-                " | recovery_triggered=%s"
-                " | coarse_recovery_accepted=%s"
-                " | keyframes=%zu->%zu",
-                total_ms,
-                diagnostics_.ground_segment_ms,
-                diagnostics_.primary_align_ms,
-                diagnostics_.ground_refine_ms,
-                diagnostics_.recovery_coarse_ms,
-                diagnostics_.recovery_refine_ms,
-                diagnostics_.keyframe_decision_ms,
-                diagnostics_.keyframe_store_ms,
-                diagnostics_.pose_graph_insert_ms,
-                diagnostics_.global_map_incremental_ms,
-                diagnostics_.submap_insert_ms,
-                diagnostics_.scan_context_insert_ms,
-                diagnostics_.loop_backend_ms,
-                diagnostics_.backend_enqueue_ms,
-                diagnostics_.prepare_target_ms,
-                diagnostics_.first_frame ? "true" : "false",
-                diagnostics_.accepted ? "true" : "false",
-                diagnostics_.keyframe ? "true" : "false",
-                diagnostics_.recovery_triggered ? "true" : "false",
-                diagnostics_.coarse_recovery_accepted ? "true" : "false",
-                diagnostics_.keyframes_before,
-                diagnostics_.keyframes_after);
-        }
+        ~FrameTimingReporter() = default;
 
     private:
         FrameTimingDiagnostics &diagnostics_;
@@ -1017,121 +395,6 @@ namespace
     };
 
     // ============================================================================
-    // BuildOdometryInformationV1()
-    //
-    // V1.1: normalized diagonal directional confidence.
-    //
-    // Input covariance convention:
-    //     order = [rx ry rz tx ty tz]
-    //     axes  = World / target frame
-    //
-    // Output information convention for g2o::EdgeSE3:
-    //     order = [tx ty tz rx ry rz]
-    //     axes  = current LiDAR frame
-    // ============================================================================
-    bool BuildOdometryInformationV1(
-        const LidarRegistrationResult &registration_result,
-        const Eigen::Isometry3d &T_WL,
-        Eigen::Matrix<double, 6, 6> &information)
-    {
-        information =
-            Eigen::Matrix<double, 6, 6>::Identity();
-
-        if (!registration_result
-                 .hessian_relative_covariance_valid ||
-            !registration_result
-                 .hessian_relative_covariance
-                 .allFinite() ||
-            !T_WL.matrix().allFinite())
-        {
-            return false;
-        }
-
-        const Eigen::Matrix3d R_LW =
-            T_WL.rotation().transpose();
-
-        Eigen::Matrix<double, 6, 6> world_to_lidar =
-            Eigen::Matrix<double, 6, 6>::Zero();
-
-        world_to_lidar.block<3, 3>(0, 0) =
-            R_LW;
-
-        world_to_lidar.block<3, 3>(3, 3) =
-            R_LW;
-
-        const Eigen::Matrix<double, 6, 6>
-            covariance_lidar_rt =
-                world_to_lidar *
-                registration_result.hessian_relative_covariance *
-                world_to_lidar.transpose();
-
-        if (!covariance_lidar_rt.allFinite())
-        {
-            return false;
-        }
-
-        constexpr double minimum_directional_confidence =
-            0.01;
-
-        Eigen::Matrix<double, 6, 1> confidence_rt =
-            Eigen::Matrix<double, 6, 1>::Ones();
-
-        for (int i = 0;
-             i < 6;
-             ++i)
-        {
-            const double variance =
-                covariance_lidar_rt(i, i);
-
-            if (!std::isfinite(variance) ||
-                variance <= 0.0)
-            {
-                return false;
-            }
-
-            confidence_rt(i) =
-                std::clamp(
-                    1.0 / variance,
-                    minimum_directional_confidence,
-                    1.0);
-        }
-
-        const double maximum_confidence =
-            confidence_rt.maxCoeff();
-
-        if (!std::isfinite(maximum_confidence) ||
-            maximum_confidence <= 0.0)
-        {
-            return false;
-        }
-
-        confidence_rt /=
-            maximum_confidence;
-
-        for (int i = 0;
-             i < 6;
-             ++i)
-        {
-            confidence_rt(i) =
-                std::clamp(
-                    confidence_rt(i),
-                    minimum_directional_confidence,
-                    1.0);
-        }
-
-        information =
-            Eigen::Matrix<double, 6, 6>::Zero();
-
-        information(0, 0) = confidence_rt(3); // tx
-        information(1, 1) = confidence_rt(4); // ty
-        information(2, 2) = confidence_rt(5); // tz
-        information(3, 3) = confidence_rt(0); // rx
-        information(4, 4) = confidence_rt(1); // ry
-        information(5, 5) = confidence_rt(2); // rz
-
-        return information.allFinite();
-    }
-
     // ============================================================================
     // BuildOdometryInformationV2()
     //
@@ -1449,7 +712,6 @@ namespace
 
         return true;
     }
-
     double RelativeRotationDeg(
         const Eigen::Isometry3d &T_A,
         const Eigen::Isometry3d &T_B)
@@ -1658,7 +920,6 @@ namespace
         return T_WL_coarse.matrix().allFinite();
     }
 
-
     // ========================================================================
     // Loop Shadow Point-to-Plane -> Full 6x6 information.
     //
@@ -1734,8 +995,7 @@ namespace
             }
 
             const pcl::PointXYZ &point =
-                target->points[
-                    static_cast<std::size_t>(index)];
+                target->points[static_cast<std::size_t>(index)];
 
             centroid +=
                 Eigen::Vector3d(
@@ -1754,8 +1014,7 @@ namespace
         for (const int index : neighbor_indices)
         {
             const pcl::PointXYZ &point =
-                target->points[
-                    static_cast<std::size_t>(index)];
+                target->points[static_cast<std::size_t>(index)];
 
             const Eigen::Vector3d p_target(
                 static_cast<double>(point.x),
@@ -1800,8 +1059,7 @@ namespace
         for (const int index : neighbor_indices)
         {
             const pcl::PointXYZ &point =
-                target->points[
-                    static_cast<std::size_t>(index)];
+                target->points[static_cast<std::size_t>(index)];
 
             const Eigen::Vector3d p_target(
                 static_cast<double>(point.x),
@@ -2585,10 +1843,9 @@ namespace
                 return std::numeric_limits<double>::infinity();
             }
 
-            return
-                (general_weighted_squared_error_sum +
-                 ground_weighted_squared_error_sum) /
-                total_weight;
+            return (general_weighted_squared_error_sum +
+                    ground_weighted_squared_error_sum) /
+                   total_weight;
         }
     };
 
@@ -2605,7 +1862,8 @@ namespace
     {
         static std::unordered_map<
             const RegistrationScan2LocalMap *,
-            std::unique_ptr<GroundIcpRuntime>> runtime_map;
+            std::unique_ptr<GroundIcpRuntime>>
+            runtime_map;
 
         return runtime_map;
     }
@@ -2760,6 +2018,8 @@ namespace
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
         const char *input_source)
     {
+        (void)input_source;
+
         fr_slam::GroundSegmentationResult result;
 
         GroundIcpRuntime *runtime =
@@ -2783,36 +2043,6 @@ namespace
         result =
             runtime->segmenter.Segment(
                 analysis_cloud);
-
-        std::cout
-            << "GROUND_ICP"
-            << " | stage=SEGMENT"
-            << " | input_source="
-            << (input_source != nullptr
-                    ? input_source
-                    : "UNKNOWN")
-            << " | input_raw="
-            << (cloud_lidar
-                    ? cloud_lidar->size()
-                    : 0UL)
-            << " | analysis_voxel="
-            << runtime->analysis_voxel_leaf_m
-            << " | input=" << result.input_points
-            << " | ground_pts=" << result.ground_points
-            << " | support_pts=" << result.support_ground_points
-            << " | support="
-            << (result.support_plane_valid ? "VALID" : "INVALID")
-            << " | constraint="
-            << (result.support_constraint_valid ? "VALID" : "INVALID")
-            << " | conf="
-            << result.support_constraint_confidence
-            << " | anchor="
-            << (result.support_clearance_anchor_valid ? "READY" : "BOOTSTRAP")
-            << " | anchor_err="
-            << result.support_clearance_error_m
-            << " | anchor_tol="
-            << result.support_clearance_anchor_tolerance_m
-            << std::endl;
 
         return result;
     }
@@ -2872,7 +2102,6 @@ namespace
             0.0,
             runtime.base_weight);
     }
-
 
     bool BuildGroundIcpLinearization(
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source,
@@ -2980,8 +2209,7 @@ namespace
             {
                 const double neighbor_distance_squared =
                     static_cast<double>(
-                        neighbor_squared_distances[
-                            static_cast<std::size_t>(j)]);
+                        neighbor_squared_distances[static_cast<std::size_t>(j)]);
 
                 if (neighbor_distance_squared >
                     maximum_correspondence_distance_squared)
@@ -2990,8 +2218,7 @@ namespace
                 }
 
                 const int candidate_index =
-                    neighbor_indices[
-                        static_cast<std::size_t>(j)];
+                    neighbor_indices[static_cast<std::size_t>(j)];
 
                 if (candidate_index < 0)
                 {
@@ -3021,9 +2248,8 @@ namespace
             }
 
             const TargetPlane &plane =
-                target.planes[
-                    static_cast<std::size_t>(
-                        plane_index)];
+                target.planes[static_cast<std::size_t>(
+                    plane_index)];
 
             const double residual =
                 plane.normal.dot(
@@ -3047,7 +2273,8 @@ namespace
 
                 J.block<1, 3>(0, 0) =
                     lever_arm_target.cross(
-                        plane.normal).transpose();
+                                        plane.normal)
+                        .transpose();
 
                 if (use_hessian_scale_normalization)
                 {
@@ -3068,7 +2295,8 @@ namespace
             {
                 J.block<1, 3>(0, 0) =
                     p_target.cross(
-                        plane.normal).transpose();
+                                plane.normal)
+                        .transpose();
             }
 
             J.block<1, 3>(0, 3) =
@@ -3135,8 +2363,7 @@ namespace
             ground_result.support_ground_cloud->empty() ||
             ground_information_weight <= 1.0e-9)
         {
-            return
-                linearization.general_correspondences > 0;
+            return linearization.general_correspondences > 0;
         }
 
         Eigen::Vector3d support_normal_source =
@@ -3149,8 +2376,7 @@ namespace
             !std::isfinite(support_normal_norm) ||
             support_normal_norm <= 1.0e-12)
         {
-            return
-                linearization.general_correspondences > 0;
+            return linearization.general_correspondences > 0;
         }
 
         support_normal_source /=
@@ -3167,8 +2393,7 @@ namespace
             !std::isfinite(support_normal_target_norm) ||
             support_normal_target_norm <= 1.0e-12)
         {
-            return
-                linearization.general_correspondences > 0;
+            return linearization.general_correspondences > 0;
         }
 
         support_normal_target /=
@@ -3247,8 +2472,7 @@ namespace
             {
                 const double neighbor_distance_squared =
                     static_cast<double>(
-                        neighbor_squared_distances[
-                            static_cast<std::size_t>(j)]);
+                        neighbor_squared_distances[static_cast<std::size_t>(j)]);
 
                 if (neighbor_distance_squared >
                     maximum_correspondence_distance_squared)
@@ -3257,8 +2481,7 @@ namespace
                 }
 
                 const int candidate_index =
-                    neighbor_indices[
-                        static_cast<std::size_t>(j)];
+                    neighbor_indices[static_cast<std::size_t>(j)];
 
                 if (candidate_index < 0)
                 {
@@ -3303,9 +2526,8 @@ namespace
             }
 
             const TargetPlane &plane =
-                target.planes[
-                    static_cast<std::size_t>(
-                        plane_index)];
+                target.planes[static_cast<std::size_t>(
+                    plane_index)];
 
             const double residual =
                 plane.normal.dot(
@@ -3329,13 +2551,15 @@ namespace
 
                 J.block<1, 3>(0, 0) =
                     lever_arm_target.cross(
-                        plane.normal).transpose();
+                                        plane.normal)
+                        .transpose();
             }
             else
             {
                 J.block<1, 3>(0, 0) =
                     p_target.cross(
-                        plane.normal).transpose();
+                                plane.normal)
+                        .transpose();
             }
 
             J.block<1, 3>(0, 3) =
@@ -3392,8 +2616,7 @@ namespace
             ++linearization.ground_correspondences;
         }
 
-        return
-            linearization.general_correspondences > 0;
+        return linearization.general_correspondences > 0;
     }
 
     bool ComputeGroundIcpParameterUnscale(
@@ -3658,7 +2881,8 @@ namespace
 
         const Eigen::Matrix3d delta_R =
             Sophus::SO3d::exp(
-                delta_rotation).matrix();
+                delta_rotation)
+                .matrix();
 
         if (config.enable_sensor_centered_perturbation)
         {
@@ -3797,12 +3021,6 @@ namespace
         return true;
     }
 
-
-
-
-
-
-
     // ========================================================================
     // GROUND_ICP_V13_OBSERVABLE_SUBSPACE_JOINT
     //
@@ -3871,22 +3089,6 @@ namespace
             !ground_result.support_ground_cloud ||
             ground_result.support_ground_cloud->empty())
         {
-            std::cout
-                << "GROUND_ICP_V13"
-                << " | stage=JOINT_SELECT"
-                << " | action=FALLBACK_GENERAL"
-                << " | reason=UNTRUSTED_SUPPORT"
-                << " | support="
-                << (ground_result.support_plane_valid
-                        ? "VALID"
-                        : "INVALID")
-                << " | constraint="
-                << (ground_result.support_constraint_valid
-                        ? "VALID"
-                        : "INVALID")
-                << " | quality="
-                << ground_result.support_constraint_confidence
-                << std::endl;
 
             return GroundJointIcpStatus::NotEligible;
         }
@@ -3899,18 +3101,6 @@ namespace
         if (!std::isfinite(ground_information_weight) ||
             ground_information_weight <= 1.0e-3)
         {
-            std::cout
-                << "GROUND_ICP_V13"
-                << " | stage=JOINT_SELECT"
-                << " | action=FALLBACK_GENERAL"
-                << " | reason=LOW_EFFECTIVE_WEIGHT"
-                << " | quality="
-                << ground_result.support_constraint_confidence
-                << " | anchor_factor="
-                << GroundIcpAnchorFactor(ground_result)
-                << " | weight="
-                << ground_information_weight
-                << std::endl;
 
             return GroundJointIcpStatus::NotEligible;
         }
@@ -4029,17 +3219,12 @@ namespace
             const double dT =
                 delta_translation.norm();
 
-            const double dR_deg =
-                dR *
-                180.0 /
-                3.14159265358979323846;
-
             const double robust_rmse =
                 linearization.general_weight_sum > 1.0e-12
                     ? std::sqrt(
                           linearization
-                                  .general_weighted_squared_error_sum /
-                              linearization.general_weight_sum)
+                              .general_weighted_squared_error_sum /
+                          linearization.general_weight_sum)
                     : std::numeric_limits<double>::infinity();
 
             const double downweighted_ratio =
@@ -4050,41 +3235,6 @@ namespace
                           static_cast<double>(
                               linearization.general_correspondences)
                     : 0.0;
-
-            std::cout
-                << "GROUND_ICP_V13"
-                << " | stage=JOINT_ITER"
-                << " | iteration=" << iteration
-                << " | reference=LOCALMAP_GROUND_PLANES"
-                << " | dofs=ROLL_PITCH_Z"
-                << " | ground_xy_yaw=OFF"
-                << " | quality="
-                << ground_result.support_constraint_confidence
-                << " | anchor_factor="
-                << GroundIcpAnchorFactor(ground_result)
-                << " | weight="
-                << ground_information_weight
-                << " | general_corr="
-                << linearization.general_correspondences
-                << " | ground_corr="
-                << linearization.ground_correspondences
-                << " | general_rmse="
-                << linearization.GeneralRmse()
-                << " | ground_rmse="
-                << linearization.GroundRmse()
-                << " | robust_rmse="
-                << robust_rmse
-                << " | downweighted_ratio="
-                << downweighted_ratio
-                << " | dR=" << dR
-                << " rad"
-                << " | dR_deg=" << dR_deg
-                << " | dT=" << dT
-                << " m"
-                << " | dx=["
-                << dx.transpose()
-                << "]"
-                << std::endl;
 
             const Eigen::Isometry3d trial_pose =
                 ApplyGroundIcpIncrement(
@@ -4179,8 +3329,8 @@ namespace
             final_linearization.general_weight_sum > 1.0e-12
                 ? std::sqrt(
                       final_linearization
-                              .general_weighted_squared_error_sum /
-                          final_linearization.general_weight_sum)
+                          .general_weighted_squared_error_sum /
+                      final_linearization.general_weight_sum)
                 : std::numeric_limits<double>::infinity();
 
         const double final_downweighted_ratio =
@@ -4216,600 +3366,14 @@ namespace
         result.T_target_source =
             current_pose;
 
-        const bool covariance_updated =
-            UpdateGroundIcpRelativeCovariance(
-                final_linearization,
-                config,
-                result);
-
-        std::cout
-            << "GROUND_ICP_V13"
-            << " | stage=JOINT_RESULT"
-            << " | action=SUCCESS"
-            << " | reference=LOCALMAP_GROUND_PLANES"
-            << " | dofs=ROLL_PITCH_Z"
-            << " | ground_xy_yaw=OFF"
-            << " | quality="
-            << ground_result.support_constraint_confidence
-            << " | anchor_factor="
-            << GroundIcpAnchorFactor(ground_result)
-            << " | weight="
-            << ground_information_weight
-            << " | ground_corr="
-            << final_linearization.ground_correspondences
-            << " | general_corr="
-            << final_linearization.general_correspondences
-            << " | ground_rmse="
-            << final_linearization.GroundRmse()
-            << " | general_rmse="
-            << final_linearization.GeneralRmse()
-            << " | covariance_update="
-            << (covariance_updated
-                    ? "true"
-                    : "false")
-            << std::endl;
+        UpdateGroundIcpRelativeCovariance(
+            final_linearization,
+            config,
+            result);
 
         return GroundJointIcpStatus::Success;
     }
-
-
-    [[maybe_unused]]
-    bool ApplyTrustedGroundSoftRefinement(
-        const RegistrationScan2LocalMap *owner,
-        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source,
-        const PreparedLidarTarget &target,
-        const fr_slam::GroundSegmentationResult &ground_result,
-        LidarRegistrationResult &registration_result)
-    {
-        GroundIcpRuntime *runtime =
-            GetGroundIcpRuntime(owner);
-
-        if (runtime == nullptr)
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=NO_RUNTIME"
-                << std::endl;
-            return false;
-        }
-
-        if (!runtime->enabled)
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=DISABLED"
-                << std::endl;
-            return false;
-        }
-
-        if (!ground_result.support_constraint_valid ||
-            !ground_result.support_plane_valid ||
-            !ground_result.support_ground_cloud ||
-            ground_result.support_ground_cloud->empty())
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=UNTRUSTED_SUPPORT"
-                << " | support="
-                << (ground_result.support_plane_valid ? "VALID" : "INVALID")
-                << " | constraint="
-                << (ground_result.support_constraint_valid ? "VALID" : "INVALID")
-                << " | conf="
-                << ground_result.support_constraint_confidence
-                << std::endl;
-            return false;
-        }
-
-        if (!registration_result.success ||
-            !registration_result.T_target_source.matrix().allFinite())
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=INVALID_ICP_CANDIDATE"
-                << std::endl;
-            return false;
-        }
-
-        const double ground_information_weight =
-            ComputeGroundIcpWeight(
-                *runtime,
-                ground_result);
-
-        if (!std::isfinite(ground_information_weight) ||
-            ground_information_weight <= 1.0e-3)
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=LOW_EFFECTIVE_WEIGHT"
-                << " | conf="
-                << ground_result.support_constraint_confidence
-                << " | anchor_factor="
-                << GroundIcpAnchorFactor(ground_result)
-                << " | weight="
-                << ground_information_weight
-                << std::endl;
-            return false;
-        }
-
-        const Eigen::Isometry3d original_pose =
-            registration_result.T_target_source;
-
-        Eigen::Isometry3d current_pose =
-            original_pose;
-
-        GroundIcpLinearization current_linearization;
-
-        if (!BuildGroundIcpLinearization(
-                source,
-                target,
-                current_pose,
-                ground_result,
-                *runtime,
-                ground_information_weight,
-                current_linearization))
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=LINEARIZATION_FAILED"
-                << std::endl;
-            return false;
-        }
-
-        if (current_linearization.ground_correspondences <
-            runtime->minimum_ground_correspondences)
-        {
-            std::cout
-                << "GROUND_ICP | stage=REFINE | action=SKIP"
-                << " | reason=LOW_GROUND_CORR"
-                << " | ground_corr="
-                << current_linearization.ground_correspondences
-                << " | min="
-                << runtime->minimum_ground_correspondences
-                << " | support_pts="
-                << ground_result.support_ground_points
-                << " | weight="
-                << ground_information_weight
-                << std::endl;
-            return false;
-        }
-
-        const double initial_general_rmse =
-            current_linearization.GeneralRmse();
-
-        const double initial_ground_rmse =
-            current_linearization.GroundRmse();
-
-        const double initial_combined_mse =
-            current_linearization
-                .CombinedWeightedMeanSquaredError();
-
-        const std::size_t initial_general_correspondences =
-            current_linearization.general_correspondences;
-
-        bool accepted_any_step =
-            false;
-
-        const char *last_reject_reason =
-            "NONE";
-
-        for (int iteration = 0;
-             iteration <
-                 runtime->maximum_refinement_iterations;
-             ++iteration)
-        {
-            Eigen::Matrix<double, 6, 1> dx;
-
-            if (!SolveGroundIcpStep(
-                    current_linearization,
-                    runtime->registration_config,
-                    dx))
-            {
-                last_reject_reason =
-                    "SOLVE_FAILED";
-                break;
-            }
-
-            const double step_rotation_deg =
-                dx.head<3>().norm() *
-                180.0 /
-                3.14159265358979323846;
-
-            const double step_translation_m =
-                dx.tail<3>().norm();
-
-            // Tiny extra step: already at a stationary point of the combined
-            // objective.  There is no need to manufacture a correction.
-            if (step_rotation_deg < 1.0e-5 &&
-                step_translation_m < 1.0e-6)
-            {
-                last_reject_reason =
-                    "TINY_STEP";
-                break;
-            }
-
-            const Eigen::Isometry3d trial_pose =
-                ApplyGroundIcpIncrement(
-                    current_pose,
-                    dx,
-                    runtime->registration_config);
-
-            if (!trial_pose.matrix().allFinite())
-            {
-                last_reject_reason =
-                    "NONFINITE_TRIAL";
-                break;
-            }
-
-            const double total_rotation_correction_deg =
-                RelativeRotationDeg(
-                    original_pose,
-                    trial_pose);
-
-            const double total_translation_correction_m =
-                (trial_pose.translation() -
-                 original_pose.translation())
-                    .norm();
-
-            if (!std::isfinite(total_rotation_correction_deg) ||
-                !std::isfinite(total_translation_correction_m) ||
-                total_rotation_correction_deg >
-                    runtime->maximum_total_rotation_correction_deg ||
-                total_translation_correction_m >
-                    runtime->maximum_total_translation_correction_m)
-            {
-                last_reject_reason =
-                    "STEP_SAFETY";
-                break;
-            }
-
-            GroundIcpLinearization trial_linearization;
-
-            if (!BuildGroundIcpLinearization(
-                    source,
-                    target,
-                    trial_pose,
-                    ground_result,
-                    *runtime,
-                    ground_information_weight,
-                    trial_linearization))
-            {
-                last_reject_reason =
-                    "TRIAL_LINEARIZATION_FAILED";
-                break;
-            }
-
-            const double current_general_rmse =
-                current_linearization.GeneralRmse();
-
-            const double trial_general_rmse =
-                trial_linearization.GeneralRmse();
-
-            const double current_ground_rmse =
-                current_linearization.GroundRmse();
-
-            const double trial_ground_rmse =
-                trial_linearization.GroundRmse();
-
-            const double current_combined_mse =
-                current_linearization
-                    .CombinedWeightedMeanSquaredError();
-
-            const double trial_combined_mse =
-                trial_linearization
-                    .CombinedWeightedMeanSquaredError();
-
-            const std::size_t minimum_general_correspondences =
-                static_cast<std::size_t>(
-                    std::floor(
-                        runtime
-                            ->minimum_general_correspondence_ratio *
-                        static_cast<double>(
-                            std::max<std::size_t>(
-                                1,
-                                current_linearization
-                                    .general_correspondences))));
-
-            const bool general_correspondence_ok =
-                trial_linearization.general_correspondences >=
-                minimum_general_correspondences;
-
-            const double general_rmse_limit =
-                std::max(
-                    current_general_rmse *
-                        runtime->maximum_general_rmse_ratio,
-                    current_general_rmse +
-                        runtime
-                            ->maximum_general_rmse_absolute_increase_m);
-
-            const bool general_quality_ok =
-                std::isfinite(trial_general_rmse) &&
-                trial_general_rmse <=
-                    general_rmse_limit;
-
-            const bool ground_quality_ok =
-                trial_linearization.ground_correspondences >=
-                    runtime->minimum_ground_correspondences &&
-                std::isfinite(trial_ground_rmse) &&
-                trial_ground_rmse <=
-                    current_ground_rmse +
-                    5.0e-4;
-
-            const bool combined_objective_ok =
-                std::isfinite(trial_combined_mse) &&
-                std::isfinite(current_combined_mse) &&
-                trial_combined_mse <=
-                    current_combined_mse +
-                    1.0e-12;
-
-            std::cout
-                << "GROUND_ICP"
-                << " | stage=ITER"
-                << " | iteration=" << iteration
-                << " | weight=" << ground_information_weight
-                << " | general_corr="
-                << current_linearization.general_correspondences
-                << "->"
-                << trial_linearization.general_correspondences
-                << " | ground_corr="
-                << current_linearization.ground_correspondences
-                << "->"
-                << trial_linearization.ground_correspondences
-                << " | general_rmse="
-                << current_general_rmse
-                << "->"
-                << trial_general_rmse
-                << " | ground_rmse="
-                << current_ground_rmse
-                << "->"
-                << trial_ground_rmse
-                << " | combined_mse="
-                << current_combined_mse
-                << "->"
-                << trial_combined_mse
-                << " | step_rot="
-                << step_rotation_deg
-                << " deg"
-                << " | step_trans="
-                << step_translation_m
-                << " m"
-                << " | accept="
-                << (general_correspondence_ok &&
-                            general_quality_ok &&
-                            ground_quality_ok &&
-                            combined_objective_ok
-                        ? "true"
-                        : "false")
-                << std::endl;
-
-            if (!general_correspondence_ok)
-            {
-                last_reject_reason =
-                    "GENERAL_CORR_DROP";
-                break;
-            }
-
-            if (!general_quality_ok)
-            {
-                last_reject_reason =
-                    "GENERAL_RMSE_DEGRADE";
-                break;
-            }
-
-            if (!ground_quality_ok)
-            {
-                last_reject_reason =
-                    "GROUND_RMSE_DEGRADE";
-                break;
-            }
-
-            if (!combined_objective_ok)
-            {
-                last_reject_reason =
-                    "COMBINED_OBJECTIVE";
-                break;
-            }
-
-            current_pose =
-                trial_pose;
-
-            current_linearization =
-                trial_linearization;
-
-            accepted_any_step =
-                true;
-
-            last_reject_reason =
-                "NONE";
-        }
-
-        if (!accepted_any_step)
-        {
-            std::cout
-                << "GROUND_ICP"
-                << " | stage=REFINE"
-                << " | action=KEEP_ORIGINAL"
-                << " | reason="
-                << last_reject_reason
-                << " | conf="
-                << ground_result.support_constraint_confidence
-                << " | anchor_factor="
-                << GroundIcpAnchorFactor(ground_result)
-                << " | weight="
-                << ground_information_weight
-                << " | general_corr="
-                << initial_general_correspondences
-                << " | ground_corr="
-                << current_linearization.ground_correspondences
-                << " | general_rmse="
-                << initial_general_rmse
-                << " | ground_rmse="
-                << initial_ground_rmse
-                << std::endl;
-
-            return false;
-        }
-
-        const double final_total_rotation_correction_deg =
-            RelativeRotationDeg(
-                original_pose,
-                current_pose);
-
-        const Eigen::Vector3d total_translation_correction =
-            current_pose.translation() -
-            original_pose.translation();
-
-        registration_result.T_target_source =
-            current_pose;
-
-        registration_result.correspondences =
-            current_linearization.general_correspondences;
-
-        registration_result.rmse =
-            current_linearization.GeneralRmse();
-
-        const bool covariance_updated =
-            UpdateGroundIcpRelativeCovariance(
-                current_linearization,
-                runtime->registration_config,
-                registration_result);
-
-        std::cout
-            << "GROUND_ICP"
-            << " | stage=REFINE"
-            << " | action=APPLIED"
-            << " | conf="
-            << ground_result.support_constraint_confidence
-            << " | anchor_factor="
-            << GroundIcpAnchorFactor(ground_result)
-            << " | weight="
-            << ground_information_weight
-            << " | support_pts="
-            << ground_result.support_ground_points
-            << " | general_corr="
-            << initial_general_correspondences
-            << "->"
-            << current_linearization.general_correspondences
-            << " | ground_corr="
-            << current_linearization.ground_correspondences
-            << " | general_rmse="
-            << initial_general_rmse
-            << "->"
-            << current_linearization.GeneralRmse()
-            << " | ground_rmse="
-            << initial_ground_rmse
-            << "->"
-            << current_linearization.GroundRmse()
-            << " | combined_mse="
-            << initial_combined_mse
-            << "->"
-            << current_linearization
-                   .CombinedWeightedMeanSquaredError()
-            << " | correction_rot="
-            << final_total_rotation_correction_deg
-            << " deg"
-            << " | correction_t=["
-            << total_translation_correction.transpose()
-            << "]"
-            << " | correction_t_norm="
-            << total_translation_correction.norm()
-            << " m"
-            << " | covariance_update="
-            << (covariance_updated ? "true" : "false")
-            << std::endl;
-
-        return true;
-    }
-
 } // namespace
-
-// ============================================================================
-// RegistrationScan2LocalMap
-// ============================================================================
-//
-// This class is the main LiDAR frontend wrapper for:
-//
-//     Current LiDAR Scan
-//              |
-//              v
-//     Initial Guess Prediction
-//       - translation: LiDAR constant-motion model
-//       - rotation   : optional IMU relative rotation
-//              |
-//              v
-//        Scan-to-LocalMap
-//              |
-//              v
-//          Quality Gate
-//              |
-//      +-------+--------+
-//      |                |
-//   rejected          accepted
-//      |                |
-//      |                v
-//      |         KeyframeDetector
-//      |                |
-//      |        +-------+-------+
-//      |        |               |
-//      |      false           true
-//      |        |               |
-//      |        |               +--> KeyframeManager
-//      |        |               |
-//      |        |               +--> LocalMap update
-//      |        |
-//      +--------+
-//               |
-//               v
-//          Commit odometry
-//
-// ---------------------------------------------------------------------------
-// Coordinate convention used in this file:
-//
-//     T_WL
-//
-// means:
-//
-//     LiDAR frame -> World frame
-//
-// Therefore:
-//
-//     p_W = T_WL * p_L
-//
-// The LocalMap is stored in the World frame.
-//
-// During Scan-to-LocalMap:
-//
-//     source = current LiDAR scan in current LiDAR frame
-//     target = LocalMap in World frame
-//
-// so the registration result directly represents:
-//
-//     result.T_target_source = T_WL_current
-//
-// ---------------------------------------------------------------------------
-// Recovery idea used in this version:
-//
-// If several frames are rejected, the last accepted pose T_WL_ is deliberately
-// NOT changed. The LiDAR one-frame motion model is extrapolated for several
-// steps.
-//
-// Recovery V2 additionally adds a coarse point-to-point ICP fallback whenever
-// the normal point-to-plane candidate fails the Quality Gate. The coarse pose
-// is then refined by the original point-to-plane Scan-to-LocalMap registration.
-//
-//     T_guess = T_last_accepted * DeltaT^N
-//
-// while IMU replaces only the rotational part of the initial guess.
-//
-// IMPORTANT:
-//
-// When tracking is recovered after several rejected frames, the transform
-//
-//     T_last_accepted^-1 * T_current
-//
-// spans MULTIPLE scan intervals. It must therefore NOT overwrite the stored
-// one-frame motion model `last_relative_transform_`.
-//
-// ============================================================================
 
 RegistrationScan2LocalMap::RegistrationScan2LocalMap(
     const LidarRegistrationConfig &registration_config,
@@ -4918,12 +3482,1746 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
 RegistrationScan2LocalMap::~RegistrationScan2LocalMap()
 {
     StopBackendWorker();
-    RemoveWorldZDecompositionRuntime(this);
     RemoveGroundIcpRuntime(this);
 }
 
 // ============================================================================
 // Backend worker lifecycle.
+// ============================================================================
+
+bool RegistrationScan2LocalMap::AddFrame(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+    double timestamp,
+    Eigen::Isometry3d &T_WL,
+    LidarRegistrationResult &registration_result,
+    const Eigen::Quaterniond *imu_relative_rotation)
+{
+    FrameTimingDiagnostics frame_timing;
+    frame_timing.keyframes_before =
+        keyframe_manager_.Size();
+
+    frame_timing.keyframes_after =
+        frame_timing.keyframes_before;
+
+    FrameTimingReporter frame_timing_reporter(
+        frame_timing);
+
+    // =========================================================================
+    // 0. Validate input.
+    // =========================================================================
+    if (!cloud_lidar || cloud_lidar->empty())
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::AddFrame(): input cloud is empty."
+            << std::endl;
+        return false;
+    }
+
+    if (!std::isfinite(timestamp))
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::AddFrame(): timestamp is invalid."
+            << std::endl;
+        return false;
+    }
+
+    // =========================================================================
+    // Ground ICP V1.1 dual-branch input stage.
+    //
+    // Ordinary Scan-to-LocalMap keeps using cloud_lidar, i.e. the final sparse
+    // registration cloud after the normal Voxel/SOR/ROR chain.
+    //
+    // Ground V4.0 instead consumes the one-shot Basic/ROI/CropBox cloud captured
+    // by PreProcessor::preprocess() BEFORE the coarse registration voxel and
+    // outlier filters.  Inside SegmentFrontendGround it is brought back to the
+    // validated Ground-V4 operating point with a dedicated 0.15 m voxel.
+    //
+    // If the dense bridge is unavailable for any reason, we fall back to the
+    // original registration cloud.  This preserves the V1 fail-safe behavior.
+    // =========================================================================
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr ground_input_cloud =
+        fr_slam::ConsumeGroundIcpDenseInput();
+
+    const char *ground_input_source =
+        "BASIC_BRIDGE";
+
+    if (!ground_input_cloud ||
+        ground_input_cloud->empty())
+    {
+        ground_input_cloud =
+            cloud_lidar;
+
+        ground_input_source =
+            "REGISTRATION_FALLBACK";
+    }
+
+    const std::chrono::steady_clock::time_point
+        ground_segment_start =
+            std::chrono::steady_clock::now();
+
+    const fr_slam::GroundSegmentationResult frontend_ground_result =
+        SegmentFrontendGround(
+            this,
+            ground_input_cloud,
+            ground_input_source);
+
+    frame_timing.ground_segment_ms +=
+        ElapsedMilliseconds(
+            ground_segment_start,
+            std::chrono::steady_clock::now());
+
+    // =========================================================================
+    // 1. First frame initialization.
+    //
+    // There is no LocalMap yet, so the first frame does not run ICP.
+    // The first LiDAR pose defines the SLAM World origin:
+    //
+    //     T_WL0 = Identity
+    //
+    // The first frame becomes KF0 and creates Active Submap 0.
+    // =========================================================================
+    if (!initialized_)
+    {
+        frame_timing.first_frame = true;
+        frame_timing.keyframe = true;
+
+        // The very first accepted LiDAR scan defines the World origin.
+        //
+        // Therefore:
+        //
+        //     LiDAR_0 == World
+        //
+        // and:
+        //
+        //     T_WL0 = I
+        T_WL_ = Eigen::Isometry3d::Identity();
+
+        // At startup there is no previous LiDAR motion yet.
+        //
+        // Identity means:
+        //
+        //     "predict no relative motion"
+        //
+        // until registration estimates the first real relative transform.
+        last_relative_transform_ = Eigen::Isometry3d::Identity();
+
+        // No frame has been rejected before the first frame.
+        consecutive_rejected_frames_ = 0;
+
+        // ---------------------------------------------------------------------
+        // 1.1 Store KF0 in complete historical KeyframeManager.
+        // ---------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            first_keyframe_store_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_keyframe_stored =
+            keyframe_manager_.AddKeyframe(
+                timestamp,
+                T_WL_,
+                cloud_lidar);
+
+        frame_timing.keyframe_store_ms +=
+            ElapsedMilliseconds(
+                first_keyframe_store_start,
+                std::chrono::steady_clock::now());
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        if (!first_keyframe_stored)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to store first keyframe."
+                << std::endl;
+            return false;
+        }
+
+        const Keyframe *first_keyframe =
+            keyframe_manager_.Latest();
+
+        if (first_keyframe == nullptr)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "first keyframe pointer is null."
+                << std::endl;
+            return false;
+        }
+
+        // ---------------------------------------------------------------------
+        // 1.2 Backend work is asynchronous.
+        //
+        // PoseGraph / global map / Scan Context / loop verification are no
+        // longer executed on the LiDAR processing thread.
+        // ---------------------------------------------------------------------
+
+        // ---------------------------------------------------------------------
+        // 1.3 Create Active Submap 0 and insert KF0.
+        //
+        // Submap internally reuses LocalMap for:
+        //
+        //     transform -> merge -> voxel
+        // ---------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            first_submap_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_submap_ok =
+            submap_manager_.AddKeyframe(
+                *first_keyframe);
+
+        frame_timing.submap_insert_ms +=
+            ElapsedMilliseconds(
+                first_submap_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_submap_ok)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to initialize Active Submap."
+                << std::endl;
+            return false;
+        }
+
+        // ---------------------------------------------------------------------
+        // 1.5 Prepare point-to-plane target from the current Submap tracking map.
+        // ---------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            first_prepare_target_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_prepare_target_ok =
+            registration_.PrepareTarget(
+                submap_manager_.GetTrackingMap(),
+                prepared_tracking_target_);
+
+        frame_timing.prepare_target_ms +=
+            ElapsedMilliseconds(
+                first_prepare_target_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_prepare_target_ok)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to prepare first Submap tracking target."
+                << std::endl;
+            return false;
+        }
+
+        const std::chrono::steady_clock::time_point
+            first_backend_enqueue_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_backend_enqueued =
+            EnqueueBackendKeyframe(
+                *first_keyframe,
+                submap_manager_.ActiveSubmapId());
+
+        frame_timing.backend_enqueue_ms +=
+            ElapsedMilliseconds(
+                first_backend_enqueue_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_backend_enqueued)
+        {
+            std::cerr
+                << "Async backend enqueue failed"
+                << " | keyframe=" << first_keyframe->id
+                << std::endl;
+        }
+
+        // The first keyframe becomes the detector reference pose.
+        keyframe_detector_.SetLastKeyframePose(T_WL_);
+
+        initialized_ = true;
+
+        // ---------------------------------------------------------------------
+        // 1.6 First frame has no ICP, so create a successful result manually.
+        // ---------------------------------------------------------------------
+        registration_result = LidarRegistrationResult();
+        registration_result.success = true;
+        registration_result.converged = true;
+        registration_result.iterations = 0;
+        registration_result.correspondences = 0;
+        registration_result.rmse = 0.0;
+        registration_result.T_target_source = T_WL_;
+
+        T_WL = T_WL_;
+
+        std::cout
+            << "RegistrationScan2LocalMap"
+            << " | first frame"
+            << " | keyframe=true"
+            << " | keyframe_id=0"
+            << " | keyframes=" << keyframe_manager_.Size()
+            << " | submaps=" << submap_manager_.SubmapCount()
+            << " | active_submap=" << submap_manager_.ActiveSubmapId()
+            << " | active_keyframes=" << submap_manager_.ActiveKeyframeCount()
+            << " | target_mode="
+            << (submap_manager_.IsTransitionActive()
+                    ? "TRANSITION"
+                    : "ACTIVE")
+            << " | target_points="
+            << submap_manager_.TrackingPointCount()
+            << std::endl;
+
+        frame_timing.accepted = true;
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        return true;
+    }
+
+    // =========================================================================
+    // 2. Save previous ACCEPTED pose.
+    //
+    // Do not modify T_WL_ until the candidate registration passes the quality
+    // gate. This follows:
+    //
+    //     Calculate -> Validate -> Commit
+    // =========================================================================
+    // T_WL_ always represents the LAST ACCEPTED LiDAR pose.
+    //
+    // If the immediately previous processed scan was rejected, T_WL_ still
+    // points to an older accepted scan. This behavior is intentional.
+    const Eigen::Isometry3d T_WL_previous = T_WL_;
+
+    // =========================================================================
+    // 3. Recovery-aware LiDAR constant-motion prediction.
+    //
+    // Normal tracking:
+    //
+    //     consecutive_rejected_frames_ = 0
+    //     prediction_steps             = 1
+    //
+    // so the behavior is exactly the same as before:
+    //
+    //     T_guess = T_last_accepted * DeltaT
+    //
+    //
+    // Short tracking interruption:
+    //
+    //     F100 accepted
+    //     F101 rejected
+    //     F102 current
+    //
+    // then:
+    //
+    //     consecutive_rejected_frames_ = 1
+    //     prediction_steps             = 2
+    //
+    // and:
+    //
+    //     T_guess = T_F100 * DeltaT * DeltaT
+    //
+    // This lets the LiDAR translation prediction span rejected frames.
+    //
+    // IMPORTANT:
+    //
+    // The number of extrapolation steps is capped. Constant-motion
+    // extrapolation is useful for SHORT recovery only. It must not grow
+    // without bound after tracking has been lost for a long time.
+    // =========================================================================
+    // Number of one-frame motion increments that should be extrapolated.
+    //
+    // Examples:
+    //
+    // rejected = 0
+    //     current is the next frame after last accepted
+    //     -> use 1 motion step
+    //
+    // rejected = 1
+    //     one frame was missed between last accepted and current
+    //     -> use 2 motion steps
+    //
+    // rejected = 4
+    //     -> use 5 motion steps
+    //
+    // rejected >= max limit
+    //     -> keep the prediction capped
+    //
+    // The cap prevents a stale motion model from being extrapolated to
+    // absurd distances after long-term tracking loss.
+    const std::size_t prediction_steps =
+        std::min(
+            consecutive_rejected_frames_ + 1,
+            max_recovery_prediction_steps_);
+
+    // Accumulated relative prediction from the last accepted LiDAR frame
+    // toward the current LiDAR frame.
+    //
+    // Start from Identity:
+    //
+    //     DeltaT_pred = I
+    Eigen::Isometry3d predicted_relative_transform =
+        Eigen::Isometry3d::Identity();
+
+    // Repeated composition:
+    //
+    // prediction_steps = 1:
+    //
+    //     DeltaT_pred = DeltaT
+    //
+    // prediction_steps = 2:
+    //
+    //     DeltaT_pred = DeltaT * DeltaT
+    //
+    // prediction_steps = 3:
+    //
+    //     DeltaT_pred = DeltaT * DeltaT * DeltaT
+    //
+    // Because transforms are SE(3) transforms, we compose them by matrix /
+    // Isometry multiplication rather than multiplying translation values alone.
+    for (std::size_t i = 0;
+         i < prediction_steps;
+         ++i)
+    {
+        predicted_relative_transform =
+            predicted_relative_transform *
+            last_relative_transform_;
+    }
+
+    // Convert the relative motion prediction into a global pose prediction:
+    //
+    //     T_WL_guess
+    //         =
+    //     T_WL_last_accepted * T_last_accepted_current_prediction
+    Eigen::Isometry3d initial_guess =
+        T_WL_previous *
+        predicted_relative_transform;
+
+    // =========================================================================
+    // 4. Optional IMU rotation prediction.
+    //
+    // Keep translation from LiDAR constant motion and replace only rotation:
+    //
+    //     R_WL_guess = R_WL_previous * R_relative(IMU)
+    // =========================================================================
+    if (imu_relative_rotation != nullptr &&
+        imu_relative_rotation->coeffs().allFinite() &&
+        imu_relative_rotation->norm() > 1.0e-12)
+    {
+        // Copy instead of modifying the caller's quaternion.
+        Eigen::Quaterniond delta_q = *imu_relative_rotation;
+
+        // Numerical integrations can introduce a very small norm error.
+        // Normalize before converting to a rotation matrix.
+        delta_q.normalize();
+
+        // IMPORTANT:
+        //
+        // We overwrite ONLY the rotation.
+        //
+        // Translation remains the LiDAR constant-motion / recovery prediction.
+        //
+        //     R_WL_guess
+        //         =
+        //     R_WL_last_accepted * R_relative_IMU
+        //
+        // This is useful because IMU is very good at short-term rotational
+        // prediction, while raw IMU translation integration is currently not
+        // trusted in this frontend.
+        initial_guess.linear() =
+            T_WL_previous.rotation() * delta_q.toRotationMatrix();
+    }
+
+    // =========================================================================
+    // 4.1 Tracking / recovery prediction diagnostics.
+    //
+    // This makes it obvious in the log whether we are:
+    //
+    //     TRACKING:
+    //         no rejected frame is pending.
+    //
+    //     RECOVERY:
+    //         one or more frames have been rejected and the translation
+    //         prediction is being extrapolated across the missing interval.
+    // =========================================================================
+
+    // =========================================================================
+    // 5. Primary Scan-to-LocalMap registration.
+    //
+    // source:
+    //     current scan in CURRENT LiDAR coordinates.
+    //
+    // target:
+    //     LocalMap in World coordinates.
+    //
+    // Therefore:
+    //
+    //     result.T_target_source = T_WL_current
+    //
+    // directly. Do NOT multiply by the previous global pose again.
+    // =========================================================================
+    LidarRegistrationResult result;
+
+    const std::chrono::steady_clock::time_point
+        primary_align_start =
+            std::chrono::steady_clock::now();
+
+    const GroundJointIcpStatus primary_joint_status =
+        RunTrustedGroundJointIcpV12(
+            this,
+            cloud_lidar,
+            prepared_tracking_target_,
+            frontend_ground_result,
+            initial_guess,
+            result);
+
+    bool registration_success =
+        false;
+
+    if (primary_joint_status ==
+        GroundJointIcpStatus::Success)
+    {
+        registration_success =
+            result.success;
+    }
+    else
+    {
+        if (primary_joint_status ==
+            GroundJointIcpStatus::Failed)
+        {
+            std::cout
+                << "GROUND_ICP_V13"
+                << " | stage=PRIMARY"
+                << " | action=FALLBACK_GENERAL"
+                << " | reason=JOINT_FAILED"
+                << std::endl;
+        }
+
+        registration_success =
+            registration_.Align(
+                cloud_lidar,
+                prepared_tracking_target_,
+                initial_guess,
+                result);
+    }
+
+    frame_timing.primary_align_ms +=
+        ElapsedMilliseconds(
+            primary_align_start,
+            std::chrono::steady_clock::now());
+
+    // =========================================================================
+    // 5.1 Candidate quality check helper.
+    //
+    // IMPORTANT:
+    //
+    // This lambda does NOT commit anything.
+    //
+    // It only answers:
+    //
+    //     "Is this candidate good enough to continue?"
+    //
+    // The same rule is used for:
+    //
+    //     primary point-to-plane result
+    //
+    // and
+    //
+    //     point-to-plane result after coarse recovery.
+    // =========================================================================
+    const auto CandidatePassesQualityGate =
+        [this](
+            bool align_success,
+            const LidarRegistrationResult &candidate)
+        -> bool
+    {
+        if (!align_success ||
+            !candidate.success)
+        {
+            return false;
+        }
+
+        if (!candidate.T_target_source
+                 .matrix()
+                 .allFinite())
+        {
+            return false;
+        }
+
+        if (!std::isfinite(candidate.rmse) ||
+            candidate.rmse >
+                max_accepted_rmse_)
+        {
+            return false;
+        }
+
+        if (candidate.correspondences <
+            min_accepted_correspondences_)
+        {
+            return false;
+        }
+
+        return true;
+    };
+
+    bool candidate_passed =
+        CandidatePassesQualityGate(
+            registration_success,
+            result);
+
+    // =========================================================================
+    // 5.2 Tracking Recovery V2
+    //
+    // Trigger:
+    //
+    //     normal point-to-plane Scan-to-LocalMap candidate is not good enough.
+    //
+    // Recovery strategy:
+    //
+    //     current LiDAR scan
+    //              |
+    //              v
+    //     coarse Point-to-Point ICP
+    //     against the current LocalMap
+    //              |
+    //              v
+    //       T_WL_coarse
+    //              |
+    //              v
+    //     existing Point-to-Plane
+    //     Scan-to-LocalMap refinement
+    //              |
+    //              v
+    //         same Quality Gate
+    //
+    // Why this is useful:
+    //
+    // The failure log shows point-to-plane Hessian degeneracy dominated by
+    // translation directions. The old Recovery V1 only extrapolates the
+    // constant-motion model. It does not create a new translation observation.
+    //
+    // Point-to-point ICP is used here only as a coarse reacquisition mechanism
+    // to provide a fresh translation estimate from LiDAR geometry.
+    //
+    // IMU behavior is unchanged:
+    //
+    //     IMU rotation still helped build `initial_guess`.
+    //
+    // No LiDAR-IMU state fusion is added here.
+    // =========================================================================
+    bool used_coarse_recovery = false;
+    double coarse_fitness =
+        std::numeric_limits<double>::infinity();
+
+    if (!candidate_passed)
+    {
+        frame_timing.recovery_triggered = true;
+
+        std::cout
+            << "Tracking Recovery V2 triggered"
+            << " | primary_success="
+            << (registration_success &&
+                        result.success
+                    ? "true"
+                    : "false")
+            << " | primary_corr="
+            << result.correspondences
+            << " | primary_rmse="
+            << result.rmse
+            << " | rejected_frames="
+            << consecutive_rejected_frames_
+            << std::endl;
+
+        // -----------------------------------------------------------------
+        // ROS2 debug block:
+        //
+        // Print exactly WHY point-to-plane failed and how far the primary
+        // candidate moved away from the prediction.
+        //
+        // Grep:
+        //
+        //     RECOVERY_DEBUG
+        // -----------------------------------------------------------------
+        const char *primary_reject_reason =
+            "UNKNOWN";
+
+        if (!registration_success ||
+            !result.success)
+        {
+            primary_reject_reason =
+                "ALIGN_FAILED";
+        }
+        else if (!result.T_target_source
+                      .matrix()
+                      .allFinite())
+        {
+            primary_reject_reason =
+                "NONFINITE_TRANSFORM";
+        }
+        else if (!std::isfinite(result.rmse) ||
+                 result.rmse >
+                     max_accepted_rmse_)
+        {
+            primary_reject_reason =
+                "RMSE";
+        }
+        else if (result.correspondences <
+                 min_accepted_correspondences_)
+        {
+            primary_reject_reason =
+                "CORRESPONDENCE";
+        }
+
+        Eigen::Vector3d primary_correction =
+            Eigen::Vector3d::Constant(
+                std::numeric_limits<double>::quiet_NaN());
+
+        if (result.T_target_source.matrix().allFinite())
+        {
+            primary_correction =
+                result.T_target_source.translation() -
+                initial_guess.translation();
+        }
+
+        const double primary_rotation_correction_deg =
+            result.T_target_source.matrix().allFinite()
+                ? RelativeRotationDeg(
+                      initial_guess,
+                      result.T_target_source)
+                : std::numeric_limits<double>::quiet_NaN();
+
+        RCLCPP_WARN(
+            kRecoveryLogger,
+            "RECOVERY_DEBUG PRIMARY_FAIL"
+            " | reason=%s"
+            " | target_mode=%s"
+            " | source_points=%zu"
+            " | target_points=%zu"
+            " | corr=%zu"
+            " | rmse=%.6f"
+            " | rejected_frames=%zu",
+            primary_reject_reason,
+            submap_manager_.IsTransitionActive()
+                ? "TRANSITION"
+                : "ACTIVE",
+            cloud_lidar ? cloud_lidar->size() : 0UL,
+            submap_manager_.TrackingPointCount(),
+            result.correspondences,
+            result.rmse,
+            consecutive_rejected_frames_);
+
+        RCLCPP_INFO(
+            kRecoveryLogger,
+            "RECOVERY_DEBUG POSE_BEFORE_COARSE"
+            " | prev=[%.4f %.4f %.4f]"
+            " | guess=[%.4f %.4f %.4f]"
+            " | primary=[%.4f %.4f %.4f]"
+            " | primary_minus_guess=[%.4f %.4f %.4f]"
+            " | correction_norm=%.4f"
+            " | correction_rot=%.3f deg",
+            T_WL_previous.translation().x(),
+            T_WL_previous.translation().y(),
+            T_WL_previous.translation().z(),
+            initial_guess.translation().x(),
+            initial_guess.translation().y(),
+            initial_guess.translation().z(),
+            result.T_target_source.translation().x(),
+            result.T_target_source.translation().y(),
+            result.T_target_source.translation().z(),
+            primary_correction.x(),
+            primary_correction.y(),
+            primary_correction.z(),
+            primary_correction.norm(),
+            primary_rotation_correction_deg);
+
+        Eigen::Isometry3d T_WL_coarse =
+            initial_guess;
+
+        const std::chrono::steady_clock::time_point
+            recovery_coarse_start =
+                std::chrono::steady_clock::now();
+
+        const bool coarse_success =
+            RunCoarsePointToPointRecovery(
+                cloud_lidar,
+                submap_manager_.GetTrackingMap(),
+                initial_guess,
+                T_WL_coarse,
+                coarse_fitness);
+
+        frame_timing.recovery_coarse_ms +=
+            ElapsedMilliseconds(
+                recovery_coarse_start,
+                std::chrono::steady_clock::now());
+
+        std::cout
+            << "Recovery coarse Point-to-Point ICP"
+            << " | success="
+            << (coarse_success
+                    ? "true"
+                    : "false")
+            << " | fitness="
+            << coarse_fitness
+            << " | correction_translation="
+            << (T_WL_coarse.translation() -
+                initial_guess.translation())
+                   .norm()
+            << " m"
+            << std::endl;
+
+        const Eigen::Vector3d coarse_correction =
+            T_WL_coarse.translation() -
+            initial_guess.translation();
+
+        const double coarse_rotation_correction_deg =
+            RelativeRotationDeg(
+                initial_guess,
+                T_WL_coarse);
+
+        RCLCPP_INFO(
+            kRecoveryLogger,
+            "RECOVERY_DEBUG COARSE_POINT_TO_POINT"
+            " | success=%s"
+            " | fitness=%.6f"
+            " | guess=[%.4f %.4f %.4f]"
+            " | coarse=[%.4f %.4f %.4f]"
+            " | delta=[%.4f %.4f %.4f]"
+            " | delta_norm=%.4f"
+            " | delta_rot=%.3f deg",
+            coarse_success ? "true" : "false",
+            coarse_fitness,
+            initial_guess.translation().x(),
+            initial_guess.translation().y(),
+            initial_guess.translation().z(),
+            T_WL_coarse.translation().x(),
+            T_WL_coarse.translation().y(),
+            T_WL_coarse.translation().z(),
+            coarse_correction.x(),
+            coarse_correction.y(),
+            coarse_correction.z(),
+            coarse_correction.norm(),
+            coarse_rotation_correction_deg);
+
+        if (coarse_success)
+        {
+            // -------------------------------------------------------------
+            // Coarse ICP is NOT accepted as final odometry.
+            //
+            // It becomes only a new initial guess for the original
+            // point-to-plane Scan-to-LocalMap optimizer.
+            // -------------------------------------------------------------
+            LidarRegistrationResult refined_result;
+
+            const std::chrono::steady_clock::time_point
+                recovery_refine_start =
+                    std::chrono::steady_clock::now();
+
+            const GroundJointIcpStatus recovery_joint_status =
+                RunTrustedGroundJointIcpV12(
+                    this,
+                    cloud_lidar,
+                    prepared_tracking_target_,
+                    frontend_ground_result,
+                    T_WL_coarse,
+                    refined_result);
+
+            bool recovery_used_ground_joint =
+                recovery_joint_status ==
+                GroundJointIcpStatus::Success;
+
+            bool refined_success =
+                false;
+
+            if (recovery_used_ground_joint)
+            {
+                refined_success =
+                    refined_result.success;
+            }
+            else
+            {
+                refined_success =
+                    registration_.Align(
+                        cloud_lidar,
+                        prepared_tracking_target_,
+                        T_WL_coarse,
+                        refined_result);
+            }
+
+            frame_timing.recovery_refine_ms +=
+                ElapsedMilliseconds(
+                    recovery_refine_start,
+                    std::chrono::steady_clock::now());
+
+            const bool refined_passed =
+                CandidatePassesQualityGate(
+                    refined_success,
+                    refined_result);
+
+            std::cout
+                << "Recovery Point-to-Plane refine"
+                << " | success="
+                << (refined_success &&
+                            refined_result.success
+                        ? "true"
+                        : "false")
+                << " | corr="
+                << refined_result.correspondences
+                << " | rmse="
+                << refined_result.rmse
+                << " | passed="
+                << (refined_passed
+                        ? "true"
+                        : "false")
+                << std::endl;
+
+            const Eigen::Vector3d refine_correction =
+                refined_result.T_target_source.translation() -
+                T_WL_coarse.translation();
+
+            const double refine_rotation_correction_deg =
+                RelativeRotationDeg(
+                    T_WL_coarse,
+                    refined_result.T_target_source);
+
+            RCLCPP_INFO(
+                kRecoveryLogger,
+                "RECOVERY_DEBUG REFINE_POINT_TO_PLANE"
+                " | success=%s"
+                " | passed=%s"
+                " | corr=%zu"
+                " | rmse=%.6f"
+                " | coarse=[%.4f %.4f %.4f]"
+                " | refined=[%.4f %.4f %.4f]"
+                " | refine_delta=[%.4f %.4f %.4f]"
+                " | refine_delta_norm=%.4f"
+                " | refine_delta_rot=%.3f deg",
+                (refined_success &&
+                 refined_result.success)
+                    ? "true"
+                    : "false",
+                refined_passed
+                    ? "true"
+                    : "false",
+                refined_result.correspondences,
+                refined_result.rmse,
+                T_WL_coarse.translation().x(),
+                T_WL_coarse.translation().y(),
+                T_WL_coarse.translation().z(),
+                refined_result.T_target_source.translation().x(),
+                refined_result.T_target_source.translation().y(),
+                refined_result.T_target_source.translation().z(),
+                refine_correction.x(),
+                refine_correction.y(),
+                refine_correction.z(),
+                refine_correction.norm(),
+                refine_rotation_correction_deg);
+
+            // Keep the refined diagnostics as the final candidate diagnostics.
+            //
+            // Even if refinement still fails, the caller can see why.
+            result =
+                refined_result;
+
+            registration_success =
+                refined_success;
+
+            candidate_passed =
+                refined_passed;
+
+            if (candidate_passed)
+            {
+                used_coarse_recovery = true;
+                frame_timing.coarse_recovery_accepted = true;
+            }
+        }
+    }
+
+    // =========================================================================
+    // 5.3 Ground ICP V1.3 Quality-Weighted Observable-Subspace Joint-Hessian.
+    //
+    // No post-refinement is performed here.  When Ground V4 is trusted, it
+    // has already participated in EVERY main GN iteration through:
+    //
+    //     H_total = H_general + lambda_g * H_ground
+    //     b_total = b_general + lambda_g * b_ground
+    //
+    // When Ground is not trusted, the candidate came from the unchanged
+    // ordinary registration_.Align() fallback.
+    // =========================================================================
+
+    // Always expose the final candidate diagnostics to the caller.
+    registration_result = result;
+
+    // Reaching max iterations is only a warning. The Quality Gate below is
+    // still the final acceptance rule.
+    if (registration_success &&
+        result.success &&
+        !result.converged)
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::AddFrame(): "
+            << "registration reached max iterations."
+            << " corr="
+            << result.correspondences
+            << " rmse="
+            << result.rmse
+            << std::endl;
+    }
+
+    // =========================================================================
+    // 6. Final Quality Gate.
+    //
+    // Only ONE rejection counter update happens here.
+    //
+    // That is important because one LiDAR frame may have attempted:
+    //
+    //     primary registration
+    //     + coarse recovery
+    //     + refined registration
+    //
+    // but it is still only ONE LiDAR frame.
+    //
+    // A rejected result must NOT:
+    //
+    //     update T_WL_,
+    //     update last_relative_transform_,
+    //     create a keyframe,
+    //     update LocalMap,
+    //     replace prepared_tracking_target_.
+    // =========================================================================
+    if (!candidate_passed)
+    {
+        ++consecutive_rejected_frames_;
+
+        if (!registration_success ||
+            !result.success)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "registration/recovery failed."
+                << " | consecutive_rejected="
+                << consecutive_rejected_frames_
+                << std::endl;
+        }
+        else if (!result.T_target_source
+                      .matrix()
+                      .allFinite())
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "registration rejected because transform contains NaN/Inf."
+                << " | consecutive_rejected="
+                << consecutive_rejected_frames_
+                << std::endl;
+        }
+        else if (!std::isfinite(result.rmse) ||
+                 result.rmse >
+                     max_accepted_rmse_)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "registration rejected by RMSE."
+                << " rmse="
+                << result.rmse
+                << " max="
+                << max_accepted_rmse_
+                << " | consecutive_rejected="
+                << consecutive_rejected_frames_
+                << std::endl;
+        }
+        else
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "registration rejected by correspondence count."
+                << " corr="
+                << result.correspondences
+                << " min="
+                << min_accepted_correspondences_
+                << " | consecutive_rejected="
+                << consecutive_rejected_frames_
+                << std::endl;
+        }
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        return false;
+    }
+
+    if (used_coarse_recovery)
+    {
+        std::cout
+            << "Tracking Recovery V2 accepted"
+            << " | coarse_fitness="
+            << coarse_fitness
+            << " | refined_corr="
+            << result.correspondences
+            << " | refined_rmse="
+            << result.rmse
+            << std::endl;
+
+        const Eigen::Vector3d final_jump =
+            result.T_target_source.translation() -
+            T_WL_previous.translation();
+
+        const double final_rotation_jump_deg =
+            RelativeRotationDeg(
+                T_WL_previous,
+                result.T_target_source);
+
+        RCLCPP_WARN(
+            kRecoveryLogger,
+            "RECOVERY_DEBUG FINAL_ACCEPTED"
+            " | prev=[%.4f %.4f %.4f]"
+            " | final=[%.4f %.4f %.4f]"
+            " | frame_jump=[%.4f %.4f %.4f]"
+            " | jump_norm=%.4f"
+            " | jump_rot=%.3f deg"
+            " | coarse_fitness=%.6f"
+            " | refined_corr=%zu"
+            " | refined_rmse=%.6f",
+            T_WL_previous.translation().x(),
+            T_WL_previous.translation().y(),
+            T_WL_previous.translation().z(),
+            result.T_target_source.translation().x(),
+            result.T_target_source.translation().y(),
+            result.T_target_source.translation().z(),
+            final_jump.x(),
+            final_jump.y(),
+            final_jump.z(),
+            final_jump.norm(),
+            final_rotation_jump_deg,
+            coarse_fitness,
+            result.correspondences,
+            result.rmse);
+    }
+
+    // Candidate global pose estimated directly by Scan-to-LocalMap.
+    //
+    // Because:
+    //
+    //     target = World-frame LocalMap
+    //     source = current LiDAR scan
+    //
+    // registration returns:
+    //
+    //     T_target_source
+    //         =
+    //     T_WL_current
+    //
+    // There is NO additional pose accumulation here.
+    const Eigen::Isometry3d T_WL_current = result.T_target_source;
+
+    // =========================================================================
+    // 7. Relative LiDAR motion for next-frame constant-motion prediction.
+    //
+    //     T_previous_current = T_WL_previous^-1 * T_WL_current
+    // =========================================================================
+    // Relative transform from the LAST ACCEPTED pose to the current accepted
+    // candidate:
+    //
+    //     T_previous_current
+    //         =
+    //     T_WL_previous^-1 * T_WL_current
+    //
+    // Normal tracking:
+    //     this spans one LiDAR frame interval.
+    //
+    // Recovery:
+    //     this may span several LiDAR frame intervals.
+    //
+    // This distinction is critical later when updating the one-frame motion
+    // model.
+    const Eigen::Isometry3d T_previous_current =
+        T_WL_previous.inverse() * T_WL_current;
+
+    if (!T_previous_current.matrix().allFinite())
+    {
+        ++consecutive_rejected_frames_;
+
+        std::cerr
+            << "RegistrationScan2LocalMap::AddFrame(): "
+            << "relative transform contains NaN/Inf."
+            << " | consecutive_rejected="
+            << consecutive_rejected_frames_
+            << std::endl;
+
+        return false;
+    }
+
+    // =========================================================================
+    // 8. Keyframe decision.
+    //
+    // IMPORTANT:
+    //     Compare with LAST KEYFRAME, not previous ordinary scan.
+    // =========================================================================
+    // These are distances relative to the LAST KEYFRAME pose.
+    //
+    // They are diagnostic outputs from KeyframeDetector and are not the
+    // frame-to-frame odometry increments.
+    double keyframe_translation = 0.0;
+    double keyframe_rotation_deg = 0.0;
+
+    const std::chrono::steady_clock::time_point
+        keyframe_decision_start =
+            std::chrono::steady_clock::now();
+
+    const bool is_keyframe =
+        keyframe_detector_.ShouldCreateKeyframe(
+            T_WL_current,
+            keyframe_translation,
+            keyframe_rotation_deg);
+
+    frame_timing.keyframe_decision_ms +=
+        ElapsedMilliseconds(
+            keyframe_decision_start,
+            std::chrono::steady_clock::now());
+
+    frame_timing.keyframe =
+        is_keyframe;
+
+    // =========================================================================
+    // 9. Keyframe / Submap update.
+    //
+    // ONLY keyframes:
+    //
+    //     KeyframeManager -> complete historical record
+    //     SubmapManager   -> Active/Previous lifecycle
+    //     LocalMap        -> internal Submap cloud builder
+    // =========================================================================
+    if (is_keyframe)
+    {
+        // ---------------------------------------------------------------------
+        // 9.1 Store historical Keyframe.
+        // ---------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            keyframe_store_start =
+                std::chrono::steady_clock::now();
+
+        Eigen::Matrix<double, 6, 6> odom_information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        const bool dynamic_information_valid =
+            BuildOdometryInformationV2(
+                result,
+                T_WL_current,
+                odom_information);
+
+        double maximum_absolute_off_diagonal =
+            0.0;
+
+        double maximum_translation_rotation_coupling =
+            0.0;
+
+        if (dynamic_information_valid)
+        {
+            for (int i = 0;
+                 i < 6;
+                 ++i)
+            {
+                for (int j = 0;
+                     j < 6;
+                     ++j)
+                {
+                    if (i == j)
+                    {
+                        continue;
+                    }
+
+                    maximum_absolute_off_diagonal =
+                        std::max(
+                            maximum_absolute_off_diagonal,
+                            std::abs(
+                                odom_information(i, j)));
+
+                    const bool translation_rotation_pair =
+                        (i < 3 && j >= 3) ||
+                        (i >= 3 && j < 3);
+
+                    if (translation_rotation_pair)
+                    {
+                        maximum_translation_rotation_coupling =
+                            std::max(
+                                maximum_translation_rotation_coupling,
+                                std::abs(
+                                    odom_information(i, j)));
+                    }
+                }
+            }
+        }
+
+        const bool keyframe_stored =
+            keyframe_manager_.AddKeyframe(
+                timestamp,
+                T_WL_current,
+                cloud_lidar,
+                dynamic_information_valid
+                    ? &odom_information
+                    : nullptr);
+
+        frame_timing.keyframe_store_ms +=
+            ElapsedMilliseconds(
+                keyframe_store_start,
+                std::chrono::steady_clock::now());
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        if (!keyframe_stored)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to store historical keyframe."
+                << std::endl;
+            return false;
+        }
+
+        const Keyframe *new_keyframe =
+            keyframe_manager_.Latest();
+
+        if (new_keyframe == nullptr)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "latest keyframe pointer is null."
+                << std::endl;
+            return false;
+        }
+
+        // ---------------------------------------------------------------------
+        // 9.2 Backend work is asynchronous.
+        //
+        // The frontend only stores the Keyframe and updates its tracking
+        // Submap. PoseGraph / map / Scan Context / LoopVerifier run later in
+        // backend_thread_.
+        // ---------------------------------------------------------------------
+
+        // ---------------------------------------------------------------------
+        // 9.3 Capture the frontend Submap that OWNS this Keyframe BEFORE insertion.
+        //
+        // AddKeyframe() may fill it and immediately create the next overlapping
+        // Active Submap. We keep this id only for local-neighborhood rejection,
+        // temporal continuity, and redundant-loop suppression. It is NOT a
+        // PoseGraph vertex id.
+        // ---------------------------------------------------------------------
+        const Submap *current_owner_before_add =
+            submap_manager_.ActiveSubmap();
+
+        if (current_owner_before_add == nullptr ||
+            !current_owner_before_add->has_origin_pose ||
+            !current_owner_before_add->T_WS.matrix().allFinite())
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "current Active Submap is invalid before keyframe insertion."
+                << std::endl;
+            return false;
+        }
+
+        const std::size_t current_owner_submap_id =
+            current_owner_before_add->id;
+
+        // Add Keyframe to Active Submap. If it becomes full, SubmapManager may
+        // finish it and create the next Active Submap here.
+        const std::chrono::steady_clock::time_point
+            submap_insert_start =
+                std::chrono::steady_clock::now();
+
+        const bool submap_insert_ok =
+            submap_manager_.AddKeyframe(
+                *new_keyframe);
+
+        frame_timing.submap_insert_ms +=
+            ElapsedMilliseconds(
+                submap_insert_start,
+                std::chrono::steady_clock::now());
+
+        if (!submap_insert_ok)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to update SubmapManager."
+                << std::endl;
+            return false;
+        }
+
+        if (submap_manager_.LastAddStartedNewSubmap())
+        {
+            std::cout
+                << "Submap transition"
+                << " | finished_submap="
+                << submap_manager_.LastFinishedSubmapId()
+                << " | previous_submap="
+                << submap_manager_.PreviousSubmapId()
+                << " | new_active_submap="
+                << submap_manager_.ActiveSubmapId()
+                << " | overlap_keyframes="
+                << submap_manager_.ActiveKeyframeCount()
+                << " | tracking_target=PREVIOUS+ACTIVE"
+                << " | target_points="
+                << submap_manager_.TrackingPointCount()
+                << std::endl;
+            // V6: Submap transition changes only frontend/local-map geometry.
+            // PoseGraph vertices were already added per Keyframe above.
+        }
+
+        // ---------------------------------------------------------------------
+        // 9.5 Submap tracking map changed -> rebuild registration target.
+        // ---------------------------------------------------------------------
+        PreparedLidarTarget new_prepared_active_submap;
+
+        const std::chrono::steady_clock::time_point
+            prepare_target_start =
+                std::chrono::steady_clock::now();
+
+        const bool prepare_target_ok =
+            registration_.PrepareTarget(
+                submap_manager_.GetTrackingMap(),
+                new_prepared_active_submap);
+
+        frame_timing.prepare_target_ms +=
+            ElapsedMilliseconds(
+                prepare_target_start,
+                std::chrono::steady_clock::now());
+
+        if (!prepare_target_ok)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::AddFrame(): "
+                << "failed to prepare updated Submap tracking target."
+                << std::endl;
+            return false;
+        }
+
+        prepared_tracking_target_ =
+            std::move(
+                new_prepared_active_submap);
+
+        const std::chrono::steady_clock::time_point
+            backend_enqueue_start =
+                std::chrono::steady_clock::now();
+
+        const bool backend_enqueued =
+            EnqueueBackendKeyframe(
+                *new_keyframe,
+                current_owner_submap_id);
+
+        frame_timing.backend_enqueue_ms +=
+            ElapsedMilliseconds(
+                backend_enqueue_start,
+                std::chrono::steady_clock::now());
+
+        if (!backend_enqueued)
+        {
+            std::cerr
+                << "Async backend enqueue failed"
+                << " | keyframe=" << new_keyframe->id
+                << std::endl;
+        }
+
+        keyframe_detector_.SetLastKeyframePose(
+            T_WL_current);
+    }
+
+    // =========================================================================
+    // Tracking recovery state.
+    //
+    // IMPORTANT:
+    //
+    // If the previous frames were rejected, then:
+    //
+    //     T_previous_current
+    //
+    // is NOT a one-frame LiDAR motion.
+    //
+    // Example:
+    //
+    //     F100 accepted
+    //     F101 rejected
+    //     F102 rejected
+    //     F103 rejected
+    //     F104 accepted
+    //
+    // Then:
+    //
+    //     T_previous_current
+    //         =
+    //     T_F100^-1 * T_F104
+    //
+    // This is a FOUR-frame accumulated motion.
+    //
+    // Therefore, after a recovery we must NOT directly store it into:
+    //
+    //     last_relative_transform_
+    //
+    // because last_relative_transform_ is supposed to represent approximately
+    // ONE LiDAR-frame motion for the next constant-motion prediction.
+    // =========================================================================
+    // If this value is true, the current candidate is the FIRST accepted
+    // frame after one or more consecutive rejected scans.
+    //
+    // Example:
+    //
+    //     F100 accepted
+    //     F101 rejected
+    //     F102 rejected
+    //     F103 accepted  <-- recovered_from_tracking_loss == true
+    const bool recovered_from_tracking_loss =
+        consecutive_rejected_frames_ > 0;
+
+    // =========================================================================
+    // Motion Model Gate V1
+    //
+    // PURPOSE:
+    //
+    // A pose can pass the ordinary Quality Gate:
+    //
+    //     transform is finite
+    //     RMSE is acceptable
+    //     correspondence count is acceptable
+    //
+    // but its frame-to-frame motion can still be suspicious.
+    //
+    // This is especially possible in geometrically weak / degenerate scenes:
+    // point-to-plane residual can remain small even though one weakly
+    // constrained translation direction jumps too much.
+    //
+    // IMPORTANT DESIGN DECISION:
+    //
+    //     Pose acceptance
+    //
+    // and
+    //
+    //     Motion-model update
+    //
+    // are TWO DIFFERENT decisions.
+    //
+    // If the current pose passed the normal Quality Gate, we still accept:
+    //
+    //     T_WL_current
+    //
+    // However, if its relative translation suddenly becomes much larger than
+    // the previous reliable one-frame motion, we do NOT allow that suspicious
+    // relative transform to overwrite:
+    //
+    //     last_relative_transform_
+    //
+    // The old reliable motion model is kept for the next initial guess.
+    //
+    // Example from the failure log:
+    //
+    //     previous reliable translation ~= 0.125 m
+    //     current relative translation  ~= 0.291 m
+    //
+    //     ratio ~= 2.32
+    //
+    // The pose may still be usable, but 0.291 m should not immediately become
+    // the next constant-motion predictor.
+    //
+    // V1 checks translation only. Later we can also incorporate Hessian
+    // degeneracy / weak-direction diagnostics into this decision.
+    // =========================================================================
+    const double previous_motion_translation =
+        last_relative_transform_.translation().norm();
+
+    const double current_motion_translation =
+        T_previous_current.translation().norm();
+
+    // Do not compute a meaningful ratio when the previous motion is almost
+    // zero, otherwise tiny numerical motion could make the ratio explode.
+    constexpr double min_reference_translation = 0.05;
+
+    // A new one-frame translation larger than 2x the previous reliable
+    // one-frame translation is considered suspicious in V1.
+    constexpr double max_translation_ratio = 2.0;
+
+    // Additional absolute floor:
+    //
+    // We only block a "large jump" if the current translation itself is at
+    // least 0.20 m. This avoids treating harmless changes such as:
+    //
+    //     0.02 m -> 0.05 m
+    //
+    // as a serious motion-model fault just because the ratio is large.
+    constexpr double min_suspicious_translation = 0.20;
+
+    double motion_translation_ratio = 1.0;
+
+    if (previous_motion_translation >
+        min_reference_translation)
+    {
+        motion_translation_ratio =
+            current_motion_translation /
+            previous_motion_translation;
+    }
+
+    bool motion_model_update_allowed =
+        !used_coarse_recovery;
+
+    // If coarse recovery was required, the final pose may be valid but this
+    // frame is deliberately NOT used to refresh the one-frame constant-motion
+    // predictor. The next normal accepted frame can rebuild that predictor.
+    if (used_coarse_recovery)
+    {
+    }
+
+    // Recovery frames are already handled separately:
+    //
+    //     T_previous_current
+    //
+    // spans multiple LiDAR intervals after rejected frames, so it must never
+    // be used directly as a one-frame motion model.
+    //
+    // Therefore Motion Model Gate V1 is only evaluated during normal tracking.
+    if (!recovered_from_tracking_loss &&
+        previous_motion_translation >
+            min_reference_translation &&
+        current_motion_translation >
+            min_suspicious_translation &&
+        motion_translation_ratio >
+            max_translation_ratio)
+    {
+        motion_model_update_allowed = false;
+    }
+
+    if (recovered_from_tracking_loss)
+    {
+    }
+
+    // =========================================================================
+    // Commit accepted global pose.
+    //
+    // Every accepted frame updates the global LiDAR pose, including a frame
+    // that was successfully recovered.
+    // =========================================================================
+    // Commit the accepted global pose to internal state.
+    //
+    // This is always safe here because:
+    //
+    //     registration succeeded
+    //     Quality Gate passed
+    //     keyframe update (if required) succeeded
+    //
+    // World-Z decomposition is intentionally evaluated HERE: Ground ICP has
+    // already produced the final candidate and every later frontend operation
+    // that can reject the frame has succeeded. Therefore this diagnostic never
+    // accumulates an uncommitted/rejected pose.
+
+    T_WL_ =
+        T_WL_current;
+
+    // Also write the same accepted pose to the caller's output parameter.
+    T_WL =
+        T_WL_current;
+
+    // =========================================================================
+    // Update constant-motion model.
+    //
+    // Normal TRACKING:
+    //
+    //     F100 accepted
+    //     F101 accepted
+    //
+    // T_previous_current is truly one-frame motion, so we update:
+    //
+    //     last_relative_transform_ = T_F100^-1 * T_F101
+    //
+    //
+    // RECOVERY:
+    //
+    //     F100 accepted
+    //     F101 rejected
+    //     F102 rejected
+    //     F103 accepted
+    //
+    // T_previous_current is accumulated motion across THREE scan intervals.
+    //
+    // DO NOT use that accumulated transform as the next one-frame motion model.
+    //
+    // Instead, temporarily keep the last reliable single-frame motion.
+    //
+    // If the very next frame F104 is accepted normally, then:
+    //
+    //     T_F103^-1 * T_F104
+    //
+    // becomes a true one-frame motion again and the model will automatically
+    // update on that frame.
+    // =========================================================================
+    if (!recovered_from_tracking_loss &&
+        motion_model_update_allowed)
+    {
+        // NORMAL TRACKING + MOTION MODEL GATE PASSED:
+        //
+        // previous accepted frame and current frame are adjacent accepted
+        // LiDAR scans, and the new relative translation is not suspicious.
+        //
+        // Therefore T_previous_current becomes the new one-frame predictor.
+        last_relative_transform_ =
+            T_previous_current;
+    }
+    else if (recovered_from_tracking_loss)
+    {
+        // RECOVERY:
+        //
+        // Keep the old reliable one-frame model because T_previous_current
+        // spans multiple LiDAR intervals.
+    }
+    else
+    {
+        // NORMAL TRACKING, BUT MOTION MODEL GATE REJECTED THE UPDATE:
+        //
+        // IMPORTANT:
+        //     The POSE is still accepted.
+        //
+        // Only the constant-motion predictor is protected from a suspicious
+        // frame-to-frame jump.
+    }
+
+    // Recovery has now been successfully completed.
+    //
+    // The next scan starts again in normal TRACKING mode:
+    //
+    //     rejected_frames = 0
+    //     prediction_steps = 1
+    //
+    // If that next scan is accepted, it will provide a fresh one-frame
+    // relative transform and automatically refresh last_relative_transform_.
+    consecutive_rejected_frames_ = 0;
+
+    // =========================================================================
+    // 12. Diagnostics.
+    //
+    // Expected after enough motion:
+    //
+    //     keyframes=25 | map_frames=10
+    //
+    // KeyframeManager = full history
+    // LocalMap        = recent keyframe window
+    // =========================================================================
+
+    frame_timing.accepted = true;
+    frame_timing.keyframes_after =
+        keyframe_manager_.Size();
+
+    return true;
+}
+
+// ============================================================================
+// AddKeyframeToPoseGraph()
+//
+// V6 backend bridge:
+//
+//     New Keyframe KF_i
+//           |
+//           +--> PoseGraph Vertex i, X_i = T_WK_i
+//           |
+//           +--> sequential Keyframe odometry edge from KF_(i-1)
+//
+// Measurement convention:
+//
+//     Z_(i-1,i)
+//       = T_K(i-1)_Ki
+//       = T_WK(i-1)^-1 * T_WKi
+//
+// Submap finishing is deliberately NOT involved here.
 // ============================================================================
 void RegistrationScan2LocalMap::StartBackendWorker()
 {
@@ -5404,1982 +5702,6 @@ void RegistrationScan2LocalMap::BackendLoop()
 //
 // ============================================================================
 
-bool RegistrationScan2LocalMap::AddFrame(
-    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
-    double timestamp,
-    Eigen::Isometry3d &T_WL,
-    LidarRegistrationResult &registration_result,
-    const Eigen::Quaterniond *imu_relative_rotation)
-{
-    FrameTimingDiagnostics frame_timing;
-    frame_timing.keyframes_before =
-        keyframe_manager_.Size();
-
-    frame_timing.keyframes_after =
-        frame_timing.keyframes_before;
-
-    FrameTimingReporter frame_timing_reporter(
-        frame_timing);
-
-    // =========================================================================
-    // 0. Validate input.
-    // =========================================================================
-    if (!cloud_lidar || cloud_lidar->empty())
-    {
-        std::cerr
-            << "RegistrationScan2LocalMap::AddFrame(): input cloud is empty."
-            << std::endl;
-        return false;
-    }
-
-    if (!std::isfinite(timestamp))
-    {
-        std::cerr
-            << "RegistrationScan2LocalMap::AddFrame(): timestamp is invalid."
-            << std::endl;
-        return false;
-    }
-
-    // =========================================================================
-    // Ground ICP V1.1 dual-branch input stage.
-    //
-    // Ordinary Scan-to-LocalMap keeps using cloud_lidar, i.e. the final sparse
-    // registration cloud after the normal Voxel/SOR/ROR chain.
-    //
-    // Ground V4.0 instead consumes the one-shot Basic/ROI/CropBox cloud captured
-    // by PreProcessor::preprocess() BEFORE the coarse registration voxel and
-    // outlier filters.  Inside SegmentFrontendGround it is brought back to the
-    // validated Ground-V4 operating point with a dedicated 0.15 m voxel.
-    //
-    // If the dense bridge is unavailable for any reason, we fall back to the
-    // original registration cloud.  This preserves the V1 fail-safe behavior.
-    // =========================================================================
-    pcl::PointCloud<LIDAR_POINT>::ConstPtr ground_input_cloud =
-        fr_slam::ConsumeGroundIcpDenseInput();
-
-    const char *ground_input_source =
-        "BASIC_BRIDGE";
-
-    if (!ground_input_cloud ||
-        ground_input_cloud->empty())
-    {
-        ground_input_cloud =
-            cloud_lidar;
-
-        ground_input_source =
-            "REGISTRATION_FALLBACK";
-    }
-
-    const std::chrono::steady_clock::time_point
-        ground_segment_start =
-            std::chrono::steady_clock::now();
-
-    const fr_slam::GroundSegmentationResult frontend_ground_result =
-        SegmentFrontendGround(
-            this,
-            ground_input_cloud,
-            ground_input_source);
-
-    frame_timing.ground_segment_ms +=
-        ElapsedMilliseconds(
-            ground_segment_start,
-            std::chrono::steady_clock::now());
-
-    // =========================================================================
-    // 1. First frame initialization.
-    //
-    // There is no LocalMap yet, so the first frame does not run ICP.
-    // The first LiDAR pose defines the SLAM World origin:
-    //
-    //     T_WL0 = Identity
-    //
-    // The first frame becomes KF0 and creates Active Submap 0.
-    // =========================================================================
-    if (!initialized_)
-    {
-        frame_timing.first_frame = true;
-        frame_timing.keyframe = true;
-
-        // The very first accepted LiDAR scan defines the World origin.
-        //
-        // Therefore:
-        //
-        //     LiDAR_0 == World
-        //
-        // and:
-        //
-        //     T_WL0 = I
-        T_WL_ = Eigen::Isometry3d::Identity();
-
-        // At startup there is no previous LiDAR motion yet.
-        //
-        // Identity means:
-        //
-        //     "predict no relative motion"
-        //
-        // until registration estimates the first real relative transform.
-        last_relative_transform_ = Eigen::Isometry3d::Identity();
-
-        // No frame has been rejected before the first frame.
-        consecutive_rejected_frames_ = 0;
-
-        // ---------------------------------------------------------------------
-        // 1.1 Store KF0 in complete historical KeyframeManager.
-        // ---------------------------------------------------------------------
-        const std::chrono::steady_clock::time_point
-            first_keyframe_store_start =
-                std::chrono::steady_clock::now();
-
-        const bool first_keyframe_stored =
-            keyframe_manager_.AddKeyframe(
-                timestamp,
-                T_WL_,
-                cloud_lidar);
-
-        frame_timing.keyframe_store_ms +=
-            ElapsedMilliseconds(
-                first_keyframe_store_start,
-                std::chrono::steady_clock::now());
-
-        frame_timing.keyframes_after =
-            keyframe_manager_.Size();
-
-        if (!first_keyframe_stored)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to store first keyframe."
-                << std::endl;
-            return false;
-        }
-
-        const Keyframe *first_keyframe =
-            keyframe_manager_.Latest();
-
-        if (first_keyframe == nullptr)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "first keyframe pointer is null."
-                << std::endl;
-            return false;
-        }
-
-        // ---------------------------------------------------------------------
-        // 1.2 Backend work is asynchronous.
-        //
-        // PoseGraph / global map / Scan Context / loop verification are no
-        // longer executed on the LiDAR processing thread.
-        // ---------------------------------------------------------------------
-
-        // ---------------------------------------------------------------------
-        // 1.3 Create Active Submap 0 and insert KF0.
-        //
-        // Submap internally reuses LocalMap for:
-        //
-        //     transform -> merge -> voxel
-        // ---------------------------------------------------------------------
-        const std::chrono::steady_clock::time_point
-            first_submap_start =
-                std::chrono::steady_clock::now();
-
-        const bool first_submap_ok =
-            submap_manager_.AddKeyframe(
-                *first_keyframe);
-
-        frame_timing.submap_insert_ms +=
-            ElapsedMilliseconds(
-                first_submap_start,
-                std::chrono::steady_clock::now());
-
-        if (!first_submap_ok)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to initialize Active Submap."
-                << std::endl;
-            return false;
-        }
-
-        // ---------------------------------------------------------------------
-        // 1.5 Prepare point-to-plane target from the current Submap tracking map.
-        // ---------------------------------------------------------------------
-        const std::chrono::steady_clock::time_point
-            first_prepare_target_start =
-                std::chrono::steady_clock::now();
-
-        const bool first_prepare_target_ok =
-            registration_.PrepareTarget(
-                submap_manager_.GetTrackingMap(),
-                prepared_tracking_target_);
-
-        frame_timing.prepare_target_ms +=
-            ElapsedMilliseconds(
-                first_prepare_target_start,
-                std::chrono::steady_clock::now());
-
-        if (!first_prepare_target_ok)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to prepare first Submap tracking target."
-                << std::endl;
-            return false;
-        }
-
-        const std::chrono::steady_clock::time_point
-            first_backend_enqueue_start =
-                std::chrono::steady_clock::now();
-
-        const bool first_backend_enqueued =
-            EnqueueBackendKeyframe(
-                *first_keyframe,
-                submap_manager_.ActiveSubmapId());
-
-        frame_timing.backend_enqueue_ms +=
-            ElapsedMilliseconds(
-                first_backend_enqueue_start,
-                std::chrono::steady_clock::now());
-
-        if (!first_backend_enqueued)
-        {
-            std::cerr
-                << "Async backend enqueue failed"
-                << " | keyframe=" << first_keyframe->id
-                << std::endl;
-        }
-
-        // The first keyframe becomes the detector reference pose.
-        keyframe_detector_.SetLastKeyframePose(T_WL_);
-
-        initialized_ = true;
-
-        // ---------------------------------------------------------------------
-        // 1.6 First frame has no ICP, so create a successful result manually.
-        // ---------------------------------------------------------------------
-        registration_result = LidarRegistrationResult();
-        registration_result.success = true;
-        registration_result.converged = true;
-        registration_result.iterations = 0;
-        registration_result.correspondences = 0;
-        registration_result.rmse = 0.0;
-        registration_result.T_target_source = T_WL_;
-
-        if (!ResetWorldZDecompositionRuntime(
-                this,
-                timestamp,
-                T_WL_))
-        {
-            std::cerr
-                << "FR_Z_DECOMP"
-                << " | failed to initialize diagnostic"
-                << std::endl;
-        }
-
-        if (!WriteFrontendZDriftDiagnostic(
-                true,
-                first_keyframe->id,
-                -1,
-                timestamp,
-                T_WL_,
-                nullptr,
-                registration_result))
-        {
-            std::cerr
-                << "FR_FRONTEND_Z_DIAGNOSTIC"
-                << " | failed to write KF0"
-                << std::endl;
-        }
-
-        T_WL = T_WL_;
-
-        std::cout
-            << "RegistrationScan2LocalMap"
-            << " | first frame"
-            << " | keyframe=true"
-            << " | keyframe_id=0"
-            << " | keyframes=" << keyframe_manager_.Size()
-            << " | submaps=" << submap_manager_.SubmapCount()
-            << " | active_submap=" << submap_manager_.ActiveSubmapId()
-            << " | active_keyframes=" << submap_manager_.ActiveKeyframeCount()
-            << " | target_mode="
-            << (submap_manager_.IsTransitionActive()
-                    ? "TRANSITION"
-                    : "ACTIVE")
-            << " | target_points="
-            << submap_manager_.TrackingPointCount()
-            << std::endl;
-
-        frame_timing.accepted = true;
-        frame_timing.keyframes_after =
-            keyframe_manager_.Size();
-
-        return true;
-    }
-
-    // =========================================================================
-    // 2. Save previous ACCEPTED pose.
-    //
-    // Do not modify T_WL_ until the candidate registration passes the quality
-    // gate. This follows:
-    //
-    //     Calculate -> Validate -> Commit
-    // =========================================================================
-    // T_WL_ always represents the LAST ACCEPTED LiDAR pose.
-    //
-    // If the immediately previous processed scan was rejected, T_WL_ still
-    // points to an older accepted scan. This behavior is intentional.
-    const Eigen::Isometry3d T_WL_previous = T_WL_;
-
-    // =========================================================================
-    // 3. Recovery-aware LiDAR constant-motion prediction.
-    //
-    // Normal tracking:
-    //
-    //     consecutive_rejected_frames_ = 0
-    //     prediction_steps             = 1
-    //
-    // so the behavior is exactly the same as before:
-    //
-    //     T_guess = T_last_accepted * DeltaT
-    //
-    //
-    // Short tracking interruption:
-    //
-    //     F100 accepted
-    //     F101 rejected
-    //     F102 current
-    //
-    // then:
-    //
-    //     consecutive_rejected_frames_ = 1
-    //     prediction_steps             = 2
-    //
-    // and:
-    //
-    //     T_guess = T_F100 * DeltaT * DeltaT
-    //
-    // This lets the LiDAR translation prediction span rejected frames.
-    //
-    // IMPORTANT:
-    //
-    // The number of extrapolation steps is capped. Constant-motion
-    // extrapolation is useful for SHORT recovery only. It must not grow
-    // without bound after tracking has been lost for a long time.
-    // =========================================================================
-    // Number of one-frame motion increments that should be extrapolated.
-    //
-    // Examples:
-    //
-    // rejected = 0
-    //     current is the next frame after last accepted
-    //     -> use 1 motion step
-    //
-    // rejected = 1
-    //     one frame was missed between last accepted and current
-    //     -> use 2 motion steps
-    //
-    // rejected = 4
-    //     -> use 5 motion steps
-    //
-    // rejected >= max limit
-    //     -> keep the prediction capped
-    //
-    // The cap prevents a stale motion model from being extrapolated to
-    // absurd distances after long-term tracking loss.
-    const std::size_t prediction_steps =
-        std::min(
-            consecutive_rejected_frames_ + 1,
-            max_recovery_prediction_steps_);
-
-    // Accumulated relative prediction from the last accepted LiDAR frame
-    // toward the current LiDAR frame.
-    //
-    // Start from Identity:
-    //
-    //     DeltaT_pred = I
-    Eigen::Isometry3d predicted_relative_transform =
-        Eigen::Isometry3d::Identity();
-
-    // Repeated composition:
-    //
-    // prediction_steps = 1:
-    //
-    //     DeltaT_pred = DeltaT
-    //
-    // prediction_steps = 2:
-    //
-    //     DeltaT_pred = DeltaT * DeltaT
-    //
-    // prediction_steps = 3:
-    //
-    //     DeltaT_pred = DeltaT * DeltaT * DeltaT
-    //
-    // Because transforms are SE(3) transforms, we compose them by matrix /
-    // Isometry multiplication rather than multiplying translation values alone.
-    for (std::size_t i = 0;
-         i < prediction_steps;
-         ++i)
-    {
-        predicted_relative_transform =
-            predicted_relative_transform *
-            last_relative_transform_;
-    }
-
-    // Convert the relative motion prediction into a global pose prediction:
-    //
-    //     T_WL_guess
-    //         =
-    //     T_WL_last_accepted * T_last_accepted_current_prediction
-    Eigen::Isometry3d initial_guess =
-        T_WL_previous *
-        predicted_relative_transform;
-
-    // =========================================================================
-    // 4. Optional IMU rotation prediction.
-    //
-    // Keep translation from LiDAR constant motion and replace only rotation:
-    //
-    //     R_WL_guess = R_WL_previous * R_relative(IMU)
-    // =========================================================================
-    if (imu_relative_rotation != nullptr &&
-        imu_relative_rotation->coeffs().allFinite() &&
-        imu_relative_rotation->norm() > 1.0e-12)
-    {
-        // Copy instead of modifying the caller's quaternion.
-        Eigen::Quaterniond delta_q = *imu_relative_rotation;
-
-        // Numerical integrations can introduce a very small norm error.
-        // Normalize before converting to a rotation matrix.
-        delta_q.normalize();
-
-        // IMPORTANT:
-        //
-        // We overwrite ONLY the rotation.
-        //
-        // Translation remains the LiDAR constant-motion / recovery prediction.
-        //
-        //     R_WL_guess
-        //         =
-        //     R_WL_last_accepted * R_relative_IMU
-        //
-        // This is useful because IMU is very good at short-term rotational
-        // prediction, while raw IMU translation integration is currently not
-        // trusted in this frontend.
-        initial_guess.linear() =
-            T_WL_previous.rotation() * delta_q.toRotationMatrix();
-    }
-
-    // =========================================================================
-    // 4.1 Tracking / recovery prediction diagnostics.
-    //
-    // This makes it obvious in the log whether we are:
-    //
-    //     TRACKING:
-    //         no rejected frame is pending.
-    //
-    //     RECOVERY:
-    //         one or more frames have been rejected and the translation
-    //         prediction is being extrapolated across the missing interval.
-    // =========================================================================
-    std::cout
-        << "Tracking prediction"
-        << " | rejected_frames="
-        << consecutive_rejected_frames_
-        << " | prediction_steps="
-        << prediction_steps
-        << " | predicted_translation="
-        << (initial_guess.translation() -
-            T_WL_previous.translation())
-               .norm()
-        << " m"
-        << " | mode="
-        << (consecutive_rejected_frames_ == 0
-                ? "TRACKING"
-                : "RECOVERY")
-        << std::endl;
-
-    // =========================================================================
-    // 5. Primary Scan-to-LocalMap registration.
-    //
-    // source:
-    //     current scan in CURRENT LiDAR coordinates.
-    //
-    // target:
-    //     LocalMap in World coordinates.
-    //
-    // Therefore:
-    //
-    //     result.T_target_source = T_WL_current
-    //
-    // directly. Do NOT multiply by the previous global pose again.
-    // =========================================================================
-    LidarRegistrationResult result;
-
-    const std::chrono::steady_clock::time_point
-        primary_align_start =
-            std::chrono::steady_clock::now();
-
-    bool used_ground_joint =
-        false;
-
-    const GroundJointIcpStatus primary_joint_status =
-        RunTrustedGroundJointIcpV12(
-            this,
-            cloud_lidar,
-            prepared_tracking_target_,
-            frontend_ground_result,
-            initial_guess,
-            result);
-
-    bool registration_success =
-        false;
-
-    if (primary_joint_status ==
-        GroundJointIcpStatus::Success)
-    {
-        registration_success =
-            result.success;
-
-        used_ground_joint =
-            true;
-    }
-    else
-    {
-        if (primary_joint_status ==
-            GroundJointIcpStatus::Failed)
-        {
-            std::cout
-                << "GROUND_ICP_V13"
-                << " | stage=PRIMARY"
-                << " | action=FALLBACK_GENERAL"
-                << " | reason=JOINT_FAILED"
-                << std::endl;
-        }
-
-        registration_success =
-            registration_.Align(
-                cloud_lidar,
-                prepared_tracking_target_,
-                initial_guess,
-                result);
-    }
-
-    frame_timing.primary_align_ms +=
-        ElapsedMilliseconds(
-            primary_align_start,
-            std::chrono::steady_clock::now());
-
-    // =========================================================================
-    // 5.1 Candidate quality check helper.
-    //
-    // IMPORTANT:
-    //
-    // This lambda does NOT commit anything.
-    //
-    // It only answers:
-    //
-    //     "Is this candidate good enough to continue?"
-    //
-    // The same rule is used for:
-    //
-    //     primary point-to-plane result
-    //
-    // and
-    //
-    //     point-to-plane result after coarse recovery.
-    // =========================================================================
-    const auto CandidatePassesQualityGate =
-        [this](
-            bool align_success,
-            const LidarRegistrationResult &candidate)
-        -> bool
-    {
-        if (!align_success ||
-            !candidate.success)
-        {
-            return false;
-        }
-
-        if (!candidate.T_target_source
-                 .matrix()
-                 .allFinite())
-        {
-            return false;
-        }
-
-        if (!std::isfinite(candidate.rmse) ||
-            candidate.rmse >
-                max_accepted_rmse_)
-        {
-            return false;
-        }
-
-        if (candidate.correspondences <
-            min_accepted_correspondences_)
-        {
-            return false;
-        }
-
-        return true;
-    };
-
-    bool candidate_passed =
-        CandidatePassesQualityGate(
-            registration_success,
-            result);
-
-    // =========================================================================
-    // 5.2 Tracking Recovery V2
-    //
-    // Trigger:
-    //
-    //     normal point-to-plane Scan-to-LocalMap candidate is not good enough.
-    //
-    // Recovery strategy:
-    //
-    //     current LiDAR scan
-    //              |
-    //              v
-    //     coarse Point-to-Point ICP
-    //     against the current LocalMap
-    //              |
-    //              v
-    //       T_WL_coarse
-    //              |
-    //              v
-    //     existing Point-to-Plane
-    //     Scan-to-LocalMap refinement
-    //              |
-    //              v
-    //         same Quality Gate
-    //
-    // Why this is useful:
-    //
-    // The failure log shows point-to-plane Hessian degeneracy dominated by
-    // translation directions. The old Recovery V1 only extrapolates the
-    // constant-motion model. It does not create a new translation observation.
-    //
-    // Point-to-point ICP is used here only as a coarse reacquisition mechanism
-    // to provide a fresh translation estimate from LiDAR geometry.
-    //
-    // IMU behavior is unchanged:
-    //
-    //     IMU rotation still helped build `initial_guess`.
-    //
-    // No LiDAR-IMU state fusion is added here.
-    // =========================================================================
-    bool used_coarse_recovery = false;
-    double coarse_fitness =
-        std::numeric_limits<double>::infinity();
-
-    if (!candidate_passed)
-    {
-        frame_timing.recovery_triggered = true;
-
-        std::cout
-            << "Tracking Recovery V2 triggered"
-            << " | primary_success="
-            << (registration_success &&
-                        result.success
-                    ? "true"
-                    : "false")
-            << " | primary_corr="
-            << result.correspondences
-            << " | primary_rmse="
-            << result.rmse
-            << " | rejected_frames="
-            << consecutive_rejected_frames_
-            << std::endl;
-
-        // -----------------------------------------------------------------
-        // ROS2 debug block:
-        //
-        // Print exactly WHY point-to-plane failed and how far the primary
-        // candidate moved away from the prediction.
-        //
-        // Grep:
-        //
-        //     RECOVERY_DEBUG
-        // -----------------------------------------------------------------
-        const char *primary_reject_reason =
-            "UNKNOWN";
-
-        if (!registration_success ||
-            !result.success)
-        {
-            primary_reject_reason =
-                "ALIGN_FAILED";
-        }
-        else if (!result.T_target_source
-                      .matrix()
-                      .allFinite())
-        {
-            primary_reject_reason =
-                "NONFINITE_TRANSFORM";
-        }
-        else if (!std::isfinite(result.rmse) ||
-                 result.rmse >
-                     max_accepted_rmse_)
-        {
-            primary_reject_reason =
-                "RMSE";
-        }
-        else if (result.correspondences <
-                 min_accepted_correspondences_)
-        {
-            primary_reject_reason =
-                "CORRESPONDENCE";
-        }
-
-        Eigen::Vector3d primary_correction =
-            Eigen::Vector3d::Constant(
-                std::numeric_limits<double>::quiet_NaN());
-
-        if (result.T_target_source.matrix().allFinite())
-        {
-            primary_correction =
-                result.T_target_source.translation() -
-                initial_guess.translation();
-        }
-
-        const double primary_rotation_correction_deg =
-            result.T_target_source.matrix().allFinite()
-                ? RelativeRotationDeg(
-                      initial_guess,
-                      result.T_target_source)
-                : std::numeric_limits<double>::quiet_NaN();
-
-        RCLCPP_WARN(
-            kRecoveryLogger,
-            "RECOVERY_DEBUG PRIMARY_FAIL"
-            " | reason=%s"
-            " | target_mode=%s"
-            " | source_points=%zu"
-            " | target_points=%zu"
-            " | corr=%zu"
-            " | rmse=%.6f"
-            " | rejected_frames=%zu",
-            primary_reject_reason,
-            submap_manager_.IsTransitionActive()
-                ? "TRANSITION"
-                : "ACTIVE",
-            cloud_lidar ? cloud_lidar->size() : 0UL,
-            submap_manager_.TrackingPointCount(),
-            result.correspondences,
-            result.rmse,
-            consecutive_rejected_frames_);
-
-        RCLCPP_INFO(
-            kRecoveryLogger,
-            "RECOVERY_DEBUG POSE_BEFORE_COARSE"
-            " | prev=[%.4f %.4f %.4f]"
-            " | guess=[%.4f %.4f %.4f]"
-            " | primary=[%.4f %.4f %.4f]"
-            " | primary_minus_guess=[%.4f %.4f %.4f]"
-            " | correction_norm=%.4f"
-            " | correction_rot=%.3f deg",
-            T_WL_previous.translation().x(),
-            T_WL_previous.translation().y(),
-            T_WL_previous.translation().z(),
-            initial_guess.translation().x(),
-            initial_guess.translation().y(),
-            initial_guess.translation().z(),
-            result.T_target_source.translation().x(),
-            result.T_target_source.translation().y(),
-            result.T_target_source.translation().z(),
-            primary_correction.x(),
-            primary_correction.y(),
-            primary_correction.z(),
-            primary_correction.norm(),
-            primary_rotation_correction_deg);
-
-        Eigen::Isometry3d T_WL_coarse =
-            initial_guess;
-
-        const std::chrono::steady_clock::time_point
-            recovery_coarse_start =
-                std::chrono::steady_clock::now();
-
-        const bool coarse_success =
-            RunCoarsePointToPointRecovery(
-                cloud_lidar,
-                submap_manager_.GetTrackingMap(),
-                initial_guess,
-                T_WL_coarse,
-                coarse_fitness);
-
-        frame_timing.recovery_coarse_ms +=
-            ElapsedMilliseconds(
-                recovery_coarse_start,
-                std::chrono::steady_clock::now());
-
-        std::cout
-            << "Recovery coarse Point-to-Point ICP"
-            << " | success="
-            << (coarse_success
-                    ? "true"
-                    : "false")
-            << " | fitness="
-            << coarse_fitness
-            << " | correction_translation="
-            << (T_WL_coarse.translation() -
-                initial_guess.translation())
-                   .norm()
-            << " m"
-            << std::endl;
-
-        const Eigen::Vector3d coarse_correction =
-            T_WL_coarse.translation() -
-            initial_guess.translation();
-
-        const double coarse_rotation_correction_deg =
-            RelativeRotationDeg(
-                initial_guess,
-                T_WL_coarse);
-
-        RCLCPP_INFO(
-            kRecoveryLogger,
-            "RECOVERY_DEBUG COARSE_POINT_TO_POINT"
-            " | success=%s"
-            " | fitness=%.6f"
-            " | guess=[%.4f %.4f %.4f]"
-            " | coarse=[%.4f %.4f %.4f]"
-            " | delta=[%.4f %.4f %.4f]"
-            " | delta_norm=%.4f"
-            " | delta_rot=%.3f deg",
-            coarse_success ? "true" : "false",
-            coarse_fitness,
-            initial_guess.translation().x(),
-            initial_guess.translation().y(),
-            initial_guess.translation().z(),
-            T_WL_coarse.translation().x(),
-            T_WL_coarse.translation().y(),
-            T_WL_coarse.translation().z(),
-            coarse_correction.x(),
-            coarse_correction.y(),
-            coarse_correction.z(),
-            coarse_correction.norm(),
-            coarse_rotation_correction_deg);
-
-        if (coarse_success)
-        {
-            // -------------------------------------------------------------
-            // Coarse ICP is NOT accepted as final odometry.
-            //
-            // It becomes only a new initial guess for the original
-            // point-to-plane Scan-to-LocalMap optimizer.
-            // -------------------------------------------------------------
-            LidarRegistrationResult refined_result;
-
-            const std::chrono::steady_clock::time_point
-                recovery_refine_start =
-                    std::chrono::steady_clock::now();
-
-            const GroundJointIcpStatus recovery_joint_status =
-                RunTrustedGroundJointIcpV12(
-                    this,
-                    cloud_lidar,
-                    prepared_tracking_target_,
-                    frontend_ground_result,
-                    T_WL_coarse,
-                    refined_result);
-
-            bool recovery_used_ground_joint =
-                recovery_joint_status ==
-                GroundJointIcpStatus::Success;
-
-            bool refined_success =
-                false;
-
-            if (recovery_used_ground_joint)
-            {
-                refined_success =
-                    refined_result.success;
-            }
-            else
-            {
-                refined_success =
-                    registration_.Align(
-                        cloud_lidar,
-                        prepared_tracking_target_,
-                        T_WL_coarse,
-                        refined_result);
-            }
-
-            frame_timing.recovery_refine_ms +=
-                ElapsedMilliseconds(
-                    recovery_refine_start,
-                    std::chrono::steady_clock::now());
-
-            const bool refined_passed =
-                CandidatePassesQualityGate(
-                    refined_success,
-                    refined_result);
-
-            std::cout
-                << "Recovery Point-to-Plane refine"
-                << " | success="
-                << (refined_success &&
-                            refined_result.success
-                        ? "true"
-                        : "false")
-                << " | corr="
-                << refined_result.correspondences
-                << " | rmse="
-                << refined_result.rmse
-                << " | passed="
-                << (refined_passed
-                        ? "true"
-                        : "false")
-                << std::endl;
-
-            const Eigen::Vector3d refine_correction =
-                refined_result.T_target_source.translation() -
-                T_WL_coarse.translation();
-
-            const double refine_rotation_correction_deg =
-                RelativeRotationDeg(
-                    T_WL_coarse,
-                    refined_result.T_target_source);
-
-            RCLCPP_INFO(
-                kRecoveryLogger,
-                "RECOVERY_DEBUG REFINE_POINT_TO_PLANE"
-                " | success=%s"
-                " | passed=%s"
-                " | corr=%zu"
-                " | rmse=%.6f"
-                " | coarse=[%.4f %.4f %.4f]"
-                " | refined=[%.4f %.4f %.4f]"
-                " | refine_delta=[%.4f %.4f %.4f]"
-                " | refine_delta_norm=%.4f"
-                " | refine_delta_rot=%.3f deg",
-                (refined_success &&
-                 refined_result.success)
-                    ? "true"
-                    : "false",
-                refined_passed
-                    ? "true"
-                    : "false",
-                refined_result.correspondences,
-                refined_result.rmse,
-                T_WL_coarse.translation().x(),
-                T_WL_coarse.translation().y(),
-                T_WL_coarse.translation().z(),
-                refined_result.T_target_source.translation().x(),
-                refined_result.T_target_source.translation().y(),
-                refined_result.T_target_source.translation().z(),
-                refine_correction.x(),
-                refine_correction.y(),
-                refine_correction.z(),
-                refine_correction.norm(),
-                refine_rotation_correction_deg);
-
-            // Keep the refined diagnostics as the final candidate diagnostics.
-            //
-            // Even if refinement still fails, the caller can see why.
-            result =
-                refined_result;
-
-            registration_success =
-                refined_success;
-
-            candidate_passed =
-                refined_passed;
-
-            if (candidate_passed)
-            {
-                used_coarse_recovery = true;
-                frame_timing.coarse_recovery_accepted = true;
-
-                used_ground_joint =
-                    recovery_used_ground_joint;
-            }
-        }
-    }
-
-    // =========================================================================
-    // 5.3 Ground ICP V1.3 Quality-Weighted Observable-Subspace Joint-Hessian.
-    //
-    // No post-refinement is performed here.  When Ground V4 is trusted, it
-    // has already participated in EVERY main GN iteration through:
-    //
-    //     H_total = H_general + lambda_g * H_ground
-    //     b_total = b_general + lambda_g * b_ground
-    //
-    // When Ground is not trusted, the candidate came from the unchanged
-    // ordinary registration_.Align() fallback.
-    // =========================================================================
-    std::cout
-        << "GROUND_ICP_V13"
-        << " | stage=FINAL_MODE"
-        << " | mode="
-        << (used_ground_joint
-                ? "GROUND_OBSERVABLE_JOINT"
-                : "GENERAL_ONLY")
-        << " | post_refinement=OFF"
-        << std::endl;
-
-    // Always expose the final candidate diagnostics to the caller.
-    registration_result = result;
-
-    // Reaching max iterations is only a warning. The Quality Gate below is
-    // still the final acceptance rule.
-    if (registration_success &&
-        result.success &&
-        !result.converged)
-    {
-        std::cerr
-            << "RegistrationScan2LocalMap::AddFrame(): "
-            << "registration reached max iterations."
-            << " corr="
-            << result.correspondences
-            << " rmse="
-            << result.rmse
-            << std::endl;
-    }
-
-    // =========================================================================
-    // 6. Final Quality Gate.
-    //
-    // Only ONE rejection counter update happens here.
-    //
-    // That is important because one LiDAR frame may have attempted:
-    //
-    //     primary registration
-    //     + coarse recovery
-    //     + refined registration
-    //
-    // but it is still only ONE LiDAR frame.
-    //
-    // A rejected result must NOT:
-    //
-    //     update T_WL_,
-    //     update last_relative_transform_,
-    //     create a keyframe,
-    //     update LocalMap,
-    //     replace prepared_tracking_target_.
-    // =========================================================================
-    if (!candidate_passed)
-    {
-        ++consecutive_rejected_frames_;
-
-        if (!registration_success ||
-            !result.success)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "registration/recovery failed."
-                << " | consecutive_rejected="
-                << consecutive_rejected_frames_
-                << std::endl;
-        }
-        else if (!result.T_target_source
-                      .matrix()
-                      .allFinite())
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "registration rejected because transform contains NaN/Inf."
-                << " | consecutive_rejected="
-                << consecutive_rejected_frames_
-                << std::endl;
-        }
-        else if (!std::isfinite(result.rmse) ||
-                 result.rmse >
-                     max_accepted_rmse_)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "registration rejected by RMSE."
-                << " rmse="
-                << result.rmse
-                << " max="
-                << max_accepted_rmse_
-                << " | consecutive_rejected="
-                << consecutive_rejected_frames_
-                << std::endl;
-        }
-        else
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "registration rejected by correspondence count."
-                << " corr="
-                << result.correspondences
-                << " min="
-                << min_accepted_correspondences_
-                << " | consecutive_rejected="
-                << consecutive_rejected_frames_
-                << std::endl;
-        }
-
-        frame_timing.keyframes_after =
-            keyframe_manager_.Size();
-
-        return false;
-    }
-
-    if (used_coarse_recovery)
-    {
-        std::cout
-            << "Tracking Recovery V2 accepted"
-            << " | coarse_fitness="
-            << coarse_fitness
-            << " | refined_corr="
-            << result.correspondences
-            << " | refined_rmse="
-            << result.rmse
-            << std::endl;
-
-        const Eigen::Vector3d final_jump =
-            result.T_target_source.translation() -
-            T_WL_previous.translation();
-
-        const double final_rotation_jump_deg =
-            RelativeRotationDeg(
-                T_WL_previous,
-                result.T_target_source);
-
-        RCLCPP_WARN(
-            kRecoveryLogger,
-            "RECOVERY_DEBUG FINAL_ACCEPTED"
-            " | prev=[%.4f %.4f %.4f]"
-            " | final=[%.4f %.4f %.4f]"
-            " | frame_jump=[%.4f %.4f %.4f]"
-            " | jump_norm=%.4f"
-            " | jump_rot=%.3f deg"
-            " | coarse_fitness=%.6f"
-            " | refined_corr=%zu"
-            " | refined_rmse=%.6f",
-            T_WL_previous.translation().x(),
-            T_WL_previous.translation().y(),
-            T_WL_previous.translation().z(),
-            result.T_target_source.translation().x(),
-            result.T_target_source.translation().y(),
-            result.T_target_source.translation().z(),
-            final_jump.x(),
-            final_jump.y(),
-            final_jump.z(),
-            final_jump.norm(),
-            final_rotation_jump_deg,
-            coarse_fitness,
-            result.correspondences,
-            result.rmse);
-    }
-
-    // Candidate global pose estimated directly by Scan-to-LocalMap.
-    //
-    // Because:
-    //
-    //     target = World-frame LocalMap
-    //     source = current LiDAR scan
-    //
-    // registration returns:
-    //
-    //     T_target_source
-    //         =
-    //     T_WL_current
-    //
-    // There is NO additional pose accumulation here.
-    const Eigen::Isometry3d T_WL_current = result.T_target_source;
-
-    // =========================================================================
-    // 7. Relative LiDAR motion for next-frame constant-motion prediction.
-    //
-    //     T_previous_current = T_WL_previous^-1 * T_WL_current
-    // =========================================================================
-    // Relative transform from the LAST ACCEPTED pose to the current accepted
-    // candidate:
-    //
-    //     T_previous_current
-    //         =
-    //     T_WL_previous^-1 * T_WL_current
-    //
-    // Normal tracking:
-    //     this spans one LiDAR frame interval.
-    //
-    // Recovery:
-    //     this may span several LiDAR frame intervals.
-    //
-    // This distinction is critical later when updating the one-frame motion
-    // model.
-    const Eigen::Isometry3d T_previous_current =
-        T_WL_previous.inverse() * T_WL_current;
-
-    if (!T_previous_current.matrix().allFinite())
-    {
-        ++consecutive_rejected_frames_;
-
-        std::cerr
-            << "RegistrationScan2LocalMap::AddFrame(): "
-            << "relative transform contains NaN/Inf."
-            << " | consecutive_rejected="
-            << consecutive_rejected_frames_
-            << std::endl;
-
-        return false;
-    }
-
-    // =========================================================================
-    // 8. Keyframe decision.
-    //
-    // IMPORTANT:
-    //     Compare with LAST KEYFRAME, not previous ordinary scan.
-    // =========================================================================
-    // These are distances relative to the LAST KEYFRAME pose.
-    //
-    // They are diagnostic outputs from KeyframeDetector and are not the
-    // frame-to-frame odometry increments.
-    double keyframe_translation = 0.0;
-    double keyframe_rotation_deg = 0.0;
-
-    const std::chrono::steady_clock::time_point
-        keyframe_decision_start =
-            std::chrono::steady_clock::now();
-
-    const bool is_keyframe =
-        keyframe_detector_.ShouldCreateKeyframe(
-            T_WL_current,
-            keyframe_translation,
-            keyframe_rotation_deg);
-
-    frame_timing.keyframe_decision_ms +=
-        ElapsedMilliseconds(
-            keyframe_decision_start,
-            std::chrono::steady_clock::now());
-
-    frame_timing.keyframe =
-        is_keyframe;
-
-    std::cout
-        << "Keyframe decision"
-        << " | translation=" << keyframe_translation << " m"
-        << " | rotation=" << keyframe_rotation_deg << " deg"
-        << " | translation_threshold=0.5 m"
-        << " | rotation_threshold=5.0 deg"
-        << " | keyframe=" << (is_keyframe ? "true" : "false")
-        << std::endl;
-
-    // =========================================================================
-    // 9. Keyframe / Submap update.
-    //
-    // ONLY keyframes:
-    //
-    //     KeyframeManager -> complete historical record
-    //     SubmapManager   -> Active/Previous lifecycle
-    //     LocalMap        -> internal Submap cloud builder
-    // =========================================================================
-    if (is_keyframe)
-    {
-        const Keyframe *previous_keyframe_for_diagnostic =
-            keyframe_manager_.Latest();
-
-        bool has_previous_keyframe_for_diagnostic =
-            false;
-
-        std::size_t previous_keyframe_id_for_diagnostic =
-            0;
-
-        Eigen::Isometry3d T_WL_previous_keyframe_for_diagnostic =
-            Eigen::Isometry3d::Identity();
-
-        if (previous_keyframe_for_diagnostic != nullptr)
-        {
-            has_previous_keyframe_for_diagnostic =
-                true;
-
-            previous_keyframe_id_for_diagnostic =
-                previous_keyframe_for_diagnostic->id;
-
-            T_WL_previous_keyframe_for_diagnostic =
-                previous_keyframe_for_diagnostic->T_WL;
-        }
-
-        // ---------------------------------------------------------------------
-        // 9.1 Store historical Keyframe.
-        // ---------------------------------------------------------------------
-        const std::chrono::steady_clock::time_point
-            keyframe_store_start =
-                std::chrono::steady_clock::now();
-
-        Eigen::Matrix<double, 6, 6> odom_information =
-            Eigen::Matrix<double, 6, 6>::Identity();
-
-        const bool dynamic_information_valid =
-            BuildOdometryInformationV2(
-                result,
-                T_WL_current,
-                odom_information);
-
-        double maximum_absolute_off_diagonal =
-            0.0;
-
-        double maximum_translation_rotation_coupling =
-            0.0;
-
-        if (dynamic_information_valid)
-        {
-            for (int i = 0;
-                 i < 6;
-                 ++i)
-            {
-                for (int j = 0;
-                     j < 6;
-                     ++j)
-                {
-                    if (i == j)
-                    {
-                        continue;
-                    }
-
-                    maximum_absolute_off_diagonal =
-                        std::max(
-                            maximum_absolute_off_diagonal,
-                            std::abs(
-                                odom_information(i, j)));
-
-                    const bool translation_rotation_pair =
-                        (i < 3 && j >= 3) ||
-                        (i >= 3 && j < 3);
-
-                    if (translation_rotation_pair)
-                    {
-                        maximum_translation_rotation_coupling =
-                            std::max(
-                                maximum_translation_rotation_coupling,
-                                std::abs(
-                                    odom_information(i, j)));
-                    }
-                }
-            }
-        }
-
-        std::cout
-            << "ODOM_INFORMATION_V2"
-            << " | valid="
-            << (dynamic_information_valid
-                    ? "true"
-                    : "false")
-            << " | order=[tx ty tz rx ry rz]"
-            << " | base_diag=["
-            << odom_information(0, 0) << " "
-            << odom_information(1, 1) << " "
-            << odom_information(2, 2) << " "
-            << odom_information(3, 3) << " "
-            << odom_information(4, 4) << " "
-            << odom_information(5, 5)
-            << "]"
-            << " | max_offdiag="
-            << maximum_absolute_off_diagonal
-            << " | max_tr_coupling="
-            << maximum_translation_rotation_coupling
-            << std::endl;
-
-        const bool keyframe_stored =
-            keyframe_manager_.AddKeyframe(
-                timestamp,
-                T_WL_current,
-                cloud_lidar,
-                dynamic_information_valid
-                    ? &odom_information
-                    : nullptr);
-
-        frame_timing.keyframe_store_ms +=
-            ElapsedMilliseconds(
-                keyframe_store_start,
-                std::chrono::steady_clock::now());
-
-        frame_timing.keyframes_after =
-            keyframe_manager_.Size();
-
-        if (!keyframe_stored)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to store historical keyframe."
-                << std::endl;
-            return false;
-        }
-
-        const Keyframe *new_keyframe =
-            keyframe_manager_.Latest();
-
-        if (new_keyframe == nullptr)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "latest keyframe pointer is null."
-                << std::endl;
-            return false;
-        }
-
-        if (!WriteFrontendZDriftDiagnostic(
-                false,
-                new_keyframe->id,
-                has_previous_keyframe_for_diagnostic
-                    ? static_cast<long long>(
-                          previous_keyframe_id_for_diagnostic)
-                    : -1,
-                timestamp,
-                T_WL_current,
-                has_previous_keyframe_for_diagnostic
-                    ? &T_WL_previous_keyframe_for_diagnostic
-                    : nullptr,
-                result))
-        {
-            std::cerr
-                << "FR_FRONTEND_Z_DIAGNOSTIC"
-                << " | failed"
-                << " | kf="
-                << new_keyframe->id
-                << std::endl;
-        }
-
-        // ---------------------------------------------------------------------
-        // 9.2 Backend work is asynchronous.
-        //
-        // The frontend only stores the Keyframe and updates its tracking
-        // Submap. PoseGraph / map / Scan Context / LoopVerifier run later in
-        // backend_thread_.
-        // ---------------------------------------------------------------------
-
-        // ---------------------------------------------------------------------
-        // 9.3 Capture the frontend Submap that OWNS this Keyframe BEFORE insertion.
-        //
-        // AddKeyframe() may fill it and immediately create the next overlapping
-        // Active Submap. We keep this id only for local-neighborhood rejection,
-        // temporal continuity, and redundant-loop suppression. It is NOT a
-        // PoseGraph vertex id.
-        // ---------------------------------------------------------------------
-        const Submap *current_owner_before_add =
-            submap_manager_.ActiveSubmap();
-
-        if (current_owner_before_add == nullptr ||
-            !current_owner_before_add->has_origin_pose ||
-            !current_owner_before_add->T_WS.matrix().allFinite())
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "current Active Submap is invalid before keyframe insertion."
-                << std::endl;
-            return false;
-        }
-
-        const std::size_t current_owner_submap_id =
-            current_owner_before_add->id;
-
-        // Add Keyframe to Active Submap. If it becomes full, SubmapManager may
-        // finish it and create the next Active Submap here.
-        const std::chrono::steady_clock::time_point
-            submap_insert_start =
-                std::chrono::steady_clock::now();
-
-        const bool submap_insert_ok =
-            submap_manager_.AddKeyframe(
-                *new_keyframe);
-
-        frame_timing.submap_insert_ms +=
-            ElapsedMilliseconds(
-                submap_insert_start,
-                std::chrono::steady_clock::now());
-
-        if (!submap_insert_ok)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to update SubmapManager."
-                << std::endl;
-            return false;
-        }
-
-        if (submap_manager_.LastAddStartedNewSubmap())
-        {
-            std::cout
-                << "Submap transition"
-                << " | finished_submap="
-                << submap_manager_.LastFinishedSubmapId()
-                << " | previous_submap="
-                << submap_manager_.PreviousSubmapId()
-                << " | new_active_submap="
-                << submap_manager_.ActiveSubmapId()
-                << " | overlap_keyframes="
-                << submap_manager_.ActiveKeyframeCount()
-                << " | tracking_target=PREVIOUS+ACTIVE"
-                << " | target_points="
-                << submap_manager_.TrackingPointCount()
-                << std::endl;
-            // V6: Submap transition changes only frontend/local-map geometry.
-            // PoseGraph vertices were already added per Keyframe above.
-        }
-
-        // ---------------------------------------------------------------------
-        // 9.5 Submap tracking map changed -> rebuild registration target.
-        // ---------------------------------------------------------------------
-        PreparedLidarTarget new_prepared_active_submap;
-
-        const std::chrono::steady_clock::time_point
-            prepare_target_start =
-                std::chrono::steady_clock::now();
-
-        const bool prepare_target_ok =
-            registration_.PrepareTarget(
-                submap_manager_.GetTrackingMap(),
-                new_prepared_active_submap);
-
-        frame_timing.prepare_target_ms +=
-            ElapsedMilliseconds(
-                prepare_target_start,
-                std::chrono::steady_clock::now());
-
-        if (!prepare_target_ok)
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to prepare updated Submap tracking target."
-                << std::endl;
-            return false;
-        }
-
-        prepared_tracking_target_ =
-            std::move(
-                new_prepared_active_submap);
-
-        const std::chrono::steady_clock::time_point
-            backend_enqueue_start =
-                std::chrono::steady_clock::now();
-
-        const bool backend_enqueued =
-            EnqueueBackendKeyframe(
-                *new_keyframe,
-                current_owner_submap_id);
-
-        frame_timing.backend_enqueue_ms +=
-            ElapsedMilliseconds(
-                backend_enqueue_start,
-                std::chrono::steady_clock::now());
-
-        if (!backend_enqueued)
-        {
-            std::cerr
-                << "Async backend enqueue failed"
-                << " | keyframe=" << new_keyframe->id
-                << std::endl;
-        }
-
-        keyframe_detector_.SetLastKeyframePose(
-            T_WL_current);
-    }
-
-    // =========================================================================
-    // Tracking recovery state.
-    //
-    // IMPORTANT:
-    //
-    // If the previous frames were rejected, then:
-    //
-    //     T_previous_current
-    //
-    // is NOT a one-frame LiDAR motion.
-    //
-    // Example:
-    //
-    //     F100 accepted
-    //     F101 rejected
-    //     F102 rejected
-    //     F103 rejected
-    //     F104 accepted
-    //
-    // Then:
-    //
-    //     T_previous_current
-    //         =
-    //     T_F100^-1 * T_F104
-    //
-    // This is a FOUR-frame accumulated motion.
-    //
-    // Therefore, after a recovery we must NOT directly store it into:
-    //
-    //     last_relative_transform_
-    //
-    // because last_relative_transform_ is supposed to represent approximately
-    // ONE LiDAR-frame motion for the next constant-motion prediction.
-    // =========================================================================
-    // If this value is true, the current candidate is the FIRST accepted
-    // frame after one or more consecutive rejected scans.
-    //
-    // Example:
-    //
-    //     F100 accepted
-    //     F101 rejected
-    //     F102 rejected
-    //     F103 accepted  <-- recovered_from_tracking_loss == true
-    const bool recovered_from_tracking_loss =
-        consecutive_rejected_frames_ > 0;
-
-    // =========================================================================
-    // Motion Model Gate V1
-    //
-    // PURPOSE:
-    //
-    // A pose can pass the ordinary Quality Gate:
-    //
-    //     transform is finite
-    //     RMSE is acceptable
-    //     correspondence count is acceptable
-    //
-    // but its frame-to-frame motion can still be suspicious.
-    //
-    // This is especially possible in geometrically weak / degenerate scenes:
-    // point-to-plane residual can remain small even though one weakly
-    // constrained translation direction jumps too much.
-    //
-    // IMPORTANT DESIGN DECISION:
-    //
-    //     Pose acceptance
-    //
-    // and
-    //
-    //     Motion-model update
-    //
-    // are TWO DIFFERENT decisions.
-    //
-    // If the current pose passed the normal Quality Gate, we still accept:
-    //
-    //     T_WL_current
-    //
-    // However, if its relative translation suddenly becomes much larger than
-    // the previous reliable one-frame motion, we do NOT allow that suspicious
-    // relative transform to overwrite:
-    //
-    //     last_relative_transform_
-    //
-    // The old reliable motion model is kept for the next initial guess.
-    //
-    // Example from the failure log:
-    //
-    //     previous reliable translation ~= 0.125 m
-    //     current relative translation  ~= 0.291 m
-    //
-    //     ratio ~= 2.32
-    //
-    // The pose may still be usable, but 0.291 m should not immediately become
-    // the next constant-motion predictor.
-    //
-    // V1 checks translation only. Later we can also incorporate Hessian
-    // degeneracy / weak-direction diagnostics into this decision.
-    // =========================================================================
-    const double previous_motion_translation =
-        last_relative_transform_.translation().norm();
-
-    const double current_motion_translation =
-        T_previous_current.translation().norm();
-
-    // Do not compute a meaningful ratio when the previous motion is almost
-    // zero, otherwise tiny numerical motion could make the ratio explode.
-    constexpr double min_reference_translation = 0.05;
-
-    // A new one-frame translation larger than 2x the previous reliable
-    // one-frame translation is considered suspicious in V1.
-    constexpr double max_translation_ratio = 2.0;
-
-    // Additional absolute floor:
-    //
-    // We only block a "large jump" if the current translation itself is at
-    // least 0.20 m. This avoids treating harmless changes such as:
-    //
-    //     0.02 m -> 0.05 m
-    //
-    // as a serious motion-model fault just because the ratio is large.
-    constexpr double min_suspicious_translation = 0.20;
-
-    double motion_translation_ratio = 1.0;
-
-    if (previous_motion_translation >
-        min_reference_translation)
-    {
-        motion_translation_ratio =
-            current_motion_translation /
-            previous_motion_translation;
-    }
-
-    bool motion_model_update_allowed =
-        !used_coarse_recovery;
-
-    // If coarse recovery was required, the final pose may be valid but this
-    // frame is deliberately NOT used to refresh the one-frame constant-motion
-    // predictor. The next normal accepted frame can rebuild that predictor.
-    if (used_coarse_recovery)
-    {
-        std::cout
-            << "Motion model protected after coarse recovery"
-            << " | update=false"
-            << " | kept_translation="
-            << last_relative_transform_
-                   .translation()
-                   .norm()
-            << " m"
-            << std::endl;
-    }
-
-    // Recovery frames are already handled separately:
-    //
-    //     T_previous_current
-    //
-    // spans multiple LiDAR intervals after rejected frames, so it must never
-    // be used directly as a one-frame motion model.
-    //
-    // Therefore Motion Model Gate V1 is only evaluated during normal tracking.
-    if (!recovered_from_tracking_loss &&
-        previous_motion_translation >
-            min_reference_translation &&
-        current_motion_translation >
-            min_suspicious_translation &&
-        motion_translation_ratio >
-            max_translation_ratio)
-    {
-        motion_model_update_allowed = false;
-    }
-
-    std::cout
-        << "Motion model gate"
-        << " | previous_translation="
-        << previous_motion_translation
-        << " m"
-        << " | current_translation="
-        << current_motion_translation
-        << " m"
-        << " | ratio="
-        << motion_translation_ratio
-        << " | max_ratio="
-        << max_translation_ratio
-        << " | update="
-        << (motion_model_update_allowed
-                ? "true"
-                : "false")
-        << std::endl;
-
-    if (recovered_from_tracking_loss)
-    {
-        std::cout
-            << "Tracking recovered"
-            << " | rejected_frames="
-            << consecutive_rejected_frames_
-            << " | recovery_prediction_steps="
-            << prediction_steps
-
-            // We intentionally keep the previous one-frame LiDAR motion model.
-            << " | motion_model=KEEP_PREVIOUS_SINGLE_FRAME"
-            << std::endl;
-    }
-
-    // =========================================================================
-    // Commit accepted global pose.
-    //
-    // Every accepted frame updates the global LiDAR pose, including a frame
-    // that was successfully recovered.
-    // =========================================================================
-    // Commit the accepted global pose to internal state.
-    //
-    // This is always safe here because:
-    //
-    //     registration succeeded
-    //     Quality Gate passed
-    //     keyframe update (if required) succeeded
-    //
-    // World-Z decomposition is intentionally evaluated HERE: Ground ICP has
-    // already produced the final candidate and every later frontend operation
-    // that can reject the frame has succeeded. Therefore this diagnostic never
-    // accumulates an uncommitted/rejected pose.
-    if (!AccumulateWorldZDecomposition(
-            this,
-            timestamp,
-            T_WL_previous,
-            T_WL_current))
-    {
-        std::cerr
-            << "FR_Z_DECOMP"
-            << " | accumulation failed"
-            << " | timestamp=" << timestamp
-            << std::endl;
-    }
-
-    T_WL_ =
-        T_WL_current;
-
-    // Also write the same accepted pose to the caller's output parameter.
-    T_WL =
-        T_WL_current;
-
-    // =========================================================================
-    // Update constant-motion model.
-    //
-    // Normal TRACKING:
-    //
-    //     F100 accepted
-    //     F101 accepted
-    //
-    // T_previous_current is truly one-frame motion, so we update:
-    //
-    //     last_relative_transform_ = T_F100^-1 * T_F101
-    //
-    //
-    // RECOVERY:
-    //
-    //     F100 accepted
-    //     F101 rejected
-    //     F102 rejected
-    //     F103 accepted
-    //
-    // T_previous_current is accumulated motion across THREE scan intervals.
-    //
-    // DO NOT use that accumulated transform as the next one-frame motion model.
-    //
-    // Instead, temporarily keep the last reliable single-frame motion.
-    //
-    // If the very next frame F104 is accepted normally, then:
-    //
-    //     T_F103^-1 * T_F104
-    //
-    // becomes a true one-frame motion again and the model will automatically
-    // update on that frame.
-    // =========================================================================
-    if (!recovered_from_tracking_loss &&
-        motion_model_update_allowed)
-    {
-        // NORMAL TRACKING + MOTION MODEL GATE PASSED:
-        //
-        // previous accepted frame and current frame are adjacent accepted
-        // LiDAR scans, and the new relative translation is not suspicious.
-        //
-        // Therefore T_previous_current becomes the new one-frame predictor.
-        last_relative_transform_ =
-            T_previous_current;
-    }
-    else if (recovered_from_tracking_loss)
-    {
-        // RECOVERY:
-        //
-        // Keep the old reliable one-frame model because T_previous_current
-        // spans multiple LiDAR intervals.
-        std::cout
-            << "Motion model after recovery"
-            << " | update=false"
-            << " | kept_translation="
-            << last_relative_transform_
-                   .translation()
-                   .norm()
-            << " m"
-            << std::endl;
-    }
-    else
-    {
-        // NORMAL TRACKING, BUT MOTION MODEL GATE REJECTED THE UPDATE:
-        //
-        // IMPORTANT:
-        //     The POSE is still accepted.
-        //
-        // Only the constant-motion predictor is protected from a suspicious
-        // frame-to-frame jump.
-        std::cout
-            << "Motion model protected"
-            << " | update=false"
-            << " | current_translation="
-            << current_motion_translation
-            << " m"
-            << " | kept_translation="
-            << last_relative_transform_
-                   .translation()
-                   .norm()
-            << " m"
-            << std::endl;
-    }
-
-    // Recovery has now been successfully completed.
-    //
-    // The next scan starts again in normal TRACKING mode:
-    //
-    //     rejected_frames = 0
-    //     prediction_steps = 1
-    //
-    // If that next scan is accepted, it will provide a fresh one-frame
-    // relative transform and automatically refresh last_relative_transform_.
-    consecutive_rejected_frames_ = 0;
-
-    // =========================================================================
-    // 12. Diagnostics.
-    //
-    // Expected after enough motion:
-    //
-    //     keyframes=25 | map_frames=10
-    //
-    // KeyframeManager = full history
-    // LocalMap        = recent keyframe window
-    // =========================================================================
-    std::cout
-        << "RegistrationScan2LocalMap"
-        << " | x=" << T_WL_current.translation().x()
-        << " y=" << T_WL_current.translation().y()
-        << " z=" << T_WL_current.translation().z()
-        << " | keyframe=" << (is_keyframe ? "true" : "false")
-        << " | keyframes=" << keyframe_manager_.Size()
-        << " | submaps=" << submap_manager_.SubmapCount()
-        << " | active_submap=" << submap_manager_.ActiveSubmapId()
-        << " | previous_submap=";
-
-    if (submap_manager_.PreviousSubmap() != nullptr)
-    {
-        std::cout
-            << submap_manager_.PreviousSubmapId();
-    }
-    else
-    {
-        std::cout
-            << "none";
-    }
-
-    std::cout
-        << " | active_keyframes="
-        << submap_manager_.ActiveKeyframeCount()
-        << " | target_mode="
-        << (submap_manager_.IsTransitionActive()
-                ? "TRANSITION"
-                : "ACTIVE")
-        << " | active_map_points="
-        << submap_manager_.ActivePointCount()
-        << " | target_points="
-        << submap_manager_.TrackingPointCount()
-        << " | corr=" << result.correspondences
-        << " | rmse=" << result.rmse
-        << std::endl;
-
-    frame_timing.accepted = true;
-    frame_timing.keyframes_after =
-        keyframe_manager_.Size();
-
-    return true;
-}
-
-// ============================================================================
-// AddKeyframeToPoseGraph()
-//
-// V6 backend bridge:
-//
-//     New Keyframe KF_i
-//           |
-//           +--> PoseGraph Vertex i, X_i = T_WK_i
-//           |
-//           +--> sequential Keyframe odometry edge from KF_(i-1)
-//
-// Measurement convention:
-//
-//     Z_(i-1,i)
-//       = T_K(i-1)_Ki
-//       = T_WK(i-1)^-1 * T_WKi
-//
-// Submap finishing is deliberately NOT involved here.
-// ============================================================================
 bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
     const Keyframe &keyframe)
 {
@@ -7527,29 +5849,6 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
 
     gravity_L_reference.normalize();
 
-    std::cout
-        << "Keyframe gravity reference stored"
-        << " | keyframe=" << keyframe.id
-        << " | gravity_L=["
-        << gravity_L_reference.transpose()
-        << "]"
-        << std::endl;
-
-    std::cout
-        << "Keyframe PoseGraph node added"
-        << " | keyframe=" << keyframe.id
-        << " | fixed=" << (fixed ? "true" : "false")
-        << " | T_WK=["
-        << T_WK_graph_initial.translation().x() << " "
-        << T_WK_graph_initial.translation().y() << " "
-        << T_WK_graph_initial.translation().z() << "]"
-        << " | frontend_T_WL=["
-        << keyframe.T_WL.translation().x() << " "
-        << keyframe.T_WL.translation().y() << " "
-        << keyframe.T_WL.translation().z() << "]"
-        << " | nodes=" << pose_graph_.NodeCount()
-        << std::endl;
-
     // After the first backend optimization, the new graph-pose chaining and
     // the explicit map->odom bridge should predict the SAME corrected pose:
     //
@@ -7681,25 +5980,6 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
         }
     }
 
-    std::cout
-        << "Keyframe PoseGraph odometry information"
-        << " | from=" << previous_keyframe->id
-        << " | to=" << keyframe.id
-        << " | mode=" << information_mode
-        << " | base_diag=["
-        << information(0, 0) << " "
-        << information(1, 1) << " "
-        << information(2, 2) << " "
-        << information(3, 3) << " "
-        << information(4, 4) << " "
-        << information(5, 5)
-        << "]"
-        << " | max_offdiag="
-        << pose_graph_maximum_off_diagonal
-        << " | max_tr_coupling="
-        << pose_graph_maximum_tr_coupling
-        << std::endl;
-
     if (!pose_graph_.AddOdometryEdge(
             previous_keyframe->id,
             keyframe.id,
@@ -7714,24 +5994,8 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
         return false;
     }
 
-    std::cout
-        << "Keyframe PoseGraph odometry edge added"
-        << " | from=" << previous_keyframe->id
-        << " | to=" << keyframe.id
-        << " | translation_norm="
-        << Z_previous_current.translation().norm()
-        << " m"
-        << " | rotation="
-        << RelativeRotationDeg(
-               Eigen::Isometry3d::Identity(),
-               Z_previous_current)
-        << " deg"
-        << " | odom_edges=" << pose_graph_.OdometryEdgeCount()
-        << std::endl;
-
     return true;
 }
-
 
 // ============================================================================
 // Backend-only snapshot lookup helpers.
@@ -7752,7 +6016,6 @@ RegistrationScan2LocalMap::FindBackendSubmapById(
     return nullptr;
 }
 
-
 const Keyframe *
 RegistrationScan2LocalMap::FindBackendKeyframeById(
     std::size_t keyframe_id) const
@@ -7768,7 +6031,6 @@ RegistrationScan2LocalMap::FindBackendKeyframeById(
 
     return nullptr;
 }
-
 
 // ============================================================================
 // FindBestFinishedSubmapForKeyframe()
@@ -7825,7 +6087,6 @@ RegistrationScan2LocalMap::FindBestFinishedSubmapForKeyframe(
 
     return best;
 }
-
 
 // ============================================================================
 // DetectAndVerifyLoopFromKeyframe()
@@ -8606,7 +6867,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
             false;
 
         const std::filesystem::path frontend_loop_drift_directory =
-            FrontendDiagnosticDirectory();
+            FrontendLoopDirectory();
 
         std::filesystem::create_directories(
             frontend_loop_drift_directory);
@@ -8681,29 +6942,38 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 << T_K_L_frontend.translation().y() << ","
                 << T_K_L_frontend.translation().z() << ","
                 << frontend_relative_rpy.x() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << frontend_relative_rpy.y() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << frontend_relative_rpy.z() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << T_K_L.translation().x() << ","
                 << T_K_L.translation().y() << ","
                 << T_K_L.translation().z() << ","
                 << loop_relative_rpy.x() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << loop_relative_rpy.y() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << loop_relative_rpy.z() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << T_K_L_error.translation().x() << ","
                 << T_K_L_error.translation().y() << ","
                 << T_K_L_error.translation().z() << ","
                 << relative_error_rpy.x() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << relative_error_rpy.y() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << relative_error_rpy.z() *
-                       kFrontendLoopDriftRadToDeg << ","
+                       kFrontendLoopDriftRadToDeg
+                << ","
                 << T_K_L_error.translation().norm() << ","
                 << relative_rotation_error_deg << ","
                 << graph_correction_translation << ","
@@ -9158,7 +7428,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
 
             const Eigen::Isometry3d correction_error =
                 pending_first_loop_batch_.front()
-                        .T_loop_correction.inverse() *
+                    .T_loop_correction.inverse() *
                 T_loop_correction;
 
             batch_translation_error =
@@ -10189,7 +8459,6 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     }
 }
 
-
 // ============================================================================
 // UpdateIncrementalGlobalMaps()
 //
@@ -10404,7 +8673,6 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
     return true;
 }
 
-
 // ============================================================================
 // RebuildGlobalMapSnapshots()
 //
@@ -10418,7 +8686,6 @@ bool RegistrationScan2LocalMap::RebuildGlobalMapSnapshots()
         "POSE_GRAPH",
         true);
 }
-
 
 // ============================================================================
 // RebuildPostPgoRefinedMap()
@@ -10463,6 +8730,115 @@ bool RegistrationScan2LocalMap::RebuildGlobalMapSnapshots()
 //   5. The whole local-window result must remain inside a final small-update gate.
 //   6. Overlapping accepted refinement windows are skipped conservatively.
 // ============================================================================
+
+bool RegistrationScan2LocalMap::UpdateMapOdomCorrection(
+    std::size_t anchor_keyframe_id)
+{
+    const Keyframe *anchor_keyframe =
+        FindBackendKeyframeById(
+            anchor_keyframe_id);
+
+    const PoseGraphNode *anchor_node =
+        pose_graph_.GetNode(
+            anchor_keyframe_id);
+
+    if (anchor_keyframe == nullptr ||
+        anchor_node == nullptr ||
+        !anchor_keyframe->T_WL.matrix().allFinite() ||
+        !anchor_node->T_WK.matrix().allFinite())
+    {
+        return false;
+    }
+
+    const Eigen::Isometry3d T_map_odom_new =
+        anchor_node->T_WK *
+        anchor_keyframe->T_WL.inverse();
+
+    if (!T_map_odom_new.matrix().allFinite())
+    {
+        return false;
+    }
+
+    const Eigen::AngleAxisd correction_rotation(
+        T_map_odom_new.rotation());
+
+    const double correction_rotation_deg =
+        std::abs(
+            correction_rotation.angle()) *
+        180.0 /
+        3.14159265358979323846;
+
+    // Sanity check: applying the bridge to the raw anchor pose must recover the
+    // optimized graph pose to numerical precision.
+    const Eigen::Isometry3d T_map_K_check =
+        T_map_odom_new *
+        anchor_keyframe->T_WL;
+
+    const Eigen::Isometry3d T_check_error =
+        anchor_node->T_WK.inverse() *
+        T_map_K_check;
+
+    const double check_translation_error =
+        T_check_error.translation().norm();
+
+    const Eigen::AngleAxisd check_rotation(
+        T_check_error.rotation());
+
+    const double check_rotation_error_deg =
+        std::abs(
+            check_rotation.angle()) *
+        180.0 /
+        3.14159265358979323846;
+
+    if (!std::isfinite(check_translation_error) ||
+        !std::isfinite(check_rotation_error_deg) ||
+        check_translation_error > 1.0e-6 ||
+        check_rotation_error_deg > 1.0e-6)
+    {
+        std::cerr
+            << "Map->odom correction anchor consistency check failed"
+            << " | anchor_kf=" << anchor_keyframe_id
+            << " | translation_error=" << check_translation_error << " m"
+            << " | rotation_error=" << check_rotation_error_deg << " deg"
+            << std::endl;
+        return false;
+    }
+
+    T_map_odom_ =
+        T_map_odom_new;
+
+    has_map_odom_correction_ =
+        true;
+
+    map_odom_anchor_keyframe_id_ =
+        anchor_keyframe_id;
+
+    ++map_odom_revision_;
+
+    std::cout
+        << "Map->odom correction updated"
+        << " | revision=" << map_odom_revision_
+        << " | anchor_kf=" << map_odom_anchor_keyframe_id_
+        << " | translation=["
+        << T_map_odom_.translation().x() << " "
+        << T_map_odom_.translation().y() << " "
+        << T_map_odom_.translation().z() << "]"
+        << " | translation_norm="
+        << T_map_odom_.translation().norm() << " m"
+        << " | rotation="
+        << correction_rotation_deg << " deg"
+        << " | anchor_check_translation="
+        << check_translation_error << " m"
+        << " | anchor_check_rotation="
+        << check_rotation_error_deg << " deg"
+        << std::endl;
+
+    return true;
+}
+
+// Return the latest ACCEPTED LiDAR -> World pose.
+//
+// Rejected scans never modify this value.
 bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
 {
     RefinementTimingDiagnostics refinement_timing;
@@ -12273,7 +10649,6 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
     return true;
 }
 
-
 // ============================================================================
 // UpdateMapOdomCorrection()
 //
@@ -12296,115 +10671,6 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
 // frontend scans remain continuous, while their corrected pose is obtained by
 // left-multiplying this bridge.
 // ============================================================================
-bool RegistrationScan2LocalMap::UpdateMapOdomCorrection(
-    std::size_t anchor_keyframe_id)
-{
-    const Keyframe *anchor_keyframe =
-        FindBackendKeyframeById(
-            anchor_keyframe_id);
-
-    const PoseGraphNode *anchor_node =
-        pose_graph_.GetNode(
-            anchor_keyframe_id);
-
-    if (anchor_keyframe == nullptr ||
-        anchor_node == nullptr ||
-        !anchor_keyframe->T_WL.matrix().allFinite() ||
-        !anchor_node->T_WK.matrix().allFinite())
-    {
-        return false;
-    }
-
-    const Eigen::Isometry3d T_map_odom_new =
-        anchor_node->T_WK *
-        anchor_keyframe->T_WL.inverse();
-
-    if (!T_map_odom_new.matrix().allFinite())
-    {
-        return false;
-    }
-
-    const Eigen::AngleAxisd correction_rotation(
-        T_map_odom_new.rotation());
-
-    const double correction_rotation_deg =
-        std::abs(
-            correction_rotation.angle()) *
-        180.0 /
-        3.14159265358979323846;
-
-    // Sanity check: applying the bridge to the raw anchor pose must recover the
-    // optimized graph pose to numerical precision.
-    const Eigen::Isometry3d T_map_K_check =
-        T_map_odom_new *
-        anchor_keyframe->T_WL;
-
-    const Eigen::Isometry3d T_check_error =
-        anchor_node->T_WK.inverse() *
-        T_map_K_check;
-
-    const double check_translation_error =
-        T_check_error.translation().norm();
-
-    const Eigen::AngleAxisd check_rotation(
-        T_check_error.rotation());
-
-    const double check_rotation_error_deg =
-        std::abs(
-            check_rotation.angle()) *
-        180.0 /
-        3.14159265358979323846;
-
-    if (!std::isfinite(check_translation_error) ||
-        !std::isfinite(check_rotation_error_deg) ||
-        check_translation_error > 1.0e-6 ||
-        check_rotation_error_deg > 1.0e-6)
-    {
-        std::cerr
-            << "Map->odom correction anchor consistency check failed"
-            << " | anchor_kf=" << anchor_keyframe_id
-            << " | translation_error=" << check_translation_error << " m"
-            << " | rotation_error=" << check_rotation_error_deg << " deg"
-            << std::endl;
-        return false;
-    }
-
-    T_map_odom_ =
-        T_map_odom_new;
-
-    has_map_odom_correction_ =
-        true;
-
-    map_odom_anchor_keyframe_id_ =
-        anchor_keyframe_id;
-
-    ++map_odom_revision_;
-
-    std::cout
-        << "Map->odom correction updated"
-        << " | revision=" << map_odom_revision_
-        << " | anchor_kf=" << map_odom_anchor_keyframe_id_
-        << " | translation=["
-        << T_map_odom_.translation().x() << " "
-        << T_map_odom_.translation().y() << " "
-        << T_map_odom_.translation().z() << "]"
-        << " | translation_norm="
-        << T_map_odom_.translation().norm() << " m"
-        << " | rotation="
-        << correction_rotation_deg << " deg"
-        << " | anchor_check_translation="
-        << check_translation_error << " m"
-        << " | anchor_check_rotation="
-        << check_rotation_error_deg << " deg"
-        << std::endl;
-
-    return true;
-}
-
-
-// Return the latest ACCEPTED LiDAR -> World pose.
-//
-// Rejected scans never modify this value.
 Eigen::Isometry3d RegistrationScan2LocalMap::GetPose() const
 {
     return T_WL_;
@@ -12689,7 +10955,6 @@ void RegistrationScan2LocalMap::Reset()
     // Reset the pure-LiDAR Ground V4 temporal/anchor state together with the
     // rest of the frontend so a new SLAM session bootstraps its own clearance.
     ResetGroundIcpRuntime(this);
-    ClearWorldZDecompositionRuntime(this);
 
     T_WL_ =
         Eigen::Isometry3d::Identity();

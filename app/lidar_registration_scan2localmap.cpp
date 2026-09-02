@@ -6,8 +6,8 @@
 #include "fr_slam/fr_point_types.hpp"
 #include "fr_slam/fr_registration_scan2localmap.hpp"
 
-#include "fr_slam/mid360s_adapter.hpp"
-#include "fr_slam/imu_adapter.hpp"
+#include "fr_slam/fr_mid360s_adapter.hpp"
+#include "fr_slam/fr_imu_adapter.hpp"
 
 #include "fr_slam/fr_imu_buffer.hpp"
 #include "fr_slam/fr_imu_initializer.hpp"
@@ -1105,7 +1105,6 @@ private:
 
         return ImuBuildStatus::SUCCESS;
     }
-
 
     // ============================================================
     // Build relative LiDAR rotation prediction from IMU orientation.
@@ -3406,7 +3405,6 @@ public:
                 registration_config,
                 local_map_config);
 
-
         // ========================================================
         // 2.1 PCD export configuration.
         //
@@ -3420,8 +3418,9 @@ public:
 
         const std::string default_pcd_save_directory =
             home_directory != nullptr
-                ? std::string(home_directory) + "/ros2_ws/maps"
-                : std::string("/tmp/fr_slam_maps");
+                ? std::string(home_directory) +
+                      "/ros2_ws/src/fr_slam/output/maps"
+                : std::string("/tmp/fr_slam_output/maps");
 
         pcd_save_directory_ =
             this->declare_parameter<std::string>(
@@ -3765,7 +3764,6 @@ public:
         RCLCPP_INFO(
             this->get_logger(),
             "Refined  : /refined_map");
-
 
         RCLCPP_INFO(
             this->get_logger(),

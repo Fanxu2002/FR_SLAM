@@ -1,5 +1,5 @@
 #include "fr_slam/fr_imu_types.hpp"
-#include "fr_slam/imu_adapter.hpp"
+#include "fr_slam/fr_imu_adapter.hpp"
 #include "fr_slam/fr_imu_initializer.hpp"
 #include "fr_slam/fr_imu_integrator.hpp"
 

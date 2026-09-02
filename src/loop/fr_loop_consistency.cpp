@@ -1,4 +1,4 @@
-#include "fr_slam/fr_loop_consistency_checker.hpp"
+#include "fr_slam/fr_loop_consistency.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -1,4 +1,4 @@
-#include "fr_slam/imu_adapter.hpp"
+#include "fr_slam/fr_imu_adapter.hpp"
 IMU_DATA ImuAdapter::convert(const sensor_msgs::msg::Imu &msg) const
 {
     IMU_DATA imu_data;

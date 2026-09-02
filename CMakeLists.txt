@@ -30,7 +30,7 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 # # ============================================
 # add_executable(test_mid360s_adapter)
 # target_sources(test_mid360s_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_mid360s_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/mid360s_adapter.cpp)
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_mid360s_adapter.cpp)
 # target_include_directories(test_mid360s_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_mid360s_adapter rclcpp sensor_msgs pcl_conversions)
 # target_link_libraries(test_mid360s_adapter ${PCL_LIBRARIES})
@@ -38,7 +38,7 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 
 # add_executable(test_hesai_adapter)
 # target_sources(test_hesai_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_hesai_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/hesai_adapter.cpp)
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_hesai_adapter.cpp)
 # target_include_directories(test_hesai_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_hesai_adapter rclcpp sensor_msgs pcl_conversions)
 # target_link_libraries(test_hesai_adapter ${PCL_LIBRARIES})
@@ -46,8 +46,8 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 
 # add_executable(test_imu_adapter)
 # target_sources(test_imu_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_imu_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
 #                                             )
 # target_include_directories(test_imu_adapter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_imu_adapter rclcpp sensor_msgs pcl_conversions)
@@ -56,8 +56,8 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 
 # add_executable(test_imu_buffer)
 # target_sources(test_imu_buffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_imu_buffer.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
 #                                             )
 # target_include_directories(test_imu_buffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_imu_buffer rclcpp sensor_msgs pcl_conversions)
@@ -66,9 +66,9 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 
 # add_executable(test_imu_initializer)
 # target_sources(test_imu_initializer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_imu_initializer.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_initializer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_initializer.cpp
 #                                             )
 # target_include_directories(test_imu_initializer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_imu_initializer rclcpp sensor_msgs pcl_conversions)
@@ -77,10 +77,10 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 
 # add_executable(test_imu_integrator)
 # target_sources(test_imu_integrator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/test/test_imu_integrator.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_initializer.cpp
-#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_integrator.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_initializer.cpp
+#                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_integrator.cpp
 #                                             )
 # target_include_directories(test_imu_integrator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # ament_target_dependencies(test_imu_integrator rclcpp sensor_msgs pcl_conversions nav_msgs geometry_msgs)
@@ -109,28 +109,28 @@ find_library(LZ4_LIBRARY NAMES lz4 REQUIRED)
 add_executable(lidar_registration_scan2localmap)
 target_sources(lidar_registration_scan2localmap PRIVATE
                                             ${CMAKE_CURRENT_SOURCE_DIR}/app/lidar_registration_scan2localmap.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_buffer.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_initializer.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_imu_integrator.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_deskewer.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu_adapter.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mid360s_adapter.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_preprocessor.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_lidar_registration.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_local_map.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_registration_scan2localmap.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_keyframe_detector.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_keyframe_manager.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_submap_manager.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_pose_graph.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_detector.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_scan_context.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_verifier.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_loop_consistency_checker.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_pose_graph_optimizer.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_ground_segmenter.cpp
-                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_ground_icp_input_bridge.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_buffer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_initializer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/imu/fr_imu_integrator.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_deskew.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_imu_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_mid360s_adapter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_preprocessor.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/fr_lidar_registration.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/fr_local_map.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_lidar_frontend.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/fr_keyframe_detector.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/fr_keyframe_manager.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/fr_submap_manager.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_pose_graph.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/fr_loop_detector.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/fr_scan_context.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/fr_loop_verifier.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/fr_loop_consistency.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_pose_graph_optimizer.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_segmenter.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_input_bridge.cpp
                                             )
 
 target_include_directories(lidar_registration_scan2localmap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -198,8 +198,8 @@ target_sources(
     ground_segmentation_debug
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/app/ground_segmentation_debug.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/mid360s_adapter.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/fr_ground_segmenter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_mid360s_adapter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_segmenter.cpp
 )
 
 target_include_directories(

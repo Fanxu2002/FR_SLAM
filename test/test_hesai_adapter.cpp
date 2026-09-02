@@ -1,5 +1,5 @@
 #include <rclcpp/rclcpp.hpp>
-#include "fr_slam/hesai_adapter.hpp"
+#include "fr_slam/fr_hesai_adapter.hpp"
 #include <limits>
 #include <memory>
 #include "sensor_msgs/msg/point_cloud2.hpp"

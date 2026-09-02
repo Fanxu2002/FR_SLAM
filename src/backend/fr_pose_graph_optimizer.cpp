@@ -30,16 +30,11 @@
 
 namespace
 {
-    constexpr double kPi =
-        3.14159265358979323846;
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kRadToDeg = 180.0 / kPi;
 
-    constexpr double kRadToDeg =
-        180.0 / kPi;
-
-    using AlignedVector2d =
-        std::vector<
-            Eigen::Vector2d,
-            Eigen::aligned_allocator<Eigen::Vector2d>>;
+    using AlignedVector2d = std::vector<Eigen::Vector2d,
+                                        Eigen::aligned_allocator<Eigen::Vector2d>>;
 
     // ============================================================================
     // Gravity-direction unary factor.
@@ -57,11 +52,7 @@ namespace
     // roll/pitch change rotates it.  Therefore this factor protects tilt without
     // preventing the PoseGraph from correcting global yaw.
     // ============================================================================
-    class EdgeGravityDirection
-        : public g2o::BaseUnaryEdge<
-              3,
-              Eigen::Vector3d,
-              g2o::VertexSE3>
+    class EdgeGravityDirection : public g2o::BaseUnaryEdge<3, Eigen::Vector3d, g2o::VertexSE3>
     {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -73,10 +64,7 @@ namespace
 
         void computeError() override
         {
-            const g2o::VertexSE3 *vertex =
-                static_cast<const g2o::VertexSE3 *>(
-                    _vertices[0]);
-
+            const g2o::VertexSE3 *vertex = static_cast<const g2o::VertexSE3 *>(_vertices[0]);
             if (vertex == nullptr)
             {
                 _error.setConstant(
@@ -84,18 +72,14 @@ namespace
                 return;
             }
 
-            Eigen::Vector3d gravity_estimated =
-                vertex->estimate().rotation().transpose() *
-                Eigen::Vector3d::UnitZ();
+            Eigen::Vector3d gravity_estimated = vertex->estimate().rotation().transpose() *
+                                                Eigen::Vector3d::UnitZ();
 
-            const double estimated_norm =
-                gravity_estimated.norm();
+            const double estimated_norm = gravity_estimated.norm();
 
-            Eigen::Vector3d gravity_measurement =
-                _measurement;
+            Eigen::Vector3d gravity_measurement = _measurement;
 
-            const double measurement_norm =
-                gravity_measurement.norm();
+            const double measurement_norm = gravity_measurement.norm();
 
             if (!gravity_estimated.allFinite() ||
                 !gravity_measurement.allFinite() ||
@@ -112,9 +96,7 @@ namespace
 
             // Difference of two unit gravity directions.  For small tilt angles,
             // ||error|| is approximately the angular error in radians.
-            _error =
-                gravity_estimated -
-                gravity_measurement;
+            _error = gravity_estimated - gravity_measurement;
         }
 
         bool read(std::istream &) override
@@ -128,12 +110,9 @@ namespace
         }
     };
 
-    bool ToG2oId(
-        std::size_t id,
-        int &g2o_id)
+    bool ToG2oId(std::size_t id, int &g2o_id)
     {
-        if (id > static_cast<std::size_t>(
-                     std::numeric_limits<int>::max()))
+        if (id > static_cast<std::size_t>(std::numeric_limits<int>::max()))
         {
             return false;
         }
@@ -142,8 +121,7 @@ namespace
         return true;
     }
 
-    bool IsFinitePositiveSemidefiniteInformation(
-        const Eigen::Matrix<double, 6, 6> &information)
+    bool IsFinitePositiveSemidefiniteInformation(const Eigen::Matrix<double, 6, 6> &information)
     {
         if (!information.allFinite())
         {
@@ -156,32 +134,22 @@ namespace
                 .cwiseAbs()
                 .maxCoeff();
 
-        if (!std::isfinite(asymmetry) ||
-            asymmetry > 1.0e-8)
+        if (!std::isfinite(asymmetry) || asymmetry > 1.0e-8)
         {
             return false;
         }
 
-        const Eigen::Matrix<double, 6, 6>
-            symmetric_information =
-                0.5 *
-                (information +
-                 information.transpose());
+        const Eigen::Matrix<double, 6, 6> symmetric_information = 0.5 * (information + information.transpose());
 
-        Eigen::SelfAdjointEigenSolver<
-            Eigen::Matrix<double, 6, 6>>
-            solver(
-                symmetric_information,
-                Eigen::EigenvaluesOnly);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> solver(symmetric_information,
+                                                                          Eigen::EigenvaluesOnly);
 
-        if (solver.info() !=
-            Eigen::Success)
+        if (solver.info() != Eigen::Success)
         {
             return false;
         }
 
-        const Eigen::Matrix<double, 6, 1> eigenvalues =
-            solver.eigenvalues();
+        const Eigen::Matrix<double, 6, 1> eigenvalues = solver.eigenvalues();
 
         if (!eigenvalues.allFinite())
         {
@@ -208,19 +176,15 @@ namespace
     // also preserves symmetry / positive definiteness if non-zero cross terms are
     // introduced later.
     // ============================================================================
-    Eigen::Matrix<double, 6, 6> RescaleSe3Information(
-        const Eigen::Matrix<double, 6, 6> &base_information,
-        double translation_weight,
-        double rotation_weight)
+    Eigen::Matrix<double, 6, 6> RescaleSe3Information(const Eigen::Matrix<double, 6, 6> &base_information,
+                                                      double translation_weight,
+                                                      double rotation_weight)
     {
-        Eigen::Matrix<double, 6, 6> scale =
-            Eigen::Matrix<double, 6, 6>::Identity();
+        Eigen::Matrix<double, 6, 6> scale = Eigen::Matrix<double, 6, 6>::Identity();
 
-        const double translation_scale =
-            std::sqrt(translation_weight);
+        const double translation_scale = std::sqrt(translation_weight);
 
-        const double rotation_scale =
-            std::sqrt(rotation_weight);
+        const double rotation_scale = std::sqrt(rotation_weight);
 
         scale(0, 0) = translation_scale;
         scale(1, 1) = translation_scale;
@@ -254,9 +218,8 @@ namespace
     };
 
     TranslationStiffnessDiagnostics
-    ComputeTranslationStiffnessDiagnostics(
-        const Eigen::Matrix<double, 6, 6> &information,
-        const Eigen::Matrix3d &R_WL)
+    ComputeTranslationStiffnessDiagnostics(const Eigen::Matrix<double, 6, 6> &information,
+                                           const Eigen::Matrix3d &R_WL)
     {
         TranslationStiffnessDiagnostics result;
 
@@ -274,14 +237,11 @@ namespace
         //
         // order = [tx ty tz rx ry rz]
         // ------------------------------------------------------------
-        const Eigen::Matrix3d A =
-            information.block<3, 3>(0, 0);
+        const Eigen::Matrix3d A = information.block<3, 3>(0, 0);
 
-        const Eigen::Matrix3d B =
-            information.block<3, 3>(0, 3);
+        const Eigen::Matrix3d B = information.block<3, 3>(0, 3);
 
-        const Eigen::Matrix3d C =
-            information.block<3, 3>(3, 3);
+        const Eigen::Matrix3d C = information.block<3, 3>(3, 3);
 
         if (!A.allFinite() ||
             !B.allFinite() ||
@@ -300,34 +260,23 @@ namespace
         //
         //     v_L = R_WL^T * v_W
         // ------------------------------------------------------------
-        const Eigen::Vector3d world_x_in_lidar =
-            R_WL.transpose() *
-            Eigen::Vector3d::UnitX();
+        const Eigen::Vector3d world_x_in_lidar = R_WL.transpose() *
+                                                 Eigen::Vector3d::UnitX();
 
-        const Eigen::Vector3d world_y_in_lidar =
-            R_WL.transpose() *
-            Eigen::Vector3d::UnitY();
+        const Eigen::Vector3d world_y_in_lidar = R_WL.transpose() *
+                                                 Eigen::Vector3d::UnitY();
 
-        const Eigen::Vector3d world_z_in_lidar =
-            R_WL.transpose() *
-            Eigen::Vector3d::UnitZ();
+        const Eigen::Vector3d world_z_in_lidar = R_WL.transpose() *
+                                                 Eigen::Vector3d::UnitZ();
 
         // ------------------------------------------------------------
         // Direct translational stiffness.
         //
         // Rotation is assumed fixed here.
         // ------------------------------------------------------------
-        result.direct_world_x =
-            world_x_in_lidar.dot(
-                A * world_x_in_lidar);
-
-        result.direct_world_y =
-            world_y_in_lidar.dot(
-                A * world_y_in_lidar);
-
-        result.direct_world_z =
-            world_z_in_lidar.dot(
-                A * world_z_in_lidar);
+        result.direct_world_x = world_x_in_lidar.dot(A * world_x_in_lidar);
+        result.direct_world_y = world_y_in_lidar.dot(A * world_y_in_lidar);
+        result.direct_world_z = world_z_in_lidar.dot(A * world_z_in_lidar);
 
         // ------------------------------------------------------------
         // Effective translational stiffness after allowing rotation
@@ -344,88 +293,51 @@ namespace
             return result;
         }
 
-        const Eigen::Vector3d diagonal =
-            ldlt.vectorD();
+        const Eigen::Vector3d diagonal = ldlt.vectorD();
 
-        if (!diagonal.allFinite() ||
-            diagonal.minCoeff() <= 1.0e-12)
+        if (!diagonal.allFinite() || diagonal.minCoeff() <= 1.0e-12)
         {
             return result;
         }
 
-        Eigen::Matrix3d effective_translation_information =
-            A -
-            B *
-                ldlt.solve(
-                    B.transpose());
-
-        effective_translation_information =
-            0.5 *
-            (effective_translation_information +
-             effective_translation_information.transpose());
+        Eigen::Matrix3d effective_translation_information = A - B * ldlt.solve(B.transpose());
+        effective_translation_information = 0.5 * (effective_translation_information + effective_translation_information.transpose());
 
         if (!effective_translation_information.allFinite())
         {
             return result;
         }
 
-        result.effective_world_x =
-            world_x_in_lidar.dot(
-                effective_translation_information *
-                world_x_in_lidar);
+        result.effective_world_x = world_x_in_lidar.dot(effective_translation_information * world_x_in_lidar);
+        result.effective_world_y = world_y_in_lidar.dot(effective_translation_information * world_y_in_lidar);
+        result.effective_world_z = world_z_in_lidar.dot(effective_translation_information * world_z_in_lidar);
 
-        result.effective_world_y =
-            world_y_in_lidar.dot(
-                effective_translation_information *
-                world_y_in_lidar);
+        const double maximum_world_stiffness = std::max(result.effective_world_x,
+                                                        std::max(
+                                                            result.effective_world_y,
+                                                            result.effective_world_z));
 
-        result.effective_world_z =
-            world_z_in_lidar.dot(
-                effective_translation_information *
-                world_z_in_lidar);
-
-        const double maximum_world_stiffness =
-            std::max(
-                result.effective_world_x,
-                std::max(
-                    result.effective_world_y,
-                    result.effective_world_z));
-
-        if (!std::isfinite(maximum_world_stiffness) ||
-            maximum_world_stiffness <= 1.0e-12)
+        if (!std::isfinite(maximum_world_stiffness) || maximum_world_stiffness <= 1.0e-12)
         {
             return result;
         }
 
-        result.relative_world_x =
-            result.effective_world_x /
-            maximum_world_stiffness;
-
-        result.relative_world_y =
-            result.effective_world_y /
-            maximum_world_stiffness;
-
-        result.relative_world_z =
-            result.effective_world_z /
-            maximum_world_stiffness;
+        result.relative_world_x = result.effective_world_x / maximum_world_stiffness;
+        result.relative_world_y = result.effective_world_y / maximum_world_stiffness;
+        result.relative_world_z = result.effective_world_z / maximum_world_stiffness;
 
         // ------------------------------------------------------------
         // Find weakest translational direction.
         // ------------------------------------------------------------
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
-            eigen_solver(
-                effective_translation_information);
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eigen_solver(effective_translation_information);
 
         if (eigen_solver.info() != Eigen::Success)
         {
             return result;
         }
 
-        const Eigen::Vector3d eigenvalues =
-            eigen_solver.eigenvalues();
-
-        const Eigen::Matrix3d eigenvectors =
-            eigen_solver.eigenvectors();
+        const Eigen::Vector3d eigenvalues = eigen_solver.eigenvalues();
+        const Eigen::Matrix3d eigenvectors = eigen_solver.eigenvectors();
 
         if (!eigenvalues.allFinite() ||
             !eigenvectors.allFinite())
@@ -433,20 +345,11 @@ namespace
             return result;
         }
 
-        result.weak_eigenvalue =
-            eigenvalues(0);
+        result.weak_eigenvalue = eigenvalues(0);
+        const Eigen::Vector3d weak_axis_lidar = eigenvectors.col(0);
+        const Eigen::Vector3d weak_axis_world = R_WL * weak_axis_lidar;
 
-        const Eigen::Vector3d weak_axis_lidar =
-            eigenvectors.col(0);
-
-        const Eigen::Vector3d weak_axis_world =
-            R_WL *
-            weak_axis_lidar;
-
-        result.weak_axis_world_z_alignment =
-            std::abs(
-                weak_axis_world.normalized().dot(
-                    Eigen::Vector3d::UnitZ()));
+        result.weak_axis_world_z_alignment = std::abs(weak_axis_world.normalized().dot(Eigen::Vector3d::UnitZ()));
 
         result.valid =
             std::isfinite(result.direct_world_x) &&
@@ -465,89 +368,48 @@ namespace
         return result;
     }
 
-    double ClampUnit(
-        double value)
+    double ClampUnit(double value)
     {
-        return std::max(
-            -1.0,
-            std::min(
-                1.0,
-                value));
+        return std::max(-1.0, std::min(1.0, value));
     }
 
-    double GravityTiltErrorDeg(
-        const Eigen::Matrix3d &R_WK,
-        const Eigen::Vector3d &gravity_L_reference)
+    double GravityTiltErrorDeg(const Eigen::Matrix3d &R_WK, const Eigen::Vector3d &gravity_L_reference)
     {
-        Eigen::Vector3d gravity_estimated =
-            R_WK.transpose() *
-            Eigen::Vector3d::UnitZ();
+        Eigen::Vector3d gravity_estimated = R_WK.transpose() * Eigen::Vector3d::UnitZ();
+        Eigen::Vector3d gravity_reference = gravity_L_reference;
+        const double estimated_norm = gravity_estimated.norm();
+        const double reference_norm = gravity_reference.norm();
 
-        Eigen::Vector3d gravity_reference =
-            gravity_L_reference;
-
-        const double estimated_norm =
-            gravity_estimated.norm();
-
-        const double reference_norm =
-            gravity_reference.norm();
-
-        if (!gravity_estimated.allFinite() ||
-            !gravity_reference.allFinite() ||
-            estimated_norm < 1.0e-12 ||
-            reference_norm < 1.0e-12)
+        if (!gravity_estimated.allFinite() || !gravity_reference.allFinite() || estimated_norm < 1.0e-12 || reference_norm < 1.0e-12)
         {
             return std::numeric_limits<double>::infinity();
         }
 
         gravity_estimated /= estimated_norm;
         gravity_reference /= reference_norm;
-
-        const double cosine =
-            ClampUnit(
-                gravity_estimated.dot(
-                    gravity_reference));
-
-        return std::acos(cosine) *
-               kRadToDeg;
+        const double cosine = ClampUnit(gravity_estimated.dot(gravity_reference));
+        return std::acos(cosine) * kRadToDeg;
     }
 
-    Eigen::Vector3d RotationToRpy(
-        const Eigen::Matrix3d &R)
+    Eigen::Vector3d RotationToRpy(const Eigen::Matrix3d &R)
     {
-        Eigen::Vector3d rpy =
-            Eigen::Vector3d::Zero();
-
-        const double sin_pitch =
-            ClampUnit(-R(2, 0));
-
-        rpy.y() =
-            std::asin(sin_pitch);
-
-        rpy.x() =
-            std::atan2(
-                R(2, 1),
-                R(2, 2));
-
-        rpy.z() =
-            std::atan2(
-                R(1, 0),
-                R(0, 0));
-
+        Eigen::Vector3d rpy = Eigen::Vector3d::Zero();
+        const double sin_pitch = ClampUnit(-R(2, 0));
+        rpy.y() = std::asin(sin_pitch);
+        rpy.x() = std::atan2(R(2, 1),
+                             R(2, 2));
+        rpy.z() = std::atan2(R(1, 0),
+                             R(0, 0));
         return rpy;
     }
 
-    double WrappedAngleDifferenceDeg(
-        double first,
-        double second)
+    double WrappedAngleDifferenceDeg(double first,
+                                     double second)
     {
-        const double difference =
-            first - second;
+        const double difference = first - second;
 
-        return std::abs(
-                   std::atan2(
-                       std::sin(difference),
-                       std::cos(difference))) *
+        return std::abs(std::atan2(std::sin(difference),
+                                   std::cos(difference))) *
                kRadToDeg;
     }
 
@@ -558,39 +420,31 @@ namespace
     // A genuinely two-dimensional path has a non-zero ratio, while a trajectory
     // collapsed toward one line approaches zero.
     // ============================================================================
-    double ComputeXyPcaRatio(
-        const AlignedVector2d &positions)
+    double ComputeXyPcaRatio(const AlignedVector2d &positions)
     {
         if (positions.size() < 3)
         {
             return 0.0;
         }
-
-        Eigen::Vector2d mean =
-            Eigen::Vector2d::Zero();
-
+        Eigen::Vector2d mean = Eigen::Vector2d::Zero();
         for (const Eigen::Vector2d &position : positions)
         {
             if (!position.allFinite())
             {
                 return std::numeric_limits<double>::quiet_NaN();
             }
-
             mean += position;
         }
 
         mean /= static_cast<double>(positions.size());
 
-        Eigen::Matrix2d covariance =
-            Eigen::Matrix2d::Zero();
+        Eigen::Matrix2d covariance = Eigen::Matrix2d::Zero();
 
         for (const Eigen::Vector2d &position : positions)
         {
-            const Eigen::Vector2d delta =
-                position - mean;
+            const Eigen::Vector2d delta = position - mean;
 
-            covariance.noalias() +=
-                delta * delta.transpose();
+            covariance.noalias() += delta * delta.transpose();
         }
 
         covariance /= static_cast<double>(positions.size());
@@ -602,18 +456,13 @@ namespace
             return std::numeric_limits<double>::quiet_NaN();
         }
 
-        const Eigen::Vector2d eigenvalues =
-            solver.eigenvalues();
+        const Eigen::Vector2d eigenvalues = solver.eigenvalues();
 
-        const double lambda_min =
-            std::max(0.0, eigenvalues.x());
+        const double lambda_min = std::max(0.0, eigenvalues.x());
 
-        const double lambda_max =
-            std::max(0.0, eigenvalues.y());
+        const double lambda_max = std::max(0.0, eigenvalues.y());
 
-        if (!std::isfinite(lambda_min) ||
-            !std::isfinite(lambda_max) ||
-            lambda_max < 1.0e-12)
+        if (!std::isfinite(lambda_min) || !std::isfinite(lambda_max) || lambda_max < 1.0e-12)
         {
             return 0.0;
         }
@@ -627,8 +476,7 @@ namespace
     // The graph node vector follows Keyframe insertion order, so consecutive
     // entries represent the backend odometry chain.
     // ============================================================================
-    double ComputeXyPathLength(
-        const AlignedVector2d &positions)
+    double ComputeXyPathLength(const AlignedVector2d &positions)
     {
         if (positions.size() < 2)
         {
@@ -637,20 +485,15 @@ namespace
 
         double length = 0.0;
 
-        for (std::size_t i = 1;
-             i < positions.size();
-             ++i)
+        for (std::size_t i = 1; i < positions.size(); ++i)
         {
-            if (!positions[i - 1].allFinite() ||
-                !positions[i].allFinite())
+            if (!positions[i - 1].allFinite() || !positions[i].allFinite())
             {
                 return std::numeric_limits<double>::quiet_NaN();
             }
 
-            length +=
-                (positions[i] - positions[i - 1]).norm();
+            length += (positions[i] - positions[i - 1]).norm();
         }
-
         return length;
     }
 
@@ -659,12 +502,10 @@ namespace
     //
     // Signed wrapped difference first - second in [-180, 180] deg.
     // ============================================================================
-    double SignedWrappedAngleDifferenceDeg(
-        double first,
-        double second)
+    double SignedWrappedAngleDifferenceDeg(double first,
+                                           double second)
     {
-        const double difference =
-            first - second;
+        const double difference = first - second;
 
         return std::atan2(
                    std::sin(difference),
@@ -675,8 +516,7 @@ namespace
     // ============================================================================
     // RotationAngleDeg()
     // ============================================================================
-    double RotationAngleDeg(
-        const Eigen::Matrix3d &R)
+    double RotationAngleDeg(const Eigen::Matrix3d &R)
     {
         const Eigen::AngleAxisd angle_axis(R);
 
@@ -696,33 +536,39 @@ namespace
     // PCD exporter.  The HOME fallback keeps the diagnostic useful when this
     // executable is started directly without the launch file.
     // ============================================================================
-    std::filesystem::path DiagnosticDirectory()
+    std::filesystem::path OutputDirectory()
     {
-        const char *configured_directory =
-            std::getenv("FR_SLAM_MAP_DIR");
+        const char *configured_directory = std::getenv("FR_SLAM_OUTPUT_DIR");
 
-        if (configured_directory != nullptr &&
-            configured_directory[0] != '\0')
+        if (configured_directory != nullptr && configured_directory[0] != '\0')
         {
-            return std::filesystem::path(
-                configured_directory);
+            return std::filesystem::path(configured_directory);
         }
 
-        const char *home_directory =
-            std::getenv("HOME");
+        const char *home_directory = std::getenv("HOME");
 
-        if (home_directory != nullptr &&
-            home_directory[0] != '\0')
+        if (home_directory != nullptr && home_directory[0] != '\0')
         {
-            return std::filesystem::path(home_directory) /
+            return std::filesystem::path(
+                       home_directory) /
                    "ros2_ws" /
                    "src" /
                    "fr_slam" /
-                   "Map";
+                   "output";
         }
+        return std::filesystem::path("/tmp/fr_slam_output");
+    }
 
-        return std::filesystem::path(
-            "/tmp/fr_slam_maps");
+    std::filesystem::path DiagnosticDirectory()
+    {
+        return OutputDirectory() /
+               "diagnostics";
+    }
+
+    std::filesystem::path LoopDirectory()
+    {
+        return OutputDirectory() /
+               "loop";
     }
 
     // ============================================================================
@@ -730,32 +576,24 @@ namespace
     //
     // Read one optimized SE(3) estimate from the temporary g2o graph.
     // ============================================================================
-    bool OptimizedPose(
-        g2o::SparseOptimizer &optimizer,
-        std::size_t node_id,
-        Eigen::Isometry3d &T_WK)
+    bool OptimizedPose(g2o::SparseOptimizer &optimizer,
+                       std::size_t node_id,
+                       Eigen::Isometry3d &T_WK)
     {
         int g2o_id = 0;
 
-        if (!ToG2oId(
-                node_id,
-                g2o_id))
+        if (!ToG2oId(node_id, g2o_id))
         {
             return false;
         }
 
-        const g2o::VertexSE3 *vertex =
-            dynamic_cast<const g2o::VertexSE3 *>(
-                optimizer.vertex(
-                    g2o_id));
-
+        const g2o::VertexSE3 *vertex = dynamic_cast<const g2o::VertexSE3 *>(optimizer.vertex(g2o_id));
         if (vertex == nullptr)
         {
             return false;
         }
 
-        T_WK =
-            vertex->estimate();
+        T_WK = vertex->estimate();
 
         return T_WK.matrix().allFinite();
     }
@@ -775,38 +613,29 @@ namespace
     // - This function is diagnostic only.
     // - Failure to write CSV must NEVER reject a valid PoseGraph optimization.
     // ============================================================================
-    bool WritePoseGraphDiagnostics(
-        const std::vector<PoseGraphNode> &nodes,
-        const std::vector<PoseGraphEdge> &edges,
-        const std::unordered_map<
-            std::size_t,
-            Eigen::Isometry3d> &pose_before_optimization,
-        g2o::SparseOptimizer &optimizer,
-        std::filesystem::path &output_directory)
+    bool WritePoseGraphDiagnostics(const std::vector<PoseGraphNode> &nodes,
+                                   const std::vector<PoseGraphEdge> &edges,
+                                   const std::unordered_map<std::size_t, Eigen::Isometry3d> &pose_before_optimization,
+                                   g2o::SparseOptimizer &optimizer,
+                                   std::filesystem::path &output_directory)
     {
         try
         {
-            output_directory =
-                DiagnosticDirectory();
+            output_directory = DiagnosticDirectory();
 
-            std::filesystem::create_directories(
-                output_directory);
+            std::filesystem::create_directories(output_directory);
 
             // --------------------------------------------------------------------
             // 1. Per-Keyframe correction.
             // --------------------------------------------------------------------
-            std::ofstream keyframe_file(
-                output_directory /
-                "pgo_keyframe_correction.csv");
+            std::ofstream keyframe_file(output_directory / "pgo_keyframe_correction.csv");
 
             if (!keyframe_file.is_open())
             {
                 return false;
             }
 
-            keyframe_file
-                << std::fixed
-                << std::setprecision(9);
+            keyframe_file << std::fixed << std::setprecision(9);
 
             keyframe_file
                 << "kf_id,fixed,"
@@ -817,48 +646,31 @@ namespace
                 << "delta_translation_m,delta_rotation_deg,"
                 << "delta_roll_deg,delta_pitch_deg,delta_yaw_deg\n";
 
-            for (const PoseGraphNode &node :
-                 nodes)
+            for (const PoseGraphNode &node : nodes)
             {
-                const auto before_iterator =
-                    pose_before_optimization.find(
-                        node.id);
-
+                const auto before_iterator = pose_before_optimization.find(node.id);
                 if (before_iterator ==
                     pose_before_optimization.end())
                 {
                     continue;
                 }
 
-                Eigen::Isometry3d T_after =
-                    Eigen::Isometry3d::Identity();
+                Eigen::Isometry3d T_after = Eigen::Isometry3d::Identity();
 
-                if (!OptimizedPose(
-                        optimizer,
-                        node.id,
-                        T_after))
+                if (!OptimizedPose(optimizer, node.id, T_after))
                 {
                     continue;
                 }
 
-                const Eigen::Isometry3d &T_before =
-                    before_iterator->second;
+                const Eigen::Isometry3d &T_before = before_iterator->second;
 
-                const Eigen::Isometry3d T_delta_local =
-                    T_before.inverse() *
-                    T_after;
+                const Eigen::Isometry3d T_delta_local = T_before.inverse() * T_after;
 
-                const Eigen::Vector3d delta_world =
-                    T_after.translation() -
-                    T_before.translation();
+                const Eigen::Vector3d delta_world = T_after.translation() - T_before.translation();
 
-                const Eigen::Vector3d raw_rpy =
-                    RotationToRpy(
-                        T_before.rotation());
+                const Eigen::Vector3d raw_rpy = RotationToRpy(T_before.rotation());
 
-                const Eigen::Vector3d opt_rpy =
-                    RotationToRpy(
-                        T_after.rotation());
+                const Eigen::Vector3d opt_rpy = RotationToRpy(T_after.rotation());
 
                 keyframe_file
                     << node.id << ","
@@ -908,9 +720,7 @@ namespace
             // Keyframe pair before and after G2O. This is the direct diagnostic
             // for local bending of a long straight trajectory.
             // --------------------------------------------------------------------
-            std::ofstream odometry_file(
-                output_directory /
-                "pgo_odom_edge_deformation.csv");
+            std::ofstream odometry_file(output_directory / "pgo_odom_edge_deformation.csv");
 
             if (!odometry_file.is_open())
             {
@@ -947,19 +757,23 @@ namespace
 
             // --------------------------------------------------------------------
             // 3. Loop-edge measurements and residuals.
+            //
+            // Keep loop diagnostics separate from general backend diagnostics:
+            //
+            //     output/loop/pgo_loop_edges.csv
             // --------------------------------------------------------------------
-            std::ofstream loop_file(
-                output_directory /
-                "pgo_loop_edges.csv");
+            const std::filesystem::path loop_directory = LoopDirectory();
+
+            std::filesystem::create_directories(loop_directory);
+
+            std::ofstream loop_file(loop_directory / "pgo_loop_edges.csv");
 
             if (!loop_file.is_open())
             {
                 return false;
             }
 
-            loop_file
-                << std::fixed
-                << std::setprecision(9);
+            loop_file << std::fixed << std::setprecision(9);
 
             loop_file
                 << "from_kf,to_kf,"
@@ -970,54 +784,36 @@ namespace
                 << "before_error_translation_m,before_error_rotation_deg,"
                 << "after_error_translation_m,after_error_rotation_deg\n";
 
-            for (const PoseGraphEdge &edge :
-                 edges)
+            for (const PoseGraphEdge &edge : edges)
             {
-                const auto from_before_iterator =
-                    pose_before_optimization.find(
-                        edge.from_id);
+                const auto from_before_iterator = pose_before_optimization.find(edge.from_id);
 
-                const auto to_before_iterator =
-                    pose_before_optimization.find(
-                        edge.to_id);
+                const auto to_before_iterator = pose_before_optimization.find(edge.to_id);
 
-                if (from_before_iterator ==
-                        pose_before_optimization.end() ||
-                    to_before_iterator ==
-                        pose_before_optimization.end())
+                if (from_before_iterator == pose_before_optimization.end() || to_before_iterator == pose_before_optimization.end())
                 {
                     continue;
                 }
 
-                Eigen::Isometry3d T_W_from_after =
-                    Eigen::Isometry3d::Identity();
+                Eigen::Isometry3d T_W_from_after = Eigen::Isometry3d::Identity();
 
-                Eigen::Isometry3d T_W_to_after =
-                    Eigen::Isometry3d::Identity();
+                Eigen::Isometry3d T_W_to_after = Eigen::Isometry3d::Identity();
 
-                if (!OptimizedPose(
-                        optimizer,
-                        edge.from_id,
-                        T_W_from_after) ||
-                    !OptimizedPose(
-                        optimizer,
-                        edge.to_id,
-                        T_W_to_after))
+                if (!OptimizedPose(optimizer,
+                                   edge.from_id,
+                                   T_W_from_after) ||
+                    !OptimizedPose(optimizer,
+                                   edge.to_id,
+                                   T_W_to_after))
                 {
                     continue;
                 }
 
-                const Eigen::Isometry3d T_before_relative =
-                    from_before_iterator->second.inverse() *
-                    to_before_iterator->second;
+                const Eigen::Isometry3d T_before_relative = from_before_iterator->second.inverse() * to_before_iterator->second;
 
-                const Eigen::Isometry3d T_after_relative =
-                    T_W_from_after.inverse() *
-                    T_W_to_after;
+                const Eigen::Isometry3d T_after_relative = T_W_from_after.inverse() * T_W_to_after;
 
-                const Eigen::Isometry3d T_deformation =
-                    T_before_relative.inverse() *
-                    T_after_relative;
+                const Eigen::Isometry3d T_deformation = T_before_relative.inverse() * T_after_relative;
 
                 // ------------------------------------------------------------------------
                 // Per-node GLOBAL corrections:
@@ -1038,21 +834,13 @@ namespace
                 // Therefore this quantity directly tells us how the global Z correction
                 // is distributed along the graph.
                 // ------------------------------------------------------------------------
-                const Eigen::Vector3d correction_world_from =
-                    T_W_from_after.translation() -
-                    from_before_iterator->second.translation();
+                const Eigen::Vector3d correction_world_from = T_W_from_after.translation() - from_before_iterator->second.translation();
 
-                const Eigen::Vector3d correction_world_to =
-                    T_W_to_after.translation() -
-                    to_before_iterator->second.translation();
+                const Eigen::Vector3d correction_world_to = T_W_to_after.translation() - to_before_iterator->second.translation();
 
-                const Eigen::Vector3d correction_gradient_world =
-                    correction_world_to -
-                    correction_world_from;
+                const Eigen::Vector3d correction_gradient_world = correction_world_to - correction_world_from;
 
-                const Eigen::Isometry3d T_before_measurement_error =
-                    edge.T_from_to.inverse() *
-                    T_before_relative;
+                const Eigen::Isometry3d T_before_measurement_error = edge.T_from_to.inverse() * T_before_relative;
 
                 const Eigen::Isometry3d T_after_measurement_error =
                     edge.T_from_to.inverse() *
@@ -1361,27 +1149,6 @@ bool PoseGraphOptimizer::Optimize(
             config_.global_information_min_nodes &&
         pose_graph.LoopEdgeCount() > 0;
 
-    std::cout
-        << "PoseGraph Information Matrix V1"
-        << " | active="
-        << (apply_global_information_v1
-                ? "true"
-                : "false")
-        << " | nodes=" << nodes.size()
-        << " | min_global_nodes="
-        << config_.global_information_min_nodes
-        << " | odom=[t:"
-        << config_.global_odom_translation_weight
-        << " r:"
-        << config_.global_odom_rotation_weight
-        << "]"
-        << " | loop=[t:"
-        << config_.global_loop_translation_weight
-        << " r:"
-        << config_.global_loop_rotation_weight
-        << "]"
-        << std::endl;
-
     std::ofstream odometry_information_file;
 
     bool odometry_information_file_open =
@@ -1434,11 +1201,6 @@ bool PoseGraphOptimizer::Optimize(
                 false;
         }
     }
-
-    std::size_t odometry_information_log_index = 0;
-
-    const std::size_t total_odometry_edges_for_log =
-        pose_graph.OdometryEdgeCount();
 
     for (const PoseGraphEdge &edge_data : edges)
     {
@@ -1557,268 +1319,6 @@ bool PoseGraphOptimizer::Optimize(
                         << "\n";
                 }
             }
-        }
-
-        if (edge_data.type ==
-            PoseGraphEdgeType::Odometry)
-        {
-            const std::size_t current_log_index =
-                odometry_information_log_index;
-
-            ++odometry_information_log_index;
-
-            // Keep this diagnostic compact.  A full global PGO can contain
-            // 500+ odometry edges and may run several times, so printing every
-            // edge makes the log unnecessarily huge.  Sample the first three,
-            // every 50th edge, and the last three edges instead.
-            const bool should_log_information =
-                current_log_index < 3 ||
-                current_log_index % 50 == 0 ||
-                current_log_index + 3 >=
-                    total_odometry_edges_for_log;
-
-            if (should_log_information)
-            {
-                double base_max_offdiag =
-                    0.0;
-
-                double base_max_tr_coupling =
-                    0.0;
-
-                double final_max_offdiag =
-                    0.0;
-
-                double final_max_tr_coupling =
-                    0.0;
-
-                for (int i = 0;
-                     i < 6;
-                     ++i)
-                {
-                    for (int j = 0;
-                         j < 6;
-                         ++j)
-                    {
-                        if (i == j)
-                        {
-                            continue;
-                        }
-
-                        base_max_offdiag =
-                            std::max(
-                                base_max_offdiag,
-                                std::abs(
-                                    edge_data.information(i, j)));
-
-                        final_max_offdiag =
-                            std::max(
-                                final_max_offdiag,
-                                std::abs(
-                                    information(i, j)));
-
-                        const bool translation_rotation_pair =
-                            (i < 3 && j >= 3) ||
-                            (i >= 3 && j < 3);
-
-                        if (translation_rotation_pair)
-                        {
-                            base_max_tr_coupling =
-                                std::max(
-                                    base_max_tr_coupling,
-                                    std::abs(
-                                        edge_data.information(i, j)));
-
-                            final_max_tr_coupling =
-                                std::max(
-                                    final_max_tr_coupling,
-                                    std::abs(
-                                        information(i, j)));
-                        }
-                    }
-                }
-
-                double tr_coupling_scale_ratio =
-                    std::numeric_limits<double>::quiet_NaN();
-
-                if (base_max_tr_coupling >
-                    1.0e-12)
-                {
-                    tr_coupling_scale_ratio =
-                        final_max_tr_coupling /
-                        base_max_tr_coupling;
-                }
-
-                double expected_tr_coupling_scale =
-                    1.0;
-
-                if (apply_global_information_v1)
-                {
-                    expected_tr_coupling_scale =
-                        std::sqrt(
-                            config_.global_odom_translation_weight *
-                            config_.global_odom_rotation_weight);
-                }
-
-                std::cout
-                    << "G2O_ODOM_INFORMATION_FINAL"
-                    << " | sample="
-                    << current_log_index
-                    << "/"
-                    << total_odometry_edges_for_log
-                    << " | from="
-                    << edge_data.from_id
-                    << " | to="
-                    << edge_data.to_id
-                    << " | diag=["
-                    << information(0, 0) << " "
-                    << information(1, 1) << " "
-                    << information(2, 2) << " "
-                    << information(3, 3) << " "
-                    << information(4, 4) << " "
-                    << information(5, 5)
-                    << "]"
-                    << " | base_max_offdiag="
-                    << base_max_offdiag
-                    << " | final_max_offdiag="
-                    << final_max_offdiag
-                    << " | base_max_tr_coupling="
-                    << base_max_tr_coupling
-                    << " | final_max_tr_coupling="
-                    << final_max_tr_coupling
-                    << " | tr_scale_ratio="
-                    << tr_coupling_scale_ratio
-                    << " | expected_tr_scale="
-                    << expected_tr_coupling_scale
-                    << std::endl;
-            }
-        }
-        else if (edge_data.type ==
-                 PoseGraphEdgeType::Loop)
-        {
-            double base_maximum_absolute_off_diagonal =
-                0.0;
-
-            double final_maximum_absolute_off_diagonal =
-                0.0;
-
-            double base_maximum_translation_rotation_coupling =
-                0.0;
-
-            double final_maximum_translation_rotation_coupling =
-                0.0;
-
-            for (int i = 0;
-                 i < 6;
-                 ++i)
-            {
-                for (int j = 0;
-                     j < 6;
-                     ++j)
-                {
-                    if (i == j)
-                    {
-                        continue;
-                    }
-
-                    base_maximum_absolute_off_diagonal =
-                        std::max(
-                            base_maximum_absolute_off_diagonal,
-                            std::abs(
-                                edge_data.information(i, j)));
-
-                    final_maximum_absolute_off_diagonal =
-                        std::max(
-                            final_maximum_absolute_off_diagonal,
-                            std::abs(
-                                information(i, j)));
-
-                    const bool translation_rotation_pair =
-                        (i < 3 && j >= 3) ||
-                        (i >= 3 && j < 3);
-
-                    if (translation_rotation_pair)
-                    {
-                        base_maximum_translation_rotation_coupling =
-                            std::max(
-                                base_maximum_translation_rotation_coupling,
-                                std::abs(
-                                    edge_data.information(i, j)));
-
-                        final_maximum_translation_rotation_coupling =
-                            std::max(
-                                final_maximum_translation_rotation_coupling,
-                                std::abs(
-                                    information(i, j)));
-                    }
-                }
-            }
-
-            double translation_rotation_scale_ratio =
-                std::numeric_limits<double>::quiet_NaN();
-
-            if (base_maximum_translation_rotation_coupling >
-                1.0e-12)
-            {
-                translation_rotation_scale_ratio =
-                    final_maximum_translation_rotation_coupling /
-                    base_maximum_translation_rotation_coupling;
-            }
-
-            double expected_translation_rotation_scale =
-                1.0;
-
-            if (apply_global_information_v1)
-            {
-                expected_translation_rotation_scale =
-                    std::sqrt(
-                        config_.global_loop_translation_weight *
-                        config_.global_loop_rotation_weight);
-            }
-
-            std::cout
-                << "G2O_LOOP_INFORMATION_FINAL"
-                << " | from="
-                << edge_data.from_id
-                << " | to="
-                << edge_data.to_id
-
-                << " | base_diag=["
-                << edge_data.information(0, 0) << " "
-                << edge_data.information(1, 1) << " "
-                << edge_data.information(2, 2) << " "
-                << edge_data.information(3, 3) << " "
-                << edge_data.information(4, 4) << " "
-                << edge_data.information(5, 5)
-                << "]"
-
-                << " | final_diag=["
-                << information(0, 0) << " "
-                << information(1, 1) << " "
-                << information(2, 2) << " "
-                << information(3, 3) << " "
-                << information(4, 4) << " "
-                << information(5, 5)
-                << "]"
-
-                << " | base_max_offdiag="
-                << base_maximum_absolute_off_diagonal
-
-                << " | final_max_offdiag="
-                << final_maximum_absolute_off_diagonal
-
-                << " | base_max_tr_coupling="
-                << base_maximum_translation_rotation_coupling
-
-                << " | final_max_tr_coupling="
-                << final_maximum_translation_rotation_coupling
-
-                << " | tr_scale_ratio="
-                << translation_rotation_scale_ratio
-
-                << " | expected_tr_scale="
-                << expected_translation_rotation_scale
-
-                << std::endl;
         }
 
         edge->setInformation(
@@ -2103,33 +1603,6 @@ bool PoseGraphOptimizer::Optimize(
             large_rotation_threshold_deg)
         {
             ++large_rotation_update_count;
-
-            Eigen::Vector3d rotation_axis =
-                rotation_update.axis();
-
-            if (!rotation_axis.allFinite())
-            {
-                rotation_axis =
-                    Eigen::Vector3d::Zero();
-            }
-
-            std::cout
-                << "Large G2O rotation update"
-                << " | kf=" << node.id
-                << " | translation="
-                << translation_update << " m"
-                << " | rotation="
-                << rotation_update_deg << " deg"
-                << " | axis=["
-                << rotation_axis.transpose()
-                << "]"
-                << " | droll="
-                << roll_update_deg << " deg"
-                << " | dpitch="
-                << pitch_update_deg << " deg"
-                << " | dyaw="
-                << yaw_update_deg << " deg"
-                << std::endl;
         }
 
         if (node.has_gravity_reference)
@@ -2177,54 +1650,6 @@ bool PoseGraphOptimizer::Optimize(
     result.loop_edges =
         pose_graph.LoopEdgeCount();
 
-    std::cout
-        << "G2O maximum update detail"
-        << " | translation_kf="
-        << max_translation_update_node_id
-        << " | translation="
-        << result.max_translation_update << " m"
-        << " | rotation_kf="
-        << max_rotation_update_node_id
-        << " | rotation="
-        << result.max_rotation_update_deg << " deg"
-        << " | large_rotation_nodes="
-        << large_rotation_update_count
-        << " | threshold="
-        << large_rotation_threshold_deg << " deg"
-        << std::endl;
-
-    std::cout
-        << "PoseGraph RPY diagnostics"
-        << " | max_droll="
-        << result.max_roll_update_deg << " deg"
-        << " | roll_kf="
-        << result.max_roll_update_keyframe_id
-        << " | max_dpitch="
-        << result.max_pitch_update_deg << " deg"
-        << " | pitch_kf="
-        << result.max_pitch_update_keyframe_id
-        << " | max_dyaw="
-        << result.max_yaw_update_deg << " deg"
-        << " | yaw_kf="
-        << result.max_yaw_update_keyframe_id
-        << std::endl;
-
-    std::cout
-        << "PoseGraph gravity diagnostics"
-        << " | gravity_edges="
-        << result.gravity_edges
-        << " | gravity_reference_nodes="
-        << result.gravity_reference_nodes
-        << " | mean_tilt_error="
-        << result.mean_gravity_tilt_error_deg << " deg"
-        << " | max_tilt_error="
-        << result.max_gravity_tilt_error_deg << " deg"
-        << " | worst_kf="
-        << result.worst_gravity_keyframe_id
-        << " | hard_limit="
-        << config_.max_gravity_tilt_error_deg << " deg"
-        << std::endl;
-
     result.xy_pca_ratio_before =
         ComputeXyPcaRatio(
             xy_positions_before);
@@ -2251,25 +1676,6 @@ bool PoseGraphOptimizer::Optimize(
     {
         result.path_length_ratio = 1.0;
     }
-
-    std::cout
-        << "PoseGraph trajectory shape diagnostics"
-        << " | xy_pca_before="
-        << result.xy_pca_ratio_before
-        << " | xy_pca_after="
-        << result.xy_pca_ratio_after
-        << " | pca_scale="
-        << (result.xy_pca_ratio_before > 1.0e-12
-                ? result.xy_pca_ratio_after /
-                      result.xy_pca_ratio_before
-                : 1.0)
-        << " | path_length_before="
-        << result.path_length_before << " m"
-        << " | path_length_after="
-        << result.path_length_after << " m"
-        << " | path_length_ratio="
-        << result.path_length_ratio
-        << std::endl;
 
     if (config_.use_trajectory_shape_guard)
     {
@@ -2340,17 +1746,6 @@ bool PoseGraphOptimizer::Optimize(
 
     result.trajectory_shape_guard_passed = true;
 
-    std::cout
-        << "PoseGraph trajectory shape guard"
-        << " | accepted=true"
-        << " | xy_pca_before="
-        << result.xy_pca_ratio_before
-        << " | xy_pca_after="
-        << result.xy_pca_ratio_after
-        << " | path_length_ratio="
-        << result.path_length_ratio
-        << std::endl;
-
     if (config_.use_gravity_hard_guard &&
         result.gravity_reference_nodes > 0 &&
         result.max_gravity_tilt_error_deg >
@@ -2376,13 +1771,41 @@ bool PoseGraphOptimizer::Optimize(
 
     result.gravity_guard_passed = true;
 
+    // ------------------------------------------------------------------------
+    // Compact runtime summary.
+    //
+    // Detailed information-matrix / per-edge / per-keyframe diagnostics are
+    // written to CSV. Keep stdout concise during normal rosbag runs.
+    // ------------------------------------------------------------------------
     std::cout
-        << "PoseGraph gravity guard"
-        << " | accepted=true"
-        << " | max_tilt_error="
-        << result.max_gravity_tilt_error_deg << " deg"
-        << " | hard_limit="
-        << config_.max_gravity_tilt_error_deg << " deg"
+        << "PoseGraph optimization accepted"
+        << " | nodes=" << result.optimized_nodes
+        << " | odom_edges=" << result.odometry_edges
+        << " | loop_edges=" << result.loop_edges
+        << " | iterations=" << result.iterations
+        << " | chi2=" << result.chi2_before
+        << "->" << result.chi2_after
+        << " | information_v1="
+        << (apply_global_information_v1
+                ? "ON"
+                : "OFF")
+        << " | max_translation="
+        << result.max_translation_update
+        << "m@kf" << max_translation_update_node_id
+        << " | max_rotation="
+        << result.max_rotation_update_deg
+        << "deg@kf" << max_rotation_update_node_id
+        << " | max_rpy=["
+        << result.max_roll_update_deg << ","
+        << result.max_pitch_update_deg << ","
+        << result.max_yaw_update_deg << "]deg"
+        << " | large_rotation_nodes="
+        << large_rotation_update_count
+        << " | path_length_ratio="
+        << result.path_length_ratio
+        << " | max_gravity_tilt="
+        << result.max_gravity_tilt_error_deg
+        << "deg"
         << std::endl;
 
     // ------------------------------------------------------------------------
@@ -2408,20 +1831,14 @@ bool PoseGraphOptimizer::Optimize(
                 optimizer,
                 diagnostic_directory);
 
-        std::cout
-            << "PGO diagnostic CSV"
-            << " | saved="
-            << (diagnostic_saved
-                    ? "true"
-                    : "false")
-            << " | nodes=" << nodes.size()
-            << " | odom_edges="
-            << pose_graph.OdometryEdgeCount()
-            << " | loop_edges="
-            << pose_graph.LoopEdgeCount()
-            << " | directory="
-            << diagnostic_directory.string()
-            << std::endl;
+        if (!diagnostic_saved)
+        {
+            std::cerr
+                << "PoseGraph diagnostic CSV write failed"
+                << " | directory="
+                << diagnostic_directory.string()
+                << std::endl;
+        }
     }
 
     // ------------------------------------------------------------------------
