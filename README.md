@@ -1,151 +1,61 @@
-# FR-SLAM 使用说明
+# FR-SLAM
 
-## 1. 环境
+FR-SLAM 是一个基于 **ROS 2 Humble + C++17** 开发的 3D LiDAR SLAM 系统，主要面向室外与农业机器人场景。
 
-推荐：
+目前系统已经完成从 LiDAR 前端里程计、局部地图、回环检测到后端位姿图优化的完整 SLAM 流程，并加入 IMU 辅助 Deskew 与旋转预测。
 
-- Ubuntu 22.04
-- ROS 2 Humble
-- C++17
+## 目前实现
 
-先确保 ROS 2 Humble 已经安装。
+- Scan-to-LocalMap point-to-plane ICP
+- IMU rotation-only Deskew
+- IMU 相对旋转作为 ICP 初始值
+- Keyframe + LocalMap
+- Huber 鲁棒核
+- Hessian 退化检测与归一化
+- Local Ground Constraint
+- Scan Context 回环检测
+- Loop Geometry Verification
+- g2o Pose Graph Optimization
+- Post-PGO Map Refinement
+- 异步 Backend
+- Mid-360 / Hesai LiDAR Adapter
+- YAML 配置 LiDAR / IMU Topic 与预处理参数
+- 地图与轨迹 Snapshot 保存
 
----
+## 主要解决的问题
 
-## 2. 安装依赖
+目前 FR-SLAM 主要针对以下问题进行了处理：
 
-```bash
-sudo apt update
+- LiDAR 扫描过程中由运动造成的点云畸变
+- Scan-to-LocalMap 配准中的错误对应点与异常值
+- 退化环境下 Hessian 弱方向导致的位姿不稳定
+- 斜坡与非水平地面环境下 roll / pitch / z 漂移
+- 回环误匹配与错误 Loop Edge
+- Pose Graph 优化后地图整体错位与局部不一致
+- 长时间运行中的前端 / 后端计算负载问题
+- 不同 LiDAR 数据格式之间的兼容问题
+- 多次实验地图和轨迹相互覆盖的问题
 
-sudo apt install -y \
-    build-essential \
-    cmake \
-    git \
-    python3-colcon-common-extensions \
-    libeigen3-dev \
-    libpcl-dev \
-    libfmt-dev \
-    ros-humble-rclcpp \
-    ros-humble-sensor-msgs \
-    ros-humble-nav-msgs \
-    ros-humble-geometry-msgs \
-    ros-humble-visualization-msgs \
-    ros-humble-tf2-ros \
-    ros-humble-pcl-conversions
-```
+当前系统仍属于 **LiDAR SLAM + IMU-assisted frontend**，IMU 主要用于 Deskew 和旋转预测，尚未实现紧耦合 LIO。
 
-### 安装 g2o
-
-FR-SLAM 的后端 Pose Graph 使用 g2o。
-
-```bash
-mkdir -p ~/third_party
-cd ~/third_party
-
-git clone https://github.com/RainerKuemmerle/g2o.git
-cd g2o
-
-mkdir -p build
-cd build
-
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DBUILD_SHARED_LIBS=ON
-
-make -j$(nproc)
-
-sudo make install
-sudo ldconfig
-```
-
-安装后可以检查：
-
-```bash
-ls /usr/local/lib/libg2o_core.so
-ls /usr/local/lib/libg2o_stuff.so
-ls /usr/local/lib/libg2o_solver_eigen.so
-ls /usr/local/lib/libg2o_types_slam3d.so
-```
-
----
-
-## 3. 下载 FR-SLAM
-
-```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-
-git clone https://github.com/Fanxu2002/FR_SLAM.git
-```
-
-如果想使用 v1.0.0：
-
-```bash
-cd FR_SLAM
-git checkout v1.0.0
-```
-
----
-
-## 4. 编译
+## 启动
 
 ```bash
 cd ~/ros2_ws
 
-source /opt/ros/humble/setup.bash
-
 colcon build \
     --packages-select fr_slam \
-    --symlink-install \
     --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+source install/setup.bash
+
+ros2 launch fr_slam fr_slam.launch.py
 ```
 
-编译完成后：
+## 保存地图与轨迹
 
 ```bash
-source ~/ros2_ws/install/setup.bash
+ros2 service call /save_slam_maps std_srvs/srv/Trigger "{}"
 ```
 
----
-
-## 5. 运行
-
-当前默认输入：
-
-```text
-/livox/lidar
-/livox/imu
-```
-
-先确认话题存在：
-
-```bash
-ros2 topic list
-```
-
-运行 Scan-to-LocalMap SLAM：
-
-```bash
-ros2 run fr_slam lidar_registration_scan2localmap
-```
-
-如果要运行 Scan-to-Scan：
-
-```bash
-ros2 run fr_slam lidar_registration_scan2scan
-```
-
----
-
-## 6. 常用输出
-
-```text
-/lidar_odometry
-/corrected_odometry
-/lidar_path
-/local_map
-/raw_keyframe_map
-/optimized_map
-/optimized_path
-/pose_graph_markers
-```
+每次保存都会生成独立的时间戳目录，避免覆盖之前的实验结果。
