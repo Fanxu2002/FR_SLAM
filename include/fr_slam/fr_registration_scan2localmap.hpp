@@ -1,7 +1,12 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #include <Eigen/Core>
@@ -43,12 +48,15 @@
 // Submaps are NOT PoseGraph vertices in V6. They are auxiliary geometry
 // containers for frontend registration and loop ICP verification.
 // ============================================================================
+
 class RegistrationScan2LocalMap
 {
 public:
     RegistrationScan2LocalMap(
         const LidarRegistrationConfig &registration_config,
         const LocalMapConfig &local_map_config);
+
+    ~RegistrationScan2LocalMap();
 
     bool AddFrame(
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
@@ -61,6 +69,23 @@ public:
 
     pcl::PointCloud<LIDAR_POINT>::ConstPtr
     GetLocalMap() const;
+
+    struct BackendMapSnapshot
+    {
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr raw_map;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr optimized_map;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr refined_map;
+
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_historical_target;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_before;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_after;
+
+        std::size_t global_revision = 0;
+        std::size_t refined_revision = 0;
+        std::size_t refinement_debug_revision = 0;
+    };
+
+    BackendMapSnapshot GetBackendMapSnapshot() const;
 
     // ------------------------------------------------------------------------
     // Backend global-map snapshots.
@@ -161,7 +186,12 @@ public:
     //     Node id == Keyframe id
     //     Node pose == T_WK
     // ------------------------------------------------------------------------
+    PoseGraph GetPoseGraphSnapshot() const;
+
+    // Backward-compatible API.  This returns a thread-local copy of the
+    // latest immutable backend snapshot.
     const PoseGraph &GetPoseGraph() const;
+
     std::size_t PoseGraphNodeCount() const;
     std::size_t PoseGraphEdgeCount() const;
     std::size_t PoseGraphOdometryEdgeCount() const;
@@ -170,6 +200,64 @@ public:
     void Reset();
 
 private:
+    // ========================================================================
+    // Asynchronous backend snapshots / jobs.
+    // ========================================================================
+    struct BackendSubmapSnapshot
+    {
+        std::size_t id =
+            std::numeric_limits<std::size_t>::max();
+
+        Eigen::Isometry3d T_WS =
+            Eigen::Isometry3d::Identity();
+
+        std::vector<std::size_t> keyframe_ids;
+
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr cloud_S;
+    };
+
+    struct BackendKeyframeJob
+    {
+        Keyframe keyframe;
+
+        std::size_t current_submap_id =
+            std::numeric_limits<std::size_t>::max();
+
+        bool has_finished_submap = false;
+        BackendSubmapSnapshot finished_submap;
+    };
+
+    void StartBackendWorker();
+    void StopBackendWorker();
+    void BackendLoop();
+
+    void ProcessBackendJob(
+        const BackendKeyframeJob &job);
+
+    bool EnqueueBackendKeyframe(
+        const Keyframe &keyframe,
+        std::size_t current_submap_id);
+
+    bool BuildFinishedSubmapSnapshot(
+        std::size_t submap_id,
+        BackendSubmapSnapshot &snapshot) const;
+
+    void StoreBackendFinishedSubmap(
+        const BackendSubmapSnapshot &snapshot);
+
+    void RefreshBackendOutputSnapshot();
+
+    const BackendSubmapSnapshot *
+    FindBackendSubmapById(
+        std::size_t submap_id) const;
+
+    const Keyframe *FindBackendKeyframeById(
+        std::size_t keyframe_id) const;
+
+    const BackendSubmapSnapshot *
+    FindBestFinishedSubmapForKeyframe(
+        std::size_t keyframe_id) const;
+
     // Every committed Keyframe immediately enters the backend graph.
     //
     //     KF_i -> Vertex i
@@ -181,18 +269,6 @@ private:
     // This is independent from Submap finishing.
     bool AddKeyframeToPoseGraph(
         const Keyframe &keyframe);
-
-    const Submap *FindSubmapById(
-        std::size_t submap_id) const;
-
-    const Keyframe *FindKeyframeById(
-        std::size_t keyframe_id) const;
-
-    // Candidate Keyframes can belong to two Submaps because of overlap. Choose
-    // a FINISHED Submap that contains the candidate and places it closest to
-    // the center of that Submap's keyframe window.
-    const Submap *FindBestFinishedSubmapForKeyframe(
-        std::size_t keyframe_id) const;
 
     // Called immediately after a new Keyframe is committed.
     //
@@ -274,10 +350,27 @@ private:
     };
 
 private:
+    // Frontend registration instance.
     LidarRegistration registration_;
+
+    // Separate backend registration instance for Post-PGO refinement.
+    LidarRegistration backend_refinement_registration_;
 
     // Frontend / geometry organization only.
     SubmapManager submap_manager_;
+
+    // Backend worker queue.  Every Keyframe is preserved; if the backend falls
+    // behind we warn instead of dropping graph states.
+    std::deque<BackendKeyframeJob> backend_queue_;
+    mutable std::mutex backend_queue_mutex_;
+    std::condition_variable backend_condition_;
+    std::thread backend_thread_;
+    std::atomic<bool> backend_running_{false};
+    std::size_t backend_backlog_warning_threshold_ = 6;
+
+    // Backend-owned immutable history copied from the frontend.
+    std::vector<Keyframe> backend_keyframes_;
+    std::vector<BackendSubmapSnapshot> backend_finished_submaps_;
 
     // Backend state: ONE KEYFRAME -> ONE PoseGraphNode.
     PoseGraph pose_graph_;
@@ -375,7 +468,7 @@ private:
     std::size_t online_loop_first_edge_min_support_ = 4;
 
     // Strict geometry gate for the FIRST anchor only.
-    double online_loop_first_edge_min_overlap_ = 0.95;
+    double online_loop_first_edge_min_overlap_ = 0.92;
     double online_loop_first_edge_max_rmse_ = 0.35;
     double online_loop_first_edge_max_icp_translation_ = 0.75;
     double online_loop_first_edge_max_icp_rotation_deg_ = 3.0;
@@ -472,10 +565,10 @@ private:
     // Active/Finished Submap lifecycle.
     // ------------------------------------------------------------------------
     IncrementalGlobalMap incremental_global_map_{
-        10,     // Keyframes per backend map block.
-        0.30f,  // Per-block VoxelGrid leaf size.
-        0.01,   // Dirty translation threshold: 1 cm.
-        0.05};  // Dirty rotation threshold: 0.05 deg.
+        10,    // Keyframes per backend map block.
+        0.30f, // Per-block VoxelGrid leaf size.
+        0.01,  // Dirty translation threshold: 1 cm.
+        0.05}; // Dirty rotation threshold: 0.05 deg.
 
     // Latest accepted local-refinement debug group.  These clouds deliberately
     // remain separate so RViz can reveal whether a visible discontinuity comes
@@ -530,8 +623,8 @@ private:
     // constraints in the temporary local PoseGraph.
     std::size_t refinement_geometry_min_correspondences_ = 500;
     double refinement_geometry_max_rmse_ = 0.25;
-    double refinement_geometry_max_translation_correction_ = 0.40;
-    double refinement_geometry_max_rotation_correction_deg_ = 3.0;
+    double refinement_geometry_max_translation_correction_ = 1.10;
+    double refinement_geometry_max_rotation_correction_deg_ = 7.5;
     std::size_t refinement_min_geometry_anchors_ = 3;
 
     // Temporary local PoseGraph weights.  Odometry is deliberately stronger
@@ -544,8 +637,14 @@ private:
     // Final local-window safety gate relative to the frozen G2O solution.
     // If any optimized Keyframe exceeds this small-correction envelope, the
     // whole window is rejected and keeps the pure G2O poses.
-    double refinement_window_max_translation_update_ = 0.30;
-    double refinement_window_max_rotation_update_deg_ = 2.0;
+    double refinement_window_max_translation_update_ = 1.20;
+    double refinement_window_max_rotation_update_deg_ = 8.0;
+
+    // Final local-window shape guard.  Absolute rigid motion is allowed by the
+    // broad window gate above, but neighboring Keyframe odometry must remain
+    // almost unchanged after refinement.
+    double refinement_window_max_relative_odom_translation_change_ = 0.10;
+    double refinement_window_max_relative_odom_rotation_change_deg_ = 1.0;
 
     // Latest backend correction that maps a raw frontend pose into the
     // corrected PoseGraph/map frame:
@@ -562,6 +661,33 @@ private:
     std::size_t map_odom_revision_ = 0;
     std::size_t map_odom_anchor_keyframe_id_ =
         std::numeric_limits<std::size_t>::max();
+
+    // Thread-safe published backend snapshots.  Heavy backend work never holds
+    // this mutex; the worker only swaps/copies outputs when one job completes.
+    mutable std::mutex backend_output_mutex_;
+
+    PoseGraph backend_pose_graph_snapshot_;
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr backend_raw_map_snapshot_;
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr backend_optimized_map_snapshot_;
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr backend_refined_map_snapshot_;
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_refinement_historical_target_snapshot_;
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_refinement_current_before_snapshot_;
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_refinement_current_after_snapshot_;
+
+    std::size_t backend_global_map_revision_snapshot_ = 0;
+    std::size_t backend_refined_map_revision_snapshot_ = 0;
+    std::size_t backend_refinement_debug_revision_snapshot_ = 0;
+
+    Eigen::Isometry3d backend_T_map_odom_snapshot_ =
+        Eigen::Isometry3d::Identity();
+
+    bool backend_has_map_odom_correction_snapshot_ = false;
+    std::size_t backend_map_odom_revision_snapshot_ = 0;
 
     Eigen::Isometry3d T_WL_ =
         Eigen::Isometry3d::Identity();

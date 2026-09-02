@@ -3,11 +3,11 @@
 #include <cmath>
 #include <utility>
 
-
 bool KeyframeManager::AddKeyframe(
     double timestamp,
     const Eigen::Isometry3d &T_WL,
-    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar)
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+    const Eigen::Matrix<double, 6, 6> *odom_information)
 {
     // ------------------------------------------------------------------------
     // 1. Validate input cloud.
@@ -32,6 +32,33 @@ bool KeyframeManager::AddKeyframe(
     keyframe.id = next_keyframe_id_;
     keyframe.timestamp = timestamp;
     keyframe.T_WL = T_WL;
+    if (odom_information != nullptr &&
+        odom_information->allFinite())
+    {
+        bool information_valid = true;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            if (!std::isfinite(
+                    (*odom_information)(i, i)) ||
+                (*odom_information)(i, i) <= 0.0)
+            {
+                information_valid = false;
+                break;
+            }
+        }
+
+        if (information_valid)
+        {
+            keyframe.odom_information =
+                *odom_information;
+
+            keyframe.has_odom_information =
+                true;
+        }
+    }
 
     // ------------------------------------------------------------------------
     // 4. Deep-copy current LiDAR cloud.
@@ -51,18 +78,15 @@ bool KeyframeManager::AddKeyframe(
     return true;
 }
 
-
 std::size_t KeyframeManager::Size() const
 {
     return keyframes_.size();
 }
 
-
 bool KeyframeManager::Empty() const
 {
     return keyframes_.empty();
 }
-
 
 const Keyframe *KeyframeManager::Latest() const
 {
@@ -74,7 +98,6 @@ const Keyframe *KeyframeManager::Latest() const
     return &keyframes_.back();
 }
 
-
 const Keyframe *KeyframeManager::GetKeyframe(std::size_t index) const
 {
     if (index >= keyframes_.size())
@@ -85,12 +108,10 @@ const Keyframe *KeyframeManager::GetKeyframe(std::size_t index) const
     return &keyframes_[index];
 }
 
-
 const std::vector<Keyframe> &KeyframeManager::GetAllKeyframes() const
 {
     return keyframes_;
 }
-
 
 void KeyframeManager::Clear()
 {

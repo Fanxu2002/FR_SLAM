@@ -26,6 +26,34 @@ struct PoseGraphOptimizerConfig
     bool use_huber_for_loop_edges = true;
     double loop_huber_delta = 1.0;
 
+    // Global SE(3) Information Matrix V1.
+    //
+    // The PoseGraph stores a base information matrix on every edge.  For the
+    // GLOBAL graph only, this V1 stage rescales the metric so that rotational
+    // residuals are not artificially cheap compared with translational
+    // residuals simply because g2o measures rotation in radians.
+    //
+    // With an Identity base matrix this produces:
+    //
+    //     diag(tx,ty,tz,rx,ry,rz) = [1,1,1,30,30,30]
+    //
+    // The same 1:30 translation/rotation ratio is deliberately used for
+    // odometry and loop edges in V1.  Therefore this experiment changes only
+    // translation-vs-rotation scaling; it does NOT yet change the relative
+    // trust between odometry and loop constraints.
+    //
+    // Local 16-Keyframe refinement graphs are intentionally excluded by the
+    // minimum-node guard, so the already validated Coherent Refinement path
+    // keeps its existing information matrices.
+    bool use_global_information_v1 = true;
+    std::size_t global_information_min_nodes = 100;
+
+    double global_odom_translation_weight = 1.0;
+    double global_odom_rotation_weight = 30.0;
+
+    double global_loop_translation_weight = 1.0;
+    double global_loop_rotation_weight = 30.0;
+
     // Gravity Guard V1.  A gravity-direction unary factor is added for every
     // node that has an immutable frontend gravity reference.  The residual is
     // yaw invariant, so x/y/z/yaw can still move while artificial roll/pitch

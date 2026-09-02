@@ -16,15 +16,20 @@
 
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <nav_msgs/msg/path.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+
+#include <tf2_ros/transform_broadcaster.h>
 
 #include <builtin_interfaces/msg/time.hpp>
 
 #include <pcl/point_cloud.h>
+#include <pcl/io/pcd_io.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <Eigen/Core>
@@ -35,9 +40,11 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstddef>
 #include <deque>
 #include <functional>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -75,8 +82,18 @@ private:
         // Future IMU has not reached the LiDAR scan end yet.
         WAIT_FOR_IMU,
 
-        // This LiDAR frame can no longer be processed correctly.
-        DROP_FRAME
+        // The persistent IMU state has already advanced beyond this scan.
+        DROP_STALE,
+
+        // Point time / interpolation / integration data is invalid.
+        DROP_INVALID
+    };
+
+    enum class LidarWorkerState : int
+    {
+        IDLE = 0,
+        WAIT_FOR_IMU = 1,
+        PROCESSING = 2
     };
 
     // ============================================================
@@ -169,6 +186,55 @@ private:
     rclcpp::Publisher<
         visualization_msgs::msg::MarkerArray>::SharedPtr
         pose_graph_marker_pub_;
+
+    // ============================================================
+    // On-demand PCD export service.
+    //
+    // Service:
+    //     /save_slam_maps   [std_srvs/srv/Trigger]
+    //
+    // Files:
+    //     raw_keyframe_map.pcd
+    //     optimized_map.pcd
+    //     refined_map.pcd
+    //
+    // The callback reads one coherent BackendMapSnapshot and saves the
+    // three immutable shared snapshots as binary PCD files.
+    // ============================================================
+    rclcpp::Service<
+        std_srvs::srv::Trigger>::SharedPtr
+        save_maps_service_;
+
+    std::string
+        pcd_save_directory_;
+
+    std::mutex
+        map_save_mutex_;
+
+    // ============================================================
+    // TF broadcaster
+    //
+    // Dynamic TF tree:
+    //
+    //     world(map) -> odom -> current LiDAR frame
+    //
+    // The realtime frontend remains continuous in odom:
+    //
+    //     T_odom_L = T_WL_
+    //
+    // Loop closure changes only the backend bridge:
+    //
+    //     T_world_odom = T_map_odom
+    //
+    // Therefore the corrected current pose seen by RViz is:
+    //
+    //     T_world_L = T_world_odom * T_odom_L
+    //
+    // without overwriting or jumping the live frontend state.
+    // ============================================================
+    std::unique_ptr<
+        tf2_ros::TransformBroadcaster>
+        tf_broadcaster_;
 
     // ============================================================
     // Sensor adapters
@@ -312,6 +378,51 @@ private:
         processed_lidar_frames_{
             0};
 
+    // ============================================================
+    // LiDAR/IMU synchronization diagnostics.
+    // ============================================================
+    std::atomic<int>
+        lidar_worker_state_{
+            static_cast<int>(LidarWorkerState::IDLE)};
+
+    std::atomic<double>
+        latest_imu_timestamp_{
+            -std::numeric_limits<double>::infinity()};
+
+    std::atomic<std::size_t>
+        dropped_stale_lidar_frames_{0};
+
+    std::atomic<std::size_t>
+        dropped_invalid_lidar_frames_{0};
+
+    std::atomic<std::size_t>
+        dropped_queue_while_imu_wait_{0};
+
+    std::atomic<std::size_t>
+        dropped_queue_while_processing_{0};
+
+    std::atomic<std::size_t>
+        dropped_queue_other_{0};
+
+    std::atomic<std::size_t>
+        imu_wait_events_{0};
+
+    std::atomic<std::size_t>
+        imu_wait_iterations_{0};
+
+    // Written only by ProcessingLoop(), read after joining the worker.
+    double
+        max_imu_wait_ms_ = 0.0;
+
+    double
+        max_imu_lag_ms_ = 0.0;
+
+    // IMU messages are small and high-rate.  Keep a deeper DDS history so a
+    // short executor / rosbag scheduling jitter does not overwrite the few
+    // samples needed to cover the oldest LiDAR scan.
+    std::size_t
+        imu_qos_depth_ = 1000;
+
     bool
         preprocessor_enable_sor_ =
             false;
@@ -333,9 +444,16 @@ private:
         scan_to_local_map_;
 
     // ============================================================
-    // Latest ACCEPTED global LiDAR pose.
+    // Latest ACCEPTED realtime-front-end LiDAR pose.
     //
-    //      p_W = T_WL_ * p_L
+    // Historically this variable is named T_WL_, but after introducing the
+    // map/odom split its semantic role is:
+    //
+    //      p_odom = T_WL_ * p_L
+    //
+    // The backend/global pose is obtained with:
+    //
+    //      T_world_L = T_world_odom * T_WL_
     // ============================================================
     Eigen::Isometry3d
         T_WL_ =
@@ -362,6 +480,13 @@ private:
     const std::string
         world_frame_ =
             "world";
+
+    // Continuous local frame owned by the realtime frontend.
+    // Loop closure must never jump this frame; the backend correction is
+    // represented by the dynamic world -> odom transform instead.
+    const std::string
+        odom_frame_ =
+            "odom";
 
 private:
     // ============================================================
@@ -392,6 +517,10 @@ private:
 
             return;
         }
+
+        latest_imu_timestamp_.store(
+            imu_data.timestamp,
+            std::memory_order_relaxed);
 
         // New IMU data may make the oldest LiDAR frame processable.
         data_condition_.notify_one();
@@ -598,16 +727,50 @@ private:
             dropped_lidar_frames_.fetch_add(
                 dropped_now);
 
+            const LidarWorkerState worker_state =
+                static_cast<LidarWorkerState>(
+                    lidar_worker_state_.load(
+                        std::memory_order_relaxed));
+
+            const char *overflow_reason =
+                "OTHER_BACKLOG";
+
+            if (worker_state ==
+                LidarWorkerState::WAIT_FOR_IMU)
+            {
+                dropped_queue_while_imu_wait_.fetch_add(
+                    dropped_now);
+                overflow_reason =
+                    "IMU_WAIT_BACKLOG";
+            }
+            else if (worker_state ==
+                     LidarWorkerState::PROCESSING)
+            {
+                dropped_queue_while_processing_.fetch_add(
+                    dropped_now);
+                overflow_reason =
+                    "PROCESSING_BACKLOG";
+            }
+            else
+            {
+                dropped_queue_other_.fetch_add(
+                    dropped_now);
+            }
+
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(),
                 *this->get_clock(),
                 1000,
-                "LiDAR worker overloaded | "
-                "dropped_waiting=%zu total_dropped=%zu queue=%zu max_queue=%zu",
+                "LiDAR queue overflow | "
+                "reason=%s dropped_waiting=%zu total_dropped=%zu "
+                "queue=%zu max_queue=%zu latest_imu=%.9f",
+                overflow_reason,
                 dropped_now,
                 dropped_lidar_frames_.load(),
                 queue_size,
-                max_lidar_queue_size_);
+                max_lidar_queue_size_,
+                latest_imu_timestamp_.load(
+                    std::memory_order_relaxed));
         }
 
         data_condition_.notify_one();
@@ -757,6 +920,7 @@ private:
         std::vector<IMU_POSE> &imu_poses,
         IMU_STATE &state_at_scan_start)
     {
+
         if (!imu_initialized_.load())
         {
             return ImuBuildStatus::WAIT_FOR_IMU;
@@ -768,7 +932,7 @@ private:
                 this->get_logger(),
                 "LiDAR frame has no point time.");
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         double min_point_time =
@@ -782,7 +946,7 @@ private:
                 min_point_time,
                 max_point_time))
         {
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         const double required_start_time =
@@ -813,7 +977,7 @@ private:
                 current_imu_state_.timestamp,
                 required_start_time);
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_STALE;
         }
 
         // ========================================================
@@ -827,6 +991,30 @@ private:
                 required_end_time,
                 raw_imu))
         {
+            const double latest_imu =
+                latest_imu_timestamp_.load(
+                    std::memory_order_relaxed);
+
+            // If IMU time has already passed the scan end but the buffer
+            // still cannot return [state_time, scan_end], the missing part is
+            // historical. Future IMU samples cannot repair that interval, so
+            // waiting forever would only fill the LiDAR queue.
+            if (std::isfinite(latest_imu) &&
+                latest_imu + time_epsilon >=
+                    required_end_time)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "IMU coverage gap | "
+                    "state=%.9f required_end=%.9f latest_imu=%.9f | "
+                    "future IMU cannot repair missing historical coverage",
+                    current_imu_state_.timestamp,
+                    required_end_time,
+                    latest_imu);
+
+                return ImuBuildStatus::DROP_INVALID;
+            }
+
             return ImuBuildStatus::WAIT_FOR_IMU;
         }
 
@@ -846,7 +1034,7 @@ private:
                 this->get_logger(),
                 "IMU Extract failed for LiDAR frame.");
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         // ========================================================
@@ -865,7 +1053,7 @@ private:
                 this->get_logger(),
                 "IMU Integrate failed for LiDAR frame.");
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         if (imu_poses.size() < 2)
@@ -874,7 +1062,7 @@ private:
                 this->get_logger(),
                 "IMU trajectory has too few poses.");
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         // ========================================================
@@ -891,7 +1079,7 @@ private:
                 "Failed to interpolate IMU state "
                 "at LiDAR scan start.");
 
-            return ImuBuildStatus::DROP_FRAME;
+            return ImuBuildStatus::DROP_INVALID;
         }
 
         // ========================================================
@@ -917,6 +1105,7 @@ private:
 
         return ImuBuildStatus::SUCCESS;
     }
+
 
     // ============================================================
     // Build relative LiDAR rotation prediction from IMU orientation.
@@ -993,27 +1182,165 @@ private:
 
     // ============================================================
     // Publish current accepted LiDAR pose.
+    //
+    // IMPORTANT FRAME CONVENTION:
+    //
+    //     T_WL_ is the continuous FRONTEND pose and is therefore treated as
+    //     T_odom_L after loop closure is enabled.
+    //
+    //     T_world_odom comes from the asynchronous backend correction.
+    //
+    // TF tree:
+    //
+    //     world -> odom -> lidar
+    //
+    // This keeps Scan-to-LocalMap continuous while allowing RViz to display
+    // the live scan in the optimized global-map frame.
     // ============================================================
     void PublishPose(
         const builtin_interfaces::msg::Time &stamp,
         const std::string &lidar_frame)
     {
-        const Eigen::Vector3d P_WL =
-            T_WL_.translation();
+        const Eigen::Isometry3d T_odom_L =
+            T_WL_;
 
-        Eigen::Quaterniond Q_WL(
-            T_WL_.rotation());
+        const Eigen::Vector3d P_odom_L =
+            T_odom_L.translation();
 
-        Q_WL.normalize();
+        Eigen::Quaterniond Q_odom_L(
+            T_odom_L.rotation());
+
+        if (!Q_odom_L.coeffs().allFinite() ||
+            Q_odom_L.norm() <= 1.0e-12)
+        {
+            Q_odom_L =
+                Eigen::Quaterniond::Identity();
+        }
+        else
+        {
+            Q_odom_L.normalize();
+        }
+
+        Eigen::Isometry3d T_world_odom =
+            Eigen::Isometry3d::Identity();
+
+        if (scan_to_local_map_)
+        {
+            const Eigen::Isometry3d correction =
+                scan_to_local_map_->GetMapOdomCorrection();
+
+            if (correction.matrix().allFinite())
+            {
+                T_world_odom =
+                    correction;
+            }
+        }
+
+        Eigen::Quaterniond Q_world_odom(
+            T_world_odom.rotation());
+
+        if (!Q_world_odom.coeffs().allFinite() ||
+            Q_world_odom.norm() <= 1.0e-12)
+        {
+            Q_world_odom =
+                Eigen::Quaterniond::Identity();
+            T_world_odom.linear() =
+                Eigen::Matrix3d::Identity();
+        }
+        else
+        {
+            Q_world_odom.normalize();
+        }
 
         // ========================================================
-        // Odometry
+        // Dynamic TF #1: world -> odom
+        // ========================================================
+        if (tf_broadcaster_)
+        {
+            geometry_msgs::msg::TransformStamped
+                map_to_odom_msg;
+
+            map_to_odom_msg.header.stamp =
+                stamp;
+
+            map_to_odom_msg.header.frame_id =
+                world_frame_;
+
+            map_to_odom_msg.child_frame_id =
+                odom_frame_;
+
+            map_to_odom_msg.transform.translation.x =
+                T_world_odom.translation().x();
+
+            map_to_odom_msg.transform.translation.y =
+                T_world_odom.translation().y();
+
+            map_to_odom_msg.transform.translation.z =
+                T_world_odom.translation().z();
+
+            map_to_odom_msg.transform.rotation.x =
+                Q_world_odom.x();
+
+            map_to_odom_msg.transform.rotation.y =
+                Q_world_odom.y();
+
+            map_to_odom_msg.transform.rotation.z =
+                Q_world_odom.z();
+
+            map_to_odom_msg.transform.rotation.w =
+                Q_world_odom.w();
+
+            tf_broadcaster_->sendTransform(
+                map_to_odom_msg);
+
+            // ====================================================
+            // Dynamic TF #2: odom -> current LiDAR frame
+            // ====================================================
+            geometry_msgs::msg::TransformStamped
+                odom_to_lidar_msg;
+
+            odom_to_lidar_msg.header.stamp =
+                stamp;
+
+            odom_to_lidar_msg.header.frame_id =
+                odom_frame_;
+
+            odom_to_lidar_msg.child_frame_id =
+                lidar_frame;
+
+            odom_to_lidar_msg.transform.translation.x =
+                P_odom_L.x();
+
+            odom_to_lidar_msg.transform.translation.y =
+                P_odom_L.y();
+
+            odom_to_lidar_msg.transform.translation.z =
+                P_odom_L.z();
+
+            odom_to_lidar_msg.transform.rotation.x =
+                Q_odom_L.x();
+
+            odom_to_lidar_msg.transform.rotation.y =
+                Q_odom_L.y();
+
+            odom_to_lidar_msg.transform.rotation.z =
+                Q_odom_L.z();
+
+            odom_to_lidar_msg.transform.rotation.w =
+                Q_odom_L.w();
+
+            tf_broadcaster_->sendTransform(
+                odom_to_lidar_msg);
+        }
+
+        // ========================================================
+        // Raw frontend odometry: pose is expressed in odom.
         // ========================================================
         nav_msgs::msg::Odometry
             odom_msg;
 
         odom_msg.header.frame_id =
-            world_frame_;
+            odom_frame_;
 
         odom_msg.child_frame_id =
             lidar_frame;
@@ -1022,67 +1349,70 @@ private:
             stamp;
 
         odom_msg.pose.pose.position.x =
-            P_WL.x();
+            P_odom_L.x();
 
         odom_msg.pose.pose.position.y =
-            P_WL.y();
+            P_odom_L.y();
 
         odom_msg.pose.pose.position.z =
-            P_WL.z();
+            P_odom_L.z();
 
         odom_msg.pose.pose.orientation.w =
-            Q_WL.w();
+            Q_odom_L.w();
 
         odom_msg.pose.pose.orientation.x =
-            Q_WL.x();
+            Q_odom_L.x();
 
         odom_msg.pose.pose.orientation.y =
-            Q_WL.y();
+            Q_odom_L.y();
 
         odom_msg.pose.pose.orientation.z =
-            Q_WL.z();
+            Q_odom_L.z();
 
         odom_pub_->publish(
             odom_msg);
 
         // ========================================================
-        // Path
+        // Raw frontend path: also expressed in odom.
+        //
+        // /optimized_path remains the authoritative historical path after
+        // non-rigid PoseGraph correction.
         // ========================================================
         geometry_msgs::msg::PoseStamped
             pose_msg;
 
         pose_msg.header.frame_id =
-            world_frame_;
+            odom_frame_;
 
         pose_msg.header.stamp =
             stamp;
 
         pose_msg.pose.position.x =
-            P_WL.x();
+            P_odom_L.x();
 
         pose_msg.pose.position.y =
-            P_WL.y();
+            P_odom_L.y();
 
         pose_msg.pose.position.z =
-            P_WL.z();
+            P_odom_L.z();
 
         pose_msg.pose.orientation.w =
-            Q_WL.w();
+            Q_odom_L.w();
 
         pose_msg.pose.orientation.x =
-            Q_WL.x();
+            Q_odom_L.x();
 
         pose_msg.pose.orientation.y =
-            Q_WL.y();
+            Q_odom_L.y();
 
         pose_msg.pose.orientation.z =
-            Q_WL.z();
+            Q_odom_L.z();
 
         path_msg_.header.stamp =
             stamp;
 
         path_msg_.header.frame_id =
-            world_frame_;
+            odom_frame_;
 
         path_msg_.poses.push_back(
             pose_msg);
@@ -1136,10 +1466,9 @@ private:
 
         nav_msgs::msg::Odometry corrected_odom_msg;
 
-        // Keep the existing world frame label in this bridge-only V2 so the
-        // new topic can be overlaid immediately with current RViz settings.
-        // The numeric pose is in the corrected backend/map coordinates.
-        // A later TF integration step can split this formally into map/odom.
+        // Corrected pose is explicitly expressed in the backend/global world
+        // frame. The same relation is now also represented formally in TF as
+        // world -> odom -> lidar.
         corrected_odom_msg.header.frame_id =
             world_frame_;
 
@@ -1441,8 +1770,8 @@ private:
             return;
         }
 
-        const PoseGraph &graph =
-            scan_to_local_map_->GetPoseGraph();
+        const PoseGraph graph =
+            scan_to_local_map_->GetPoseGraphSnapshot();
 
         const std::vector<PoseGraphNode> &nodes =
             graph.GetNodes();
@@ -1534,8 +1863,8 @@ private:
             return;
         }
 
-        const PoseGraph &graph =
-            scan_to_local_map_->GetPoseGraph();
+        const PoseGraph graph =
+            scan_to_local_map_->GetPoseGraphSnapshot();
 
         visualization_msgs::msg::MarkerArray
             marker_array;
@@ -2069,8 +2398,11 @@ private:
         map_msg.header.stamp =
             stamp;
 
+        // LocalMap is assembled from raw frontend Keyframe poses and therefore
+        // lives in the continuous odom frame. RViz will move it into world via
+        // the dynamic world -> odom correction.
         map_msg.header.frame_id =
-            world_frame_;
+            odom_frame_;
 
         local_map_pub_->publish(
             map_msg);
@@ -2094,8 +2426,12 @@ private:
             return;
         }
 
+        const RegistrationScan2LocalMap::BackendMapSnapshot
+            backend_snapshot =
+                scan_to_local_map_->GetBackendMapSnapshot();
+
         const std::size_t revision =
-            scan_to_local_map_->GlobalMapRevision();
+            backend_snapshot.global_revision;
 
         if (revision == 0 ||
             revision == last_published_global_map_revision_)
@@ -2104,28 +2440,28 @@ private:
         }
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr raw_map =
-            scan_to_local_map_->GetRawKeyframeMap();
+            backend_snapshot.raw_map;
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr optimized_map =
-            scan_to_local_map_->GetOptimizedMap();
+            backend_snapshot.optimized_map;
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr refined_map =
-            scan_to_local_map_->GetRefinedMap();
+            backend_snapshot.refined_map;
 
         const std::size_t refined_revision =
-            scan_to_local_map_->RefinedMapRevision();
+            backend_snapshot.refined_revision;
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_historical_target =
-            scan_to_local_map_->GetRefinementHistoricalTarget();
+            backend_snapshot.refinement_historical_target;
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_before =
-            scan_to_local_map_->GetRefinementCurrentBefore();
+            backend_snapshot.refinement_current_before;
 
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr refinement_current_after =
-            scan_to_local_map_->GetRefinementCurrentAfter();
+            backend_snapshot.refinement_current_after;
 
         const std::size_t refinement_debug_revision =
-            scan_to_local_map_->RefinementDebugRevision();
+            backend_snapshot.refinement_debug_revision;
 
         if (!raw_map ||
             !optimized_map ||
@@ -2624,15 +2960,26 @@ private:
     // ============================================================
     void ProcessingLoop()
     {
+        bool waiting_for_imu = false;
+        double waiting_scan_start =
+            std::numeric_limits<double>::quiet_NaN();
+
+        std::chrono::steady_clock::time_point
+            imu_wait_start =
+                std::chrono::steady_clock::now();
+
         while (running_.load())
         {
-            PendingLidarFrame
-                pending;
+            PendingLidarFrame pending;
 
             // ====================================================
             // 1. Wait for LiDAR.
             // ====================================================
             {
+                lidar_worker_state_.store(
+                    static_cast<int>(LidarWorkerState::IDLE),
+                    std::memory_order_relaxed);
+
                 std::unique_lock<std::mutex> lock(
                     lidar_queue_mutex_);
 
@@ -2649,8 +2996,6 @@ private:
                     break;
                 }
 
-                // Keep queue.front() in the deque until processing ends.
-                // LidarCallback() knows this invariant and never erases front().
                 pending =
                     lidar_queue_.front();
             }
@@ -2658,11 +3003,8 @@ private:
             // ====================================================
             // 2. Build IMU trajectory.
             // ====================================================
-            std::vector<IMU_POSE>
-                imu_poses;
-
-            IMU_STATE
-            state_at_scan_start;
+            std::vector<IMU_POSE> imu_poses;
+            IMU_STATE state_at_scan_start;
 
             const ImuBuildStatus status =
                 BuildImuPoses(
@@ -2673,19 +3015,146 @@ private:
             if (status ==
                 ImuBuildStatus::WAIT_FOR_IMU)
             {
+                double min_point_time = 0.0;
+                double max_point_time = 0.0;
+
+                const bool has_time_range =
+                    FindPointTimeRange(
+                        pending.frame,
+                        min_point_time,
+                        max_point_time);
+
+                const double required_end_time =
+                    has_time_range
+                        ? std::max(
+                              pending.frame.scan_start_time,
+                              max_point_time)
+                        : pending.frame.scan_start_time;
+
+                const double latest_imu =
+                    latest_imu_timestamp_.load(
+                        std::memory_order_relaxed);
+
+                const std::chrono::steady_clock::time_point now =
+                    std::chrono::steady_clock::now();
+
+                if (!waiting_for_imu ||
+                    !std::isfinite(waiting_scan_start) ||
+                    std::abs(
+                        waiting_scan_start -
+                        pending.frame.scan_start_time) > 1.0e-9)
+                {
+                    waiting_for_imu = true;
+                    waiting_scan_start =
+                        pending.frame.scan_start_time;
+                    imu_wait_start = now;
+                    imu_wait_events_.fetch_add(1);
+                }
+
+                imu_wait_iterations_.fetch_add(1);
+
+                const double wait_ms =
+                    std::chrono::duration<double, std::milli>(
+                        now - imu_wait_start)
+                        .count();
+
+                double imu_lag_ms =
+                    std::numeric_limits<double>::infinity();
+
+                if (std::isfinite(latest_imu) &&
+                    std::isfinite(required_end_time))
+                {
+                    imu_lag_ms =
+                        std::max(
+                            0.0,
+                            (required_end_time - latest_imu) * 1000.0);
+                }
+
+                max_imu_wait_ms_ =
+                    std::max(
+                        max_imu_wait_ms_,
+                        wait_ms);
+
+                if (std::isfinite(imu_lag_ms))
+                {
+                    max_imu_lag_ms_ =
+                        std::max(
+                            max_imu_lag_ms_,
+                            imu_lag_ms);
+                }
+
+                lidar_worker_state_.store(
+                    static_cast<int>(LidarWorkerState::WAIT_FOR_IMU),
+                    std::memory_order_relaxed);
+
                 std::unique_lock<std::mutex> lock(
                     lidar_queue_mutex_);
 
+                const std::size_t queue_size =
+                    lidar_queue_.size();
+
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    250,
+                    "FR_SYNC IMU_WAIT | "
+                    "scan_start=%.9f required_end=%.9f latest_imu=%.9f "
+                    "imu_lag_ms=%.3f wait_ms=%.3f queue=%zu",
+                    pending.frame.scan_start_time,
+                    required_end_time,
+                    latest_imu,
+                    imu_lag_ms,
+                    wait_ms,
+                    queue_size);
+
+                // Event-driven wait.  The short timeout is only for
+                // diagnostics / shutdown; it is no longer a 5 ms busy poll.
                 data_condition_.wait_for(
                     lock,
-                    std::chrono::milliseconds(
-                        5));
+                    std::chrono::milliseconds(20),
+                    [this, required_end_time]()
+                    {
+                        if (!running_.load())
+                        {
+                            return true;
+                        }
+
+                        const double latest =
+                            latest_imu_timestamp_.load(
+                                std::memory_order_relaxed);
+
+                        return std::isfinite(latest) &&
+                               latest + 1.0e-6 >=
+                                   required_end_time;
+                    });
 
                 continue;
             }
 
-            if (status ==
-                ImuBuildStatus::DROP_FRAME)
+            if (waiting_for_imu)
+            {
+                const double wait_ms =
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() -
+                        imu_wait_start)
+                        .count();
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "FR_SYNC IMU_WAIT_RESOLVED | "
+                    "scan_start=%.9f wait_ms=%.3f latest_imu=%.9f",
+                    pending.frame.scan_start_time,
+                    wait_ms,
+                    latest_imu_timestamp_.load(
+                        std::memory_order_relaxed));
+
+                waiting_for_imu = false;
+                waiting_scan_start =
+                    std::numeric_limits<double>::quiet_NaN();
+            }
+
+            if (status == ImuBuildStatus::DROP_STALE ||
+                status == ImuBuildStatus::DROP_INVALID)
             {
                 {
                     std::lock_guard<std::mutex> lock(
@@ -2697,8 +3166,28 @@ private:
                     }
                 }
 
-                dropped_lidar_frames_.fetch_add(
-                    1);
+                dropped_lidar_frames_.fetch_add(1);
+
+                const char *drop_reason =
+                    "INVALID_IMU_BUILD";
+
+                if (status == ImuBuildStatus::DROP_STALE)
+                {
+                    dropped_stale_lidar_frames_.fetch_add(1);
+                    drop_reason = "STALE_SCAN";
+                }
+                else
+                {
+                    dropped_invalid_lidar_frames_.fetch_add(1);
+                }
+
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "FR_SYNC LIDAR_DROP | reason=%s "
+                    "scan_start=%.9f total_dropped=%zu",
+                    drop_reason,
+                    pending.frame.scan_start_time,
+                    dropped_lidar_frames_.load());
 
                 continue;
             }
@@ -2706,19 +3195,21 @@ private:
             // ====================================================
             // 3. Process exact oldest frame.
             // ====================================================
+            lidar_worker_state_.store(
+                static_cast<int>(LidarWorkerState::PROCESSING),
+                std::memory_order_relaxed);
+
             ProcessLidarFrame(
                 pending,
                 imu_poses,
                 state_at_scan_start);
 
-            processed_lidar_frames_.fetch_add(
-                1);
+            processed_lidar_frames_.fetch_add(1);
 
             // ====================================================
             // 4. Processing finished: now pop the protected front.
             // ====================================================
-            std::size_t queue_size =
-                0;
+            std::size_t queue_size = 0;
 
             {
                 std::lock_guard<std::mutex> lock(
@@ -2733,6 +3224,10 @@ private:
                     lidar_queue_.size();
             }
 
+            lidar_worker_state_.store(
+                static_cast<int>(LidarWorkerState::IDLE),
+                std::memory_order_relaxed);
+
             RCLCPP_INFO(
                 this->get_logger(),
                 "LiDAR frame finished | "
@@ -2740,6 +3235,142 @@ private:
                 queue_size,
                 processed_lidar_frames_.load(),
                 dropped_lidar_frames_.load());
+        }
+
+        lidar_worker_state_.store(
+            static_cast<int>(LidarWorkerState::IDLE),
+            std::memory_order_relaxed);
+    }
+
+    // ============================================================
+    // SaveRawOptimizedRefinedMaps()
+    //
+    // This service is intentionally on-demand.  PCD disk I/O can take
+    // noticeably longer than one 10 Hz LiDAR period, so it must NOT be part
+    // of the realtime LiDAR processing path.  The LiDAR worker and backend
+    // remain unchanged; normally call the service after the bag has reached
+    // the desired final map state.
+    // ============================================================
+    void SaveRawOptimizedRefinedMaps(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+    {
+        (void)request;
+
+        std::lock_guard<std::mutex> save_lock(
+            map_save_mutex_);
+
+        if (!scan_to_local_map_)
+        {
+            response->success = false;
+            response->message =
+                "Scan-to-LocalMap backend is not available.";
+            return;
+        }
+
+        const RegistrationScan2LocalMap::BackendMapSnapshot snapshot =
+            scan_to_local_map_->GetBackendMapSnapshot();
+
+        if (!snapshot.raw_map ||
+            !snapshot.optimized_map ||
+            !snapshot.refined_map)
+        {
+            response->success = false;
+            response->message =
+                "One or more backend map snapshots are null.";
+            return;
+        }
+
+        if (snapshot.raw_map->empty() ||
+            snapshot.optimized_map->empty() ||
+            snapshot.refined_map->empty())
+        {
+            response->success = false;
+            response->message =
+                "One or more backend map snapshots are empty.";
+            return;
+        }
+
+        try
+        {
+            const std::filesystem::path save_directory(
+                pcd_save_directory_);
+
+            std::filesystem::create_directories(
+                save_directory);
+
+            const std::filesystem::path raw_path =
+                save_directory / "raw_keyframe_map.pcd";
+
+            const std::filesystem::path optimized_path =
+                save_directory / "optimized_map.pcd";
+
+            const std::filesystem::path refined_path =
+                save_directory / "refined_map.pcd";
+
+            // Binary PCD is intentionally used instead of ASCII: it is much
+            // faster to write and substantially smaller for a global map.
+            const int raw_result =
+                pcl::io::savePCDFileBinary(
+                    raw_path.string(),
+                    *snapshot.raw_map);
+
+            const int optimized_result =
+                pcl::io::savePCDFileBinary(
+                    optimized_path.string(),
+                    *snapshot.optimized_map);
+
+            const int refined_result =
+                pcl::io::savePCDFileBinary(
+                    refined_path.string(),
+                    *snapshot.refined_map);
+
+            if (raw_result != 0 ||
+                optimized_result != 0 ||
+                refined_result != 0)
+            {
+                response->success = false;
+                response->message =
+                    "PCL failed to write one or more PCD files.";
+
+                RCLCPP_ERROR(
+                    this->get_logger(),
+                    "PCD export failed | raw=%d optimized=%d refined=%d | directory=%s",
+                    raw_result,
+                    optimized_result,
+                    refined_result,
+                    pcd_save_directory_.c_str());
+                return;
+            }
+
+            response->success = true;
+            response->message =
+                "Saved raw_keyframe_map.pcd, optimized_map.pcd and refined_map.pcd to " +
+                save_directory.string();
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "PCD export SUCCESS | directory=%s | "
+                "global_revision=%zu refined_revision=%zu | "
+                "raw_points=%zu optimized_points=%zu refined_points=%zu",
+                save_directory.string().c_str(),
+                snapshot.global_revision,
+                snapshot.refined_revision,
+                snapshot.raw_map->size(),
+                snapshot.optimized_map->size(),
+                snapshot.refined_map->size());
+        }
+        catch (const std::exception &exception)
+        {
+            response->success = false;
+            response->message =
+                std::string("PCD export exception: ") +
+                exception.what();
+
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "PCD export exception: %s",
+                exception.what());
         }
     }
 
@@ -2775,6 +3406,38 @@ public:
                 registration_config,
                 local_map_config);
 
+
+        // ========================================================
+        // 2.1 PCD export configuration.
+        //
+        // ROS parameters do not expand '~', so build an absolute default
+        // directory from HOME.  It can still be overridden from launch:
+        //
+        //     pcd_save_directory:=/some/other/path
+        // ========================================================
+        const char *home_directory =
+            std::getenv("HOME");
+
+        const std::string default_pcd_save_directory =
+            home_directory != nullptr
+                ? std::string(home_directory) + "/ros2_ws/maps"
+                : std::string("/tmp/fr_slam_maps");
+
+        pcd_save_directory_ =
+            this->declare_parameter<std::string>(
+                "pcd_save_directory",
+                default_pcd_save_directory);
+
+        save_maps_service_ =
+            this->create_service<std_srvs::srv::Trigger>(
+                "/save_slam_maps",
+                std::bind(
+                    &lidar_registration_scan2localmap::
+                        SaveRawOptimizedRefinedMaps,
+                    this,
+                    std::placeholders::_1,
+                    std::placeholders::_2));
+
         // ========================================================
         // 3. Real-time pipeline parameters.
         // ========================================================
@@ -2788,6 +3451,17 @@ public:
                 std::max(
                     2,
                     configured_max_queue_size));
+
+        const int configured_imu_qos_depth =
+            this->declare_parameter<int>(
+                "imu_qos_depth",
+                1000);
+
+        imu_qos_depth_ =
+            static_cast<std::size_t>(
+                std::max(
+                    50,
+                    configured_imu_qos_depth));
 
         preprocessor_enable_sor_ =
             this->declare_parameter<bool>(
@@ -2838,11 +3512,18 @@ public:
         imu_options.callback_group =
             imu_callback_group_;
 
+        rclcpp::QoS imu_qos{
+            rclcpp::KeepLast(
+                imu_qos_depth_)};
+
+        imu_qos.best_effort();
+        imu_qos.durability_volatile();
+
         imu_sub_ =
             this->create_subscription<
                 sensor_msgs::msg::Imu>(
                 "/livox/imu",
-                rclcpp::SensorDataQoS(),
+                imu_qos,
                 std::bind(
                     &lidar_registration_scan2localmap::
                         ImuCallback,
@@ -2872,7 +3553,15 @@ public:
                 lidar_options);
 
         // ========================================================
-        // 7. Publishers
+        // 7. TF broadcaster
+        // ========================================================
+        tf_broadcaster_ =
+            std::make_unique<
+                tf2_ros::TransformBroadcaster>(
+                this);
+
+        // ========================================================
+        // 8. Publishers
         // ========================================================
         path_pub_ =
             this->create_publisher<
@@ -2959,10 +3648,10 @@ public:
                 10);
 
         path_msg_.header.frame_id =
-            world_frame_;
+            odom_frame_;
 
         // ========================================================
-        // 8. Start worker
+        // 9. Start worker
         // ========================================================
         processing_thread_ =
             std::thread(
@@ -2971,7 +3660,7 @@ public:
                 this);
 
         // ========================================================
-        // 9. Startup information
+        // 10. Startup information
         // ========================================================
         RCLCPP_INFO(
             this->get_logger(),
@@ -3055,6 +3744,18 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
+            "TF       : %s -> %s -> LiDAR",
+            world_frame_.c_str(),
+            odom_frame_.c_str());
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Frames   : frontend=[%s] backend=[%s]",
+            odom_frame_.c_str(),
+            world_frame_.c_str());
+
+        RCLCPP_INFO(
+            this->get_logger(),
             "RawMap   : /raw_keyframe_map");
 
         RCLCPP_INFO(
@@ -3064,6 +3765,12 @@ public:
         RCLCPP_INFO(
             this->get_logger(),
             "Refined  : /refined_map");
+
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "SavePCD  : ros2 service call /save_slam_maps std_srvs/srv/Trigger {} -> %s",
+            pcd_save_directory_.c_str());
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -3089,6 +3796,11 @@ public:
             this->get_logger(),
             "Realtime queue max: %zu",
             max_lidar_queue_size_);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "IMU QoS depth: %zu (best_effort)",
+            imu_qos_depth_);
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -3119,6 +3831,27 @@ public:
         {
             processing_thread_.join();
         }
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "FR_SYNC SUMMARY | "
+            "processed=%zu dropped_total=%zu "
+            "drop_stale=%zu drop_invalid=%zu "
+            "drop_queue_imu_wait=%zu drop_queue_processing=%zu "
+            "drop_queue_other=%zu imu_wait_events=%zu "
+            "imu_wait_iterations=%zu max_imu_wait_ms=%.3f "
+            "max_imu_lag_ms=%.3f",
+            processed_lidar_frames_.load(),
+            dropped_lidar_frames_.load(),
+            dropped_stale_lidar_frames_.load(),
+            dropped_invalid_lidar_frames_.load(),
+            dropped_queue_while_imu_wait_.load(),
+            dropped_queue_while_processing_.load(),
+            dropped_queue_other_.load(),
+            imu_wait_events_.load(),
+            imu_wait_iterations_.load(),
+            max_imu_wait_ms_,
+            max_imu_lag_ms_);
     }
 };
 

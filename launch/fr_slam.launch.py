@@ -8,12 +8,29 @@ import os
 
 
 def generate_launch_description():
+    # ============================================================
+    # FR-SLAM package share directory
+    #
+    # After colcon build:
+    #
+    #   ~/ros2_ws/install/fr_slam/share/fr_slam
+    #
+    # ============================================================
     package_share_directory = get_package_share_directory(
         'fr_slam'
     )
 
     # ============================================================
     # RViz config
+    #
+    # Source:
+    #
+    #   ~/ros2_ws/src/fr_slam/config/FR_SLAM.rviz
+    #
+    # Installed:
+    #
+    #   ~/ros2_ws/install/fr_slam/share/fr_slam/config/FR_SLAM.rviz
+    #
     # ============================================================
     rviz_config_path = os.path.join(
         package_share_directory,
@@ -33,6 +50,24 @@ def generate_launch_description():
         exist_ok=True
     )
 
+
+    # ============================================================
+    # PCD map output directory
+    #
+    #   ~/ros2_ws/src/fr_slam/Map
+    #
+    # This path is passed to the C++ node through the ROS parameter
+    # "pcd_save_directory".
+    # ============================================================
+    map_directory = os.path.expanduser(
+        '~/ros2_ws/src/fr_slam/Map'
+    )
+
+    os.makedirs(
+        map_directory,
+        exist_ok=True
+    )
+
     # ============================================================
     # FR-SLAM node
     # ============================================================
@@ -47,14 +82,16 @@ def generate_launch_description():
             {
                 'preprocessor_enable_sor': True,
                 'preprocessor_enable_ror': True,
-                'max_lidar_queue_size': 3
+                'max_lidar_queue_size': 3,
+                'pcd_save_directory': map_directory
             }
         ],
 
         emulate_tty=True,
 
         additional_env={
-            'ROS_LOG_DIR': log_directory
+            'ROS_LOG_DIR': log_directory,
+            'FR_SLAM_MAP_DIR': map_directory
         }
     )
 
@@ -64,7 +101,8 @@ def generate_launch_description():
     rviz_node = Node(
         package='rviz2',
         executable='rviz2',
-        name='rviz2',
+        name='fr_slam_rviz',
+
         output='screen',
 
         arguments=[

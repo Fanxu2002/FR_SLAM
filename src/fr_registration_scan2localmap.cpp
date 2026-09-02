@@ -1,17 +1,37 @@
 #include "fr_slam/fr_registration_scan2localmap.hpp"
+#include "fr_slam/fr_ground_segmenter.hpp"
+#include "fr_slam/fr_ground_icp_input_bridge.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
 #include <cstdint>
+#include <cstddef>
+#include <exception>
 #include <utility>
+#include <vector>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/registration/icp.h>
+#include <pcl/search/kdtree.h>
+#include <pcl/kdtree/kdtree_flann.h>
+
+#include <Eigen/Eigenvalues>
+
+#include <sophus/so3.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -20,6 +40,1415 @@ namespace
 
     const rclcpp::Logger kRecoveryLogger =
         rclcpp::get_logger("scan2local_map.recovery");
+
+    const rclcpp::Logger kTimingLogger =
+        rclcpp::get_logger("scan2local_map.timing");
+
+    std::filesystem::path FrontendDiagnosticDirectory()
+    {
+        const char *configured_directory =
+            std::getenv("FR_SLAM_MAP_DIR");
+
+        if (configured_directory != nullptr &&
+            configured_directory[0] != '\0')
+        {
+            return std::filesystem::path(
+                configured_directory);
+        }
+
+        const char *home_directory =
+            std::getenv("HOME");
+
+        if (home_directory != nullptr &&
+            home_directory[0] != '\0')
+        {
+            return std::filesystem::path(
+                       home_directory) /
+                   "ros2_ws" /
+                   "src" /
+                   "fr_slam" /
+                   "Map";
+        }
+
+        return std::filesystem::path(
+            "/tmp/fr_slam_maps");
+    }
+
+    Eigen::Vector3d FrontendRotationToRpy(
+        const Eigen::Matrix3d &R)
+    {
+        const double sy =
+            std::sqrt(
+                R(0, 0) * R(0, 0) +
+                R(1, 0) * R(1, 0));
+
+        const bool singular =
+            sy < 1.0e-8;
+
+        double roll = 0.0;
+        double pitch = 0.0;
+        double yaw = 0.0;
+
+        if (!singular)
+        {
+            roll =
+                std::atan2(
+                    R(2, 1),
+                    R(2, 2));
+
+            pitch =
+                std::atan2(
+                    -R(2, 0),
+                    sy);
+
+            yaw =
+                std::atan2(
+                    R(1, 0),
+                    R(0, 0));
+        }
+        else
+        {
+            roll =
+                std::atan2(
+                    -R(1, 2),
+                    R(1, 1));
+
+            pitch =
+                std::atan2(
+                    -R(2, 0),
+                    sy);
+
+            yaw = 0.0;
+        }
+
+        return Eigen::Vector3d(
+            roll,
+            pitch,
+            yaw);
+    }
+
+    bool WriteFrontendZDriftDiagnostic(
+        bool reset_file,
+        std::size_t keyframe_id,
+        long long previous_keyframe_id,
+        double timestamp,
+        const Eigen::Isometry3d &T_WL_current,
+        const Eigen::Isometry3d *T_WL_previous,
+        const LidarRegistrationResult &registration_result)
+    {
+        if (!T_WL_current.matrix().allFinite())
+        {
+            return false;
+        }
+
+        constexpr double kRadToDeg =
+            180.0 /
+            3.14159265358979323846;
+
+        try
+        {
+            const std::filesystem::path directory =
+                FrontendDiagnosticDirectory();
+
+            std::filesystem::create_directories(
+                directory);
+
+            const std::filesystem::path csv_path =
+                directory /
+                "frontend_z_drift.csv";
+
+            std::ios_base::openmode mode =
+                std::ios::out;
+
+            if (reset_file)
+            {
+                mode |=
+                    std::ios::trunc;
+            }
+            else
+            {
+                mode |=
+                    std::ios::app;
+            }
+
+            std::ofstream file(
+                csv_path,
+                mode);
+
+            if (!file.is_open())
+            {
+                return false;
+            }
+
+            file
+                << std::fixed
+                << std::setprecision(9);
+
+            if (reset_file)
+            {
+                file
+                    << "kf_id,prev_kf,timestamp,"
+                    << "world_x,world_y,world_z,"
+                    << "world_roll_deg,world_pitch_deg,world_yaw_deg,"
+                    << "world_dx,world_dy,world_dz,"
+                    << "horizontal_step_m,"
+                    << "local_dx,local_dy,local_dz,"
+                    << "local_translation_m,"
+                    << "local_roll_deg,local_pitch_deg,local_yaw_deg,"
+                    << "effective_world_slope_deg,"
+                    << "icp_correspondences,icp_rmse\n";
+            }
+
+            Eigen::Vector3d world_delta =
+                Eigen::Vector3d::Zero();
+
+            Eigen::Isometry3d T_previous_current =
+                Eigen::Isometry3d::Identity();
+
+            if (T_WL_previous != nullptr)
+            {
+                if (!T_WL_previous->matrix().allFinite())
+                {
+                    return false;
+                }
+
+                world_delta =
+                    T_WL_current.translation() -
+                    T_WL_previous->translation();
+
+                T_previous_current =
+                    T_WL_previous->inverse() *
+                    T_WL_current;
+            }
+
+            const Eigen::Vector3d world_rpy =
+                FrontendRotationToRpy(
+                    T_WL_current.rotation());
+
+            const Eigen::Vector3d local_rpy =
+                FrontendRotationToRpy(
+                    T_previous_current.rotation());
+
+            const Eigen::Vector3d local_translation =
+                T_previous_current.translation();
+
+            const double horizontal_step =
+                std::hypot(
+                    world_delta.x(),
+                    world_delta.y());
+
+            double effective_world_slope_deg =
+                0.0;
+
+            if (T_WL_previous != nullptr &&
+                (horizontal_step > 1.0e-9 ||
+                 std::abs(world_delta.z()) > 1.0e-9))
+            {
+                effective_world_slope_deg =
+                    std::atan2(
+                        world_delta.z(),
+                        horizontal_step) *
+                    kRadToDeg;
+            }
+
+            file
+                << keyframe_id << ","
+                << previous_keyframe_id << ","
+                << timestamp << ","
+                << T_WL_current.translation().x() << ","
+                << T_WL_current.translation().y() << ","
+                << T_WL_current.translation().z() << ","
+                << world_rpy.x() * kRadToDeg << ","
+                << world_rpy.y() * kRadToDeg << ","
+                << world_rpy.z() * kRadToDeg << ","
+                << world_delta.x() << ","
+                << world_delta.y() << ","
+                << world_delta.z() << ","
+                << horizontal_step << ","
+                << local_translation.x() << ","
+                << local_translation.y() << ","
+                << local_translation.z() << ","
+                << local_translation.norm() << ","
+                << local_rpy.x() * kRadToDeg << ","
+                << local_rpy.y() * kRadToDeg << ","
+                << local_rpy.z() * kRadToDeg << ","
+                << effective_world_slope_deg << ","
+                << registration_result.correspondences << ","
+                << registration_result.rmse
+                << "\n";
+
+            return true;
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+    }
+
+
+
+    // ========================================================================
+    // FR_Z_DECOMP_V11_RUNTIME
+    //
+    // Frontend World-Z decomposition diagnostic.
+    //
+    // For every FINAL ACCEPTED frontend pose pair:
+    //
+    //     T_previous_current = T_WL_previous^-1 * T_WL_current
+    //
+    // with local translation t = [dx dy dz]^T and previous world rotation R,
+    // the exact World-Z increment is:
+    //
+    //     dZ_world = R(2,0) * dx
+    //              + R(2,1) * dy
+    //              + R(2,2) * dz
+    //
+    // Under the existing ZYX convention:
+    //
+    //     R(2,0) = -sin(pitch)
+    //     R(2,1) =  cos(pitch) * sin(roll)
+    //     R(2,2) =  cos(pitch) * cos(roll)
+    //
+    // so the three terms are reported as:
+    //
+    //     pitch contribution
+    //     roll contribution
+    //     local-z contribution
+    //
+    // IMPORTANT:
+    //   * Ground refinement has already finished before this diagnostic runs.
+    //   * The final frontend Quality Gate has already passed.
+    //   * Keyframe/Submap updates have already succeeded.
+    //   * Rejected/uncommitted poses are NEVER accumulated.
+    //   * No header/ABI change is required; runtime state is kept in this .cpp.
+    // ========================================================================
+
+    const rclcpp::Logger kWorldZDecompositionLogger =
+        rclcpp::get_logger("scan2local_map.z_decomposition");
+
+    struct WorldZDecompositionRuntime
+    {
+        bool initialized = false;
+
+        std::size_t accepted_steps = 0;
+
+        double start_timestamp =
+            std::numeric_limits<double>::quiet_NaN();
+
+        double previous_timestamp =
+            std::numeric_limits<double>::quiet_NaN();
+
+        double initial_world_z = 0.0;
+
+        double pitch_contribution_m = 0.0;
+        double roll_contribution_m = 0.0;
+        double local_z_contribution_m = 0.0;
+        double world_z_m = 0.0;
+
+        double maximum_absolute_step_closure_error_m = 0.0;
+    };
+
+    std::mutex &WorldZDecompositionRuntimeMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    std::unordered_map<
+        const RegistrationScan2LocalMap *,
+        WorldZDecompositionRuntime> &
+    WorldZDecompositionRuntimeMap()
+    {
+        static std::unordered_map<
+            const RegistrationScan2LocalMap *,
+            WorldZDecompositionRuntime>
+            runtime_map;
+
+        return runtime_map;
+    }
+
+    std::filesystem::path WorldZDecompositionCsvPath()
+    {
+        return
+            FrontendDiagnosticDirectory() /
+            "frontend_world_z_decomposition.csv";
+    }
+
+    void ClearWorldZDecompositionRuntime(
+        const RegistrationScan2LocalMap *owner)
+    {
+        if (owner == nullptr)
+        {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(
+            WorldZDecompositionRuntimeMutex());
+
+        WorldZDecompositionRuntimeMap().erase(owner);
+    }
+
+    void RemoveWorldZDecompositionRuntime(
+        const RegistrationScan2LocalMap *owner)
+    {
+        ClearWorldZDecompositionRuntime(owner);
+    }
+
+    bool ResetWorldZDecompositionRuntime(
+        const RegistrationScan2LocalMap *owner,
+        double timestamp,
+        const Eigen::Isometry3d &T_WL_initial)
+    {
+        if (owner == nullptr ||
+            !std::isfinite(timestamp) ||
+            !T_WL_initial.matrix().allFinite())
+        {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(
+            WorldZDecompositionRuntimeMutex());
+
+        WorldZDecompositionRuntime runtime;
+        runtime.initialized = true;
+        runtime.start_timestamp = timestamp;
+        runtime.previous_timestamp = timestamp;
+        runtime.initial_world_z =
+            T_WL_initial.translation().z();
+
+        WorldZDecompositionRuntimeMap()[owner] =
+            runtime;
+
+        try
+        {
+            const std::filesystem::path directory =
+                FrontendDiagnosticDirectory();
+
+            std::filesystem::create_directories(
+                directory);
+
+            std::ofstream file(
+                WorldZDecompositionCsvPath(),
+                std::ios::out |
+                    std::ios::trunc);
+
+            if (!file.is_open())
+            {
+                return false;
+            }
+
+            file
+                << std::fixed
+                << std::setprecision(9);
+
+            file
+                << "accepted_step,timestamp,dt_from_previous_s,"
+                << "previous_world_z,current_world_z,"
+                << "previous_roll_deg,previous_pitch_deg,previous_yaw_deg,"
+                << "local_dx,local_dy,local_dz,"
+                << "pitch_step_m,roll_step_m,local_z_step_m,"
+                << "world_z_step_m,reconstructed_step_m,step_closure_error_m,"
+                << "cumulative_pitch_m,cumulative_roll_m,cumulative_local_z_m,"
+                << "cumulative_world_z_m,cumulative_sum_m,cumulative_closure_error_m,"
+                << "max_abs_step_closure_error_m\n";
+
+            // Origin row.  It makes the exact common LiDAR start timestamp
+            // explicit and allows two runs to be aligned without guessing.
+            const Eigen::Vector3d initial_rpy =
+                FrontendRotationToRpy(
+                    T_WL_initial.rotation());
+
+            constexpr double kRadToDeg =
+                180.0 /
+                3.14159265358979323846;
+
+            file
+                << 0 << ","
+                << timestamp << ","
+                << 0.0 << ","
+                << T_WL_initial.translation().z() << ","
+                << T_WL_initial.translation().z() << ","
+                << initial_rpy.x() * kRadToDeg << ","
+                << initial_rpy.y() * kRadToDeg << ","
+                << initial_rpy.z() * kRadToDeg << ","
+                << 0.0 << "," << 0.0 << "," << 0.0 << ","
+                << 0.0 << "," << 0.0 << "," << 0.0 << ","
+                << 0.0 << "," << 0.0 << "," << 0.0 << ","
+                << 0.0 << "," << 0.0 << "," << 0.0 << ","
+                << 0.0 << "," << 0.0 << "," << 0.0 << ","
+                << 0.0
+                << "\n";
+        }
+        catch (const std::exception &)
+        {
+            return false;
+        }
+
+        RCLCPP_INFO(
+            kWorldZDecompositionLogger,
+            "FR_Z_DECOMP RESET"
+            " | timestamp=%.9f"
+            " | world_z0=%.9f"
+            " | csv=%s",
+            timestamp,
+            T_WL_initial.translation().z(),
+            WorldZDecompositionCsvPath()
+                .string()
+                .c_str());
+
+        return true;
+    }
+
+    bool AccumulateWorldZDecomposition(
+        const RegistrationScan2LocalMap *owner,
+        double timestamp,
+        const Eigen::Isometry3d &T_WL_previous,
+        const Eigen::Isometry3d &T_WL_current)
+    {
+        if (owner == nullptr ||
+            !std::isfinite(timestamp) ||
+            !T_WL_previous.matrix().allFinite() ||
+            !T_WL_current.matrix().allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Isometry3d T_previous_current =
+            T_WL_previous.inverse() *
+            T_WL_current;
+
+        if (!T_previous_current.matrix().allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Vector3d local_translation =
+            T_previous_current.translation();
+
+        const Eigen::Matrix3d R_WL_previous =
+            T_WL_previous.rotation();
+
+        // Exact algebraic decomposition of world-frame Z displacement.
+        const double pitch_step_m =
+            R_WL_previous(2, 0) *
+            local_translation.x();
+
+        const double roll_step_m =
+            R_WL_previous(2, 1) *
+            local_translation.y();
+
+        const double local_z_step_m =
+            R_WL_previous(2, 2) *
+            local_translation.z();
+
+        const double reconstructed_step_m =
+            pitch_step_m +
+            roll_step_m +
+            local_z_step_m;
+
+        const double world_z_step_m =
+            T_WL_current.translation().z() -
+            T_WL_previous.translation().z();
+
+        const double step_closure_error_m =
+            world_z_step_m -
+            reconstructed_step_m;
+
+        if (!std::isfinite(pitch_step_m) ||
+            !std::isfinite(roll_step_m) ||
+            !std::isfinite(local_z_step_m) ||
+            !std::isfinite(reconstructed_step_m) ||
+            !std::isfinite(world_z_step_m) ||
+            !std::isfinite(step_closure_error_m))
+        {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(
+            WorldZDecompositionRuntimeMutex());
+
+        auto iterator =
+            WorldZDecompositionRuntimeMap().find(owner);
+
+        if (iterator ==
+                WorldZDecompositionRuntimeMap().end() ||
+            !iterator->second.initialized)
+        {
+            return false;
+        }
+
+        WorldZDecompositionRuntime &runtime =
+            iterator->second;
+
+        ++runtime.accepted_steps;
+
+        runtime.pitch_contribution_m +=
+            pitch_step_m;
+
+        runtime.roll_contribution_m +=
+            roll_step_m;
+
+        runtime.local_z_contribution_m +=
+            local_z_step_m;
+
+        // Use endpoint displacement for the reported net World-Z.  This keeps
+        // the diagnostic independent of tiny cumulative floating-point drift.
+        runtime.world_z_m =
+            T_WL_current.translation().z() -
+            runtime.initial_world_z;
+
+        runtime.maximum_absolute_step_closure_error_m =
+            std::max(
+                runtime.maximum_absolute_step_closure_error_m,
+                std::abs(step_closure_error_m));
+
+        const double cumulative_sum_m =
+            runtime.pitch_contribution_m +
+            runtime.roll_contribution_m +
+            runtime.local_z_contribution_m;
+
+        const double cumulative_closure_error_m =
+            runtime.world_z_m -
+            cumulative_sum_m;
+
+        const double dt_from_previous_s =
+            std::isfinite(runtime.previous_timestamp)
+                ? timestamp - runtime.previous_timestamp
+                : std::numeric_limits<double>::quiet_NaN();
+
+        const Eigen::Vector3d previous_rpy =
+            FrontendRotationToRpy(
+                T_WL_previous.rotation());
+
+        constexpr double kRadToDeg =
+            180.0 /
+            3.14159265358979323846;
+
+        try
+        {
+            std::ofstream file(
+                WorldZDecompositionCsvPath(),
+                std::ios::out |
+                    std::ios::app);
+
+            if (file.is_open())
+            {
+                file
+                    << std::fixed
+                    << std::setprecision(9)
+                    << runtime.accepted_steps << ","
+                    << timestamp << ","
+                    << dt_from_previous_s << ","
+                    << T_WL_previous.translation().z() << ","
+                    << T_WL_current.translation().z() << ","
+                    << previous_rpy.x() * kRadToDeg << ","
+                    << previous_rpy.y() * kRadToDeg << ","
+                    << previous_rpy.z() * kRadToDeg << ","
+                    << local_translation.x() << ","
+                    << local_translation.y() << ","
+                    << local_translation.z() << ","
+                    << pitch_step_m << ","
+                    << roll_step_m << ","
+                    << local_z_step_m << ","
+                    << world_z_step_m << ","
+                    << reconstructed_step_m << ","
+                    << step_closure_error_m << ","
+                    << runtime.pitch_contribution_m << ","
+                    << runtime.roll_contribution_m << ","
+                    << runtime.local_z_contribution_m << ","
+                    << runtime.world_z_m << ","
+                    << cumulative_sum_m << ","
+                    << cumulative_closure_error_m << ","
+                    << runtime.maximum_absolute_step_closure_error_m
+                    << "\n";
+            }
+        }
+        catch (const std::exception &)
+        {
+            // Keep the realtime frontend running even if CSV output fails.
+        }
+
+        runtime.previous_timestamp =
+            timestamp;
+
+        RCLCPP_INFO(
+            kWorldZDecompositionLogger,
+            "FR_Z_DECOMP"
+            " | step=%zu"
+            " | timestamp=%.9f"
+            " | pitch=%.9f"
+            " | roll=%.9f"
+            " | local_z=%.9f"
+            " | world_z=%.9f"
+            " | sum=%.9f"
+            " | closure=%.3e"
+            " | step_pitch=%.9f"
+            " | step_roll=%.9f"
+            " | step_local_z=%.9f"
+            " | step_world_z=%.9f",
+            runtime.accepted_steps,
+            timestamp,
+            runtime.pitch_contribution_m,
+            runtime.roll_contribution_m,
+            runtime.local_z_contribution_m,
+            runtime.world_z_m,
+            cumulative_sum_m,
+            cumulative_closure_error_m,
+            pitch_step_m,
+            roll_step_m,
+            local_z_step_m,
+            world_z_step_m);
+
+        return true;
+    }
+
+    // Frontend Robust ICP V1 experiment isolation.
+    //
+    // The realtime Scan-to-LocalMap registration uses the caller-provided
+    // robust configuration. Post-PGO refinement is deliberately kept on the
+    // old unweighted ICP behavior for this experiment, so any trajectory
+    // change can be attributed to the FRONTEND robust kernel rather than to
+    // a simultaneous change in backend refinement.
+    LidarRegistrationConfig MakeBackendRefinementRegistrationConfig(
+        const LidarRegistrationConfig &frontend_config)
+    {
+        LidarRegistrationConfig backend_config =
+            frontend_config;
+
+        backend_config.enable_huber_loss =
+            false;
+
+        // Keep post-PGO refinement on the legacy perturbation during the
+        // controlled Degeneracy V2A/V2B experiment.  Only the realtime frontend
+        // uses the sensor-centered + median-range-normalized Hessian/retraction in this run.
+        backend_config.enable_sensor_centered_perturbation =
+            false;
+
+        backend_config.enable_hessian_scale_normalization =
+            false;
+
+        return backend_config;
+    }
+
+    double ElapsedMilliseconds(
+        const std::chrono::steady_clock::time_point &start,
+        const std::chrono::steady_clock::time_point &end)
+    {
+        return std::chrono::duration<double, std::milli>(
+                   end - start)
+            .count();
+    }
+
+    struct FrameTimingDiagnostics
+    {
+        std::chrono::steady_clock::time_point start =
+            std::chrono::steady_clock::now();
+
+        double ground_segment_ms = 0.0;
+        double primary_align_ms = 0.0;
+        double ground_refine_ms = 0.0;
+        double recovery_coarse_ms = 0.0;
+        double recovery_refine_ms = 0.0;
+        double keyframe_decision_ms = 0.0;
+        double keyframe_store_ms = 0.0;
+        double pose_graph_insert_ms = 0.0;
+        double global_map_incremental_ms = 0.0;
+        double submap_insert_ms = 0.0;
+        double scan_context_insert_ms = 0.0;
+        double loop_backend_ms = 0.0;
+        double backend_enqueue_ms = 0.0;
+        double prepare_target_ms = 0.0;
+
+        std::size_t keyframes_before = 0;
+        std::size_t keyframes_after = 0;
+
+        bool first_frame = false;
+        bool accepted = false;
+        bool keyframe = false;
+        bool recovery_triggered = false;
+        bool coarse_recovery_accepted = false;
+    };
+
+    class FrameTimingReporter
+    {
+    public:
+        explicit FrameTimingReporter(
+            FrameTimingDiagnostics &diagnostics)
+            : diagnostics_(diagnostics)
+        {
+        }
+
+        ~FrameTimingReporter()
+        {
+            const double total_ms =
+                ElapsedMilliseconds(
+                    diagnostics_.start,
+                    std::chrono::steady_clock::now());
+
+            RCLCPP_INFO(
+                kTimingLogger,
+                "FR_TIMING ADD_FRAME"
+                " | total=%.3f ms"
+                " | ground_segment=%.3f"
+                " | primary_align=%.3f"
+                " | ground_refine=%.3f"
+                " | recovery_coarse=%.3f"
+                " | recovery_refine=%.3f"
+                " | keyframe_decision=%.3f"
+                " | keyframe_store=%.3f"
+                " | pose_graph_insert=%.3f"
+                " | global_map_incremental=%.3f"
+                " | submap_insert=%.3f"
+                " | scan_context_insert=%.3f"
+                " | loop_backend=%.3f"
+                " | backend_enqueue=%.3f"
+                " | prepare_target=%.3f"
+                " | first_frame=%s"
+                " | accepted=%s"
+                " | keyframe=%s"
+                " | recovery_triggered=%s"
+                " | coarse_recovery_accepted=%s"
+                " | keyframes=%zu->%zu",
+                total_ms,
+                diagnostics_.ground_segment_ms,
+                diagnostics_.primary_align_ms,
+                diagnostics_.ground_refine_ms,
+                diagnostics_.recovery_coarse_ms,
+                diagnostics_.recovery_refine_ms,
+                diagnostics_.keyframe_decision_ms,
+                diagnostics_.keyframe_store_ms,
+                diagnostics_.pose_graph_insert_ms,
+                diagnostics_.global_map_incremental_ms,
+                diagnostics_.submap_insert_ms,
+                diagnostics_.scan_context_insert_ms,
+                diagnostics_.loop_backend_ms,
+                diagnostics_.backend_enqueue_ms,
+                diagnostics_.prepare_target_ms,
+                diagnostics_.first_frame ? "true" : "false",
+                diagnostics_.accepted ? "true" : "false",
+                diagnostics_.keyframe ? "true" : "false",
+                diagnostics_.recovery_triggered ? "true" : "false",
+                diagnostics_.coarse_recovery_accepted ? "true" : "false",
+                diagnostics_.keyframes_before,
+                diagnostics_.keyframes_after);
+        }
+
+    private:
+        FrameTimingDiagnostics &diagnostics_;
+    };
+
+    struct LoopTimingDiagnostics
+    {
+        std::chrono::steady_clock::time_point start =
+            std::chrono::steady_clock::now();
+
+        std::size_t current_keyframe_id = 0;
+        std::size_t current_submap_id = 0;
+        std::size_t candidates = 0;
+        std::size_t verifier_prescore_calls = 0;
+        std::size_t verifier_calls = 0;
+        std::size_t pose_graph_optimize_calls = 0;
+
+        double scan_context_detect_ms = 0.0;
+        double verifier_prescore_ms = 0.0;
+        double verifier_ms = 0.0;
+        double pose_graph_optimize_ms = 0.0;
+        double map_odom_ms = 0.0;
+        double global_map_rebuild_ms = 0.0;
+        double refinement_ms = 0.0;
+
+        bool geometry_accepted = false;
+        bool loop_edge_accepted = false;
+        bool optimization_accepted = false;
+    };
+
+    class LoopTimingReporter
+    {
+    public:
+        explicit LoopTimingReporter(
+            LoopTimingDiagnostics &diagnostics)
+            : diagnostics_(diagnostics)
+        {
+        }
+
+        ~LoopTimingReporter()
+        {
+            const double total_ms =
+                ElapsedMilliseconds(
+                    diagnostics_.start,
+                    std::chrono::steady_clock::now());
+
+            RCLCPP_INFO(
+                kTimingLogger,
+                "FR_TIMING LOOP_BACKEND"
+                " | current_kf=%zu"
+                " | current_submap=%zu"
+                " | total=%.3f ms"
+                " | scan_context=%.3f"
+                " | candidates=%zu"
+                " | prescore=%.3f"
+                " | prescore_calls=%zu"
+                " | verifier=%.3f"
+                " | verifier_calls=%zu"
+                " | pgo=%.3f"
+                " | pgo_calls=%zu"
+                " | map_odom=%.3f"
+                " | global_map=%.3f"
+                " | refinement=%.3f"
+                " | geometry_accepted=%s"
+                " | loop_edge_accepted=%s"
+                " | optimization_accepted=%s",
+                diagnostics_.current_keyframe_id,
+                diagnostics_.current_submap_id,
+                total_ms,
+                diagnostics_.scan_context_detect_ms,
+                diagnostics_.candidates,
+                diagnostics_.verifier_prescore_ms,
+                diagnostics_.verifier_prescore_calls,
+                diagnostics_.verifier_ms,
+                diagnostics_.verifier_calls,
+                diagnostics_.pose_graph_optimize_ms,
+                diagnostics_.pose_graph_optimize_calls,
+                diagnostics_.map_odom_ms,
+                diagnostics_.global_map_rebuild_ms,
+                diagnostics_.refinement_ms,
+                diagnostics_.geometry_accepted ? "true" : "false",
+                diagnostics_.loop_edge_accepted ? "true" : "false",
+                diagnostics_.optimization_accepted ? "true" : "false");
+        }
+
+    private:
+        LoopTimingDiagnostics &diagnostics_;
+    };
+
+    struct RefinementTimingDiagnostics
+    {
+        std::chrono::steady_clock::time_point start =
+            std::chrono::steady_clock::now();
+
+        std::size_t keyframes = 0;
+        std::size_t loop_anchors = 0;
+        std::size_t groups_considered = 0;
+        std::size_t groups_prepared = 0;
+        std::size_t groups_optimized = 0;
+        std::size_t groups_accepted = 0;
+        std::size_t geometry_candidates = 0;
+        std::size_t geometry_primary_selected = 0;
+        std::size_t geometry_calls = 0;
+        std::size_t geometry_fallback_calls = 0;
+        std::size_t geometry_anchors = 0;
+
+        double current_select_ms = 0.0;
+        double historical_select_ms = 0.0;
+        double historical_build_ms = 0.0;
+        double historical_voxel_ms = 0.0;
+        double prepare_target_ms = 0.0;
+        double local_graph_build_ms = 0.0;
+        double geometry_align_ms = 0.0;
+        double local_pgo_ms = 0.0;
+        double debug_clouds_ms = 0.0;
+        double refined_map_update_ms = 0.0;
+    };
+
+    class RefinementTimingReporter
+    {
+    public:
+        explicit RefinementTimingReporter(
+            RefinementTimingDiagnostics &diagnostics)
+            : diagnostics_(diagnostics)
+        {
+        }
+
+        ~RefinementTimingReporter()
+        {
+            const double total_ms =
+                ElapsedMilliseconds(
+                    diagnostics_.start,
+                    std::chrono::steady_clock::now());
+
+            RCLCPP_INFO(
+                kTimingLogger,
+                "FR_TIMING REFINEMENT"
+                " | total=%.3f ms"
+                " | keyframes=%zu"
+                " | loop_anchors=%zu"
+                " | groups=%zu/%zu/%zu/%zu"
+                " | current_select=%.3f"
+                " | historical_select=%.3f"
+                " | historical_build=%.3f"
+                " | historical_voxel=%.3f"
+                " | prepare_target=%.3f"
+                " | local_graph=%.3f"
+                " | geometry_align=%.3f"
+                " | geometry_candidates=%zu"
+                " | geometry_primary_selected=%zu"
+                " | geometry_calls=%zu"
+                " | geometry_fallback_calls=%zu"
+                " | geometry_anchors=%zu"
+                " | local_pgo=%.3f"
+                " | debug_clouds=%.3f"
+                " | refined_map_update=%.3f",
+                total_ms,
+                diagnostics_.keyframes,
+                diagnostics_.loop_anchors,
+                diagnostics_.groups_considered,
+                diagnostics_.groups_prepared,
+                diagnostics_.groups_optimized,
+                diagnostics_.groups_accepted,
+                diagnostics_.current_select_ms,
+                diagnostics_.historical_select_ms,
+                diagnostics_.historical_build_ms,
+                diagnostics_.historical_voxel_ms,
+                diagnostics_.prepare_target_ms,
+                diagnostics_.local_graph_build_ms,
+                diagnostics_.geometry_align_ms,
+                diagnostics_.geometry_candidates,
+                diagnostics_.geometry_primary_selected,
+                diagnostics_.geometry_calls,
+                diagnostics_.geometry_fallback_calls,
+                diagnostics_.geometry_anchors,
+                diagnostics_.local_pgo_ms,
+                diagnostics_.debug_clouds_ms,
+                diagnostics_.refined_map_update_ms);
+        }
+
+    private:
+        RefinementTimingDiagnostics &diagnostics_;
+    };
+
+    // ============================================================================
+    // BuildOdometryInformationV1()
+    //
+    // V1.1: normalized diagonal directional confidence.
+    //
+    // Input covariance convention:
+    //     order = [rx ry rz tx ty tz]
+    //     axes  = World / target frame
+    //
+    // Output information convention for g2o::EdgeSE3:
+    //     order = [tx ty tz rx ry rz]
+    //     axes  = current LiDAR frame
+    // ============================================================================
+    bool BuildOdometryInformationV1(
+        const LidarRegistrationResult &registration_result,
+        const Eigen::Isometry3d &T_WL,
+        Eigen::Matrix<double, 6, 6> &information)
+    {
+        information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        if (!registration_result
+                 .hessian_relative_covariance_valid ||
+            !registration_result
+                 .hessian_relative_covariance
+                 .allFinite() ||
+            !T_WL.matrix().allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Matrix3d R_LW =
+            T_WL.rotation().transpose();
+
+        Eigen::Matrix<double, 6, 6> world_to_lidar =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        world_to_lidar.block<3, 3>(0, 0) =
+            R_LW;
+
+        world_to_lidar.block<3, 3>(3, 3) =
+            R_LW;
+
+        const Eigen::Matrix<double, 6, 6>
+            covariance_lidar_rt =
+                world_to_lidar *
+                registration_result.hessian_relative_covariance *
+                world_to_lidar.transpose();
+
+        if (!covariance_lidar_rt.allFinite())
+        {
+            return false;
+        }
+
+        constexpr double minimum_directional_confidence =
+            0.01;
+
+        Eigen::Matrix<double, 6, 1> confidence_rt =
+            Eigen::Matrix<double, 6, 1>::Ones();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            const double variance =
+                covariance_lidar_rt(i, i);
+
+            if (!std::isfinite(variance) ||
+                variance <= 0.0)
+            {
+                return false;
+            }
+
+            confidence_rt(i) =
+                std::clamp(
+                    1.0 / variance,
+                    minimum_directional_confidence,
+                    1.0);
+        }
+
+        const double maximum_confidence =
+            confidence_rt.maxCoeff();
+
+        if (!std::isfinite(maximum_confidence) ||
+            maximum_confidence <= 0.0)
+        {
+            return false;
+        }
+
+        confidence_rt /=
+            maximum_confidence;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            confidence_rt(i) =
+                std::clamp(
+                    confidence_rt(i),
+                    minimum_directional_confidence,
+                    1.0);
+        }
+
+        information =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        information(0, 0) = confidence_rt(3); // tx
+        information(1, 1) = confidence_rt(4); // ty
+        information(2, 2) = confidence_rt(5); // tz
+        information(3, 3) = confidence_rt(0); // rx
+        information(4, 4) = confidence_rt(1); // ry
+        information(5, 5) = confidence_rt(2); // rz
+
+        return information.allFinite();
+    }
+
+    // ============================================================================
+    // BuildOdometryInformationV2()
+    //
+    // Full 6x6 relative information shape.
+    //
+    // Design goal:
+    //     Keep EXACTLY the V1.1 diagonal confidence values while restoring the
+    //     off-diagonal coupling carried by the Hessian-derived covariance.
+    //
+    // Steps:
+    //     1. World [r,t] covariance -> current LiDAR [r,t].
+    //     2. Reorder to g2o [t,r].
+    //     3. Compute the same normalized diagonal confidence as V1.1.
+    //     4. Recover precision shape Q = C^-1.
+    //     5. Standardize Q to unit diagonal.
+    //     6. Restore the V1.1 diagonal through congruence scaling.
+    // ============================================================================
+    bool BuildOdometryInformationV2(
+        const LidarRegistrationResult &registration_result,
+        const Eigen::Isometry3d &T_WL,
+        Eigen::Matrix<double, 6, 6> &information)
+    {
+        information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        if (!registration_result
+                 .hessian_relative_covariance_valid ||
+            !registration_result
+                 .hessian_relative_covariance
+                 .allFinite() ||
+            !T_WL.matrix().allFinite())
+        {
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // 1. World [r,t] -> current LiDAR [r,t].
+        // --------------------------------------------------------------------
+        const Eigen::Matrix3d R_LW =
+            T_WL.rotation().transpose();
+
+        Eigen::Matrix<double, 6, 6> world_to_lidar =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        world_to_lidar.block<3, 3>(0, 0) =
+            R_LW;
+
+        world_to_lidar.block<3, 3>(3, 3) =
+            R_LW;
+
+        const Eigen::Matrix<double, 6, 6>
+            covariance_lidar_rt =
+                world_to_lidar *
+                registration_result.hessian_relative_covariance *
+                world_to_lidar.transpose();
+
+        if (!covariance_lidar_rt.allFinite())
+        {
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // 2. [rx ry rz tx ty tz] -> [tx ty tz rx ry rz].
+        // --------------------------------------------------------------------
+        Eigen::Matrix<double, 6, 6> rt_to_tr =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        rt_to_tr.block<3, 3>(0, 3) =
+            Eigen::Matrix3d::Identity();
+
+        rt_to_tr.block<3, 3>(3, 0) =
+            Eigen::Matrix3d::Identity();
+
+        Eigen::Matrix<double, 6, 6> covariance_tr =
+            rt_to_tr *
+            covariance_lidar_rt *
+            rt_to_tr.transpose();
+
+        covariance_tr =
+            0.5 *
+            (covariance_tr +
+             covariance_tr.transpose());
+
+        if (!covariance_tr.allFinite())
+        {
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // 3. Keep EXACTLY the V1.1 diagonal confidence definition.
+        // --------------------------------------------------------------------
+        constexpr double minimum_directional_confidence =
+            0.01;
+
+        Eigen::Matrix<double, 6, 1> confidence_tr =
+            Eigen::Matrix<double, 6, 1>::Ones();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            const double variance =
+                covariance_tr(i, i);
+
+            if (!std::isfinite(variance) ||
+                variance <= 0.0)
+            {
+                return false;
+            }
+
+            confidence_tr(i) =
+                std::clamp(
+                    1.0 / variance,
+                    minimum_directional_confidence,
+                    1.0);
+        }
+
+        const double maximum_confidence =
+            confidence_tr.maxCoeff();
+
+        if (!std::isfinite(maximum_confidence) ||
+            maximum_confidence <= 0.0)
+        {
+            return false;
+        }
+
+        confidence_tr /=
+            maximum_confidence;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            confidence_tr(i) =
+                std::clamp(
+                    confidence_tr(i),
+                    minimum_directional_confidence,
+                    1.0);
+        }
+
+        // --------------------------------------------------------------------
+        // 4. Recover full precision shape Q = C^-1 by eigendecomposition.
+        // --------------------------------------------------------------------
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            covariance_solver(
+                covariance_tr);
+
+        if (covariance_solver.info() !=
+            Eigen::Success)
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1>
+            covariance_eigenvalues =
+                covariance_solver.eigenvalues();
+
+        if (!covariance_eigenvalues.allFinite() ||
+            covariance_eigenvalues.minCoeff() <=
+                1.0e-12)
+        {
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6>
+            inverse_eigenvalues =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            inverse_eigenvalues(i, i) =
+                1.0 /
+                covariance_eigenvalues(i);
+        }
+
+        Eigen::Matrix<double, 6, 6>
+            precision_shape =
+                covariance_solver.eigenvectors() *
+                inverse_eigenvalues *
+                covariance_solver.eigenvectors().transpose();
+
+        precision_shape =
+            0.5 *
+            (precision_shape +
+             precision_shape.transpose());
+
+        if (!precision_shape.allFinite())
+        {
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // 5. Standardize precision shape to unit diagonal.
+        //
+        //     J_ij = Q_ij / sqrt(Q_ii * Q_jj)
+        //
+        // J remains SPD because this is a diagonal congruence transform.
+        // --------------------------------------------------------------------
+        Eigen::Matrix<double, 6, 6>
+            standardized_precision =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            if (!std::isfinite(
+                    precision_shape(i, i)) ||
+                precision_shape(i, i) <=
+                    0.0)
+            {
+                return false;
+            }
+
+            for (int j = 0;
+                 j < 6;
+                 ++j)
+            {
+                if (!std::isfinite(
+                        precision_shape(j, j)) ||
+                    precision_shape(j, j) <=
+                        0.0)
+                {
+                    return false;
+                }
+
+                const double denominator =
+                    std::sqrt(
+                        precision_shape(i, i) *
+                        precision_shape(j, j));
+
+                if (!std::isfinite(denominator) ||
+                    denominator <= 0.0)
+                {
+                    return false;
+                }
+
+                standardized_precision(i, j) =
+                    precision_shape(i, j) /
+                    denominator;
+            }
+        }
+
+        standardized_precision =
+            0.5 *
+            (standardized_precision +
+             standardized_precision.transpose());
+
+        // --------------------------------------------------------------------
+        // 6. Restore V1.1 diagonal confidence:
+        //
+        //     Omega_V2 = W * J * W
+        //     W = diag(sqrt(confidence_tr))
+        //
+        // Therefore Omega_V2(i,i) == confidence_tr(i).
+        // --------------------------------------------------------------------
+        Eigen::Matrix<double, 6, 6>
+            confidence_scale =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            confidence_scale(i, i) =
+                std::sqrt(
+                    confidence_tr(i));
+        }
+
+        information =
+            confidence_scale *
+            standardized_precision *
+            confidence_scale;
+
+        information =
+            0.5 *
+            (information +
+             information.transpose());
+
+        if (!information.allFinite())
+        {
+            return false;
+        }
+
+        // --------------------------------------------------------------------
+        // 7. Strict SPD validation before storing the edge information.
+        // --------------------------------------------------------------------
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            information_solver(
+                information,
+                Eigen::EigenvaluesOnly);
+
+        if (information_solver.info() !=
+            Eigen::Success)
+        {
+            return false;
+        }
+
+        const double minimum_information_eigenvalue =
+            information_solver
+                .eigenvalues()
+                .minCoeff();
+
+        if (!std::isfinite(
+                minimum_information_eigenvalue) ||
+            minimum_information_eigenvalue <=
+                1.0e-9)
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     double RelativeRotationDeg(
         const Eigen::Isometry3d &T_A,
@@ -229,6 +1658,3068 @@ namespace
         return T_WL_coarse.matrix().allFinite();
     }
 
+
+    // ========================================================================
+    // Loop Shadow Point-to-Plane -> Full 6x6 information.
+    //
+    // This production helper deliberately lives in this .cpp so the public
+    // LoopVerifier / RegistrationScan2LocalMap headers do not need new ABI.
+    // P2P ICP still owns the loop pose.  Only an edge that has survived the
+    // existing loop gates uses this shadow geometry to build its information.
+    //
+    // Output convention:
+    //     order = [tx ty tz rx ry rz]
+    //     frame = current/source LiDAR (g2o to-node frame)
+    // ========================================================================
+    constexpr int kLoopInformationPlaneKnn = 5;
+    constexpr double kLoopInformationMaxPlaneFitError = 0.15;
+    constexpr double kLoopInformationMinimumScaleRange = 1.0;
+    constexpr double kLoopInformationMaximumScaleRange = 50.0;
+    constexpr double kLoopInformationRelativeEigenvalueFloor = 0.01;
+    constexpr double kLoopInformationMinimumDirectionalConfidence = 0.01;
+    constexpr std::size_t kLoopInformationMinimumCorrespondences = 50;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr VoxelFilterLoopInformation(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &cloud,
+        double leaf_size)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(
+            new pcl::PointCloud<pcl::PointXYZ>);
+
+        if (!cloud ||
+            cloud->empty() ||
+            !std::isfinite(leaf_size) ||
+            leaf_size <= 0.0)
+        {
+            return filtered;
+        }
+
+        pcl::VoxelGrid<pcl::PointXYZ> voxel;
+        voxel.setInputCloud(cloud);
+
+        const float leaf =
+            static_cast<float>(leaf_size);
+
+        voxel.setLeafSize(
+            leaf,
+            leaf,
+            leaf);
+
+        voxel.filter(*filtered);
+
+        return filtered;
+    }
+
+    bool FitLoopInformationPlane(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &target,
+        const std::vector<int> &neighbor_indices,
+        Eigen::Vector3d &plane_point,
+        Eigen::Vector3d &plane_normal)
+    {
+        if (!target ||
+            neighbor_indices.size() < 3)
+        {
+            return false;
+        }
+
+        Eigen::Vector3d centroid =
+            Eigen::Vector3d::Zero();
+
+        for (const int index : neighbor_indices)
+        {
+            if (index < 0 ||
+                static_cast<std::size_t>(index) >= target->size())
+            {
+                return false;
+            }
+
+            const pcl::PointXYZ &point =
+                target->points[
+                    static_cast<std::size_t>(index)];
+
+            centroid +=
+                Eigen::Vector3d(
+                    static_cast<double>(point.x),
+                    static_cast<double>(point.y),
+                    static_cast<double>(point.z));
+        }
+
+        centroid /=
+            static_cast<double>(
+                neighbor_indices.size());
+
+        Eigen::Matrix3d covariance =
+            Eigen::Matrix3d::Zero();
+
+        for (const int index : neighbor_indices)
+        {
+            const pcl::PointXYZ &point =
+                target->points[
+                    static_cast<std::size_t>(index)];
+
+            const Eigen::Vector3d p_target(
+                static_cast<double>(point.x),
+                static_cast<double>(point.y),
+                static_cast<double>(point.z));
+
+            const Eigen::Vector3d delta =
+                p_target - centroid;
+
+            covariance.noalias() +=
+                delta * delta.transpose();
+        }
+
+        covariance /=
+            static_cast<double>(
+                neighbor_indices.size());
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+            eigen_solver(
+                covariance,
+                Eigen::ComputeEigenvectors);
+
+        if (eigen_solver.info() != Eigen::Success)
+        {
+            return false;
+        }
+
+        Eigen::Vector3d normal =
+            eigen_solver.eigenvectors().col(0);
+
+        const double normal_norm =
+            normal.norm();
+
+        if (!std::isfinite(normal_norm) ||
+            normal_norm < 1.0e-12)
+        {
+            return false;
+        }
+
+        normal /= normal_norm;
+
+        for (const int index : neighbor_indices)
+        {
+            const pcl::PointXYZ &point =
+                target->points[
+                    static_cast<std::size_t>(index)];
+
+            const Eigen::Vector3d p_target(
+                static_cast<double>(point.x),
+                static_cast<double>(point.y),
+                static_cast<double>(point.z));
+
+            const double distance =
+                std::abs(
+                    normal.dot(
+                        p_target - centroid));
+
+            if (!std::isfinite(distance) ||
+                distance > kLoopInformationMaxPlaneFitError)
+            {
+                return false;
+            }
+        }
+
+        plane_point = centroid;
+        plane_normal = normal;
+
+        return true;
+    }
+
+    double LoopInformationMedian(
+        std::vector<double> values)
+    {
+        if (values.empty())
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        const std::size_t middle =
+            values.size() / 2;
+
+        std::nth_element(
+            values.begin(),
+            values.begin() +
+                static_cast<std::ptrdiff_t>(middle),
+            values.end());
+
+        double median =
+            values[middle];
+
+        if (values.size() % 2 == 0)
+        {
+            const double lower =
+                *std::max_element(
+                    values.begin(),
+                    values.begin() +
+                        static_cast<std::ptrdiff_t>(middle));
+
+            median =
+                0.5 *
+                (lower + median);
+        }
+
+        return median;
+    }
+
+    bool BuildLoopShadowInformationFull6x6(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+        const Eigen::Isometry3d &T_target_source,
+        const LoopVerifierConfig &verifier_config,
+        Eigen::Matrix<double, 6, 6> &information,
+        std::size_t &shadow_correspondences,
+        double &median_range,
+        double &minimum_relative_eigenvalue)
+    {
+        information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        shadow_correspondences = 0;
+        median_range =
+            std::numeric_limits<double>::quiet_NaN();
+        minimum_relative_eigenvalue =
+            std::numeric_limits<double>::quiet_NaN();
+
+        if (!source_current ||
+            !target_historical ||
+            source_current->empty() ||
+            target_historical->empty() ||
+            !T_target_source.matrix().allFinite() ||
+            !std::isfinite(verifier_config.voxel_leaf_size) ||
+            verifier_config.voxel_leaf_size <= 0.0 ||
+            !std::isfinite(verifier_config.verification_inlier_distance) ||
+            verifier_config.verification_inlier_distance <= 0.0)
+        {
+            return false;
+        }
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr source_xyz =
+            ConvertToXYZ(source_current);
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr target_xyz =
+            ConvertToXYZ(target_historical);
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr source_filtered =
+            VoxelFilterLoopInformation(
+                source_xyz,
+                verifier_config.voxel_leaf_size);
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr target_filtered =
+            VoxelFilterLoopInformation(
+                target_xyz,
+                verifier_config.voxel_leaf_size);
+
+        if (!source_filtered ||
+            !target_filtered ||
+            source_filtered->size() < verifier_config.min_cloud_points ||
+            target_filtered->size() < verifier_config.min_cloud_points)
+        {
+            return false;
+        }
+
+        pcl::search::KdTree<pcl::PointXYZ>::Ptr target_kdtree(
+            new pcl::search::KdTree<pcl::PointXYZ>());
+
+        target_kdtree->setInputCloud(
+            target_filtered);
+
+        Eigen::Matrix<double, 6, 6> H_raw =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        std::vector<double> correspondence_ranges;
+        correspondence_ranges.reserve(
+            source_filtered->size());
+
+        std::vector<int> neighbor_indices(
+            static_cast<std::size_t>(
+                kLoopInformationPlaneKnn));
+
+        std::vector<float> neighbor_squared_distances(
+            static_cast<std::size_t>(
+                kLoopInformationPlaneKnn));
+
+        const double inlier_distance =
+            verifier_config.verification_inlier_distance;
+
+        const double maximum_squared_distance =
+            inlier_distance *
+            inlier_distance;
+
+        const Eigen::Vector3d sensor_origin_target =
+            T_target_source.translation();
+
+        for (const pcl::PointXYZ &source_point :
+             source_filtered->points)
+        {
+            const Eigen::Vector3d p_source(
+                static_cast<double>(source_point.x),
+                static_cast<double>(source_point.y),
+                static_cast<double>(source_point.z));
+
+            const Eigen::Vector3d p_target =
+                T_target_source *
+                p_source;
+
+            if (!p_target.allFinite())
+            {
+                continue;
+            }
+
+            pcl::PointXYZ query;
+            query.x =
+                static_cast<float>(p_target.x());
+            query.y =
+                static_cast<float>(p_target.y());
+            query.z =
+                static_cast<float>(p_target.z());
+
+            const int found =
+                target_kdtree->nearestKSearch(
+                    query,
+                    kLoopInformationPlaneKnn,
+                    neighbor_indices,
+                    neighbor_squared_distances);
+
+            if (found < kLoopInformationPlaneKnn)
+            {
+                continue;
+            }
+
+            const double nearest_squared_distance =
+                static_cast<double>(
+                    neighbor_squared_distances[0]);
+
+            if (!std::isfinite(nearest_squared_distance) ||
+                nearest_squared_distance > maximum_squared_distance)
+            {
+                continue;
+            }
+
+            Eigen::Vector3d plane_point;
+            Eigen::Vector3d plane_normal;
+
+            if (!FitLoopInformationPlane(
+                    target_filtered,
+                    neighbor_indices,
+                    plane_point,
+                    plane_normal))
+            {
+                continue;
+            }
+
+            const double residual =
+                plane_normal.dot(
+                    p_target -
+                    plane_point);
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) > inlier_distance)
+            {
+                continue;
+            }
+
+            const Eigen::Vector3d lever_arm_target =
+                p_target -
+                sensor_origin_target;
+
+            if (!lever_arm_target.allFinite())
+            {
+                continue;
+            }
+
+            Eigen::Matrix<double, 1, 6> J =
+                Eigen::Matrix<double, 1, 6>::Zero();
+
+            J.block<1, 3>(0, 0) =
+                lever_arm_target.cross(
+                                    plane_normal)
+                    .transpose();
+
+            J.block<1, 3>(0, 3) =
+                plane_normal.transpose();
+
+            H_raw.noalias() +=
+                J.transpose() *
+                J;
+
+            const double range =
+                lever_arm_target.norm();
+
+            if (std::isfinite(range) &&
+                range > 1.0e-9)
+            {
+                correspondence_ranges.push_back(
+                    range);
+            }
+
+            ++shadow_correspondences;
+        }
+
+        if (shadow_correspondences <
+                kLoopInformationMinimumCorrespondences ||
+            correspondence_ranges.empty() ||
+            !H_raw.allFinite())
+        {
+            return false;
+        }
+
+        median_range =
+            LoopInformationMedian(
+                correspondence_ranges);
+
+        if (!std::isfinite(median_range) ||
+            median_range <= 0.0)
+        {
+            return false;
+        }
+
+        const double scale_L =
+            std::clamp(
+                median_range,
+                kLoopInformationMinimumScaleRange,
+                kLoopInformationMaximumScaleRange);
+
+        Eigen::Matrix<double, 6, 6> parameter_unscale =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        const double inverse_scale =
+            1.0 /
+            scale_L;
+
+        parameter_unscale(0, 0) = inverse_scale;
+        parameter_unscale(1, 1) = inverse_scale;
+        parameter_unscale(2, 2) = inverse_scale;
+
+        Eigen::Matrix<double, 6, 6> H_analysis =
+            parameter_unscale.transpose() *
+            H_raw *
+            parameter_unscale;
+
+        H_analysis =
+            0.5 *
+            (H_analysis +
+             H_analysis.transpose());
+
+        if (!H_analysis.allFinite())
+        {
+            return false;
+        }
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            hessian_solver(
+                H_analysis);
+
+        if (hessian_solver.info() != Eigen::Success ||
+            !hessian_solver.eigenvalues().allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> eigenvalues =
+            hessian_solver.eigenvalues();
+
+        const double lambda_max =
+            eigenvalues(5);
+
+        if (!std::isfinite(lambda_max) ||
+            lambda_max <= 1.0e-12)
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> relative_eigenvalues =
+            eigenvalues /
+            lambda_max;
+
+        if (!relative_eigenvalues.allFinite())
+        {
+            return false;
+        }
+
+        minimum_relative_eigenvalue =
+            relative_eigenvalues.minCoeff();
+
+        Eigen::Matrix<double, 6, 6> inverse_relative_eigenvalues =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            const double safe_relative =
+                std::clamp(
+                    relative_eigenvalues(i),
+                    kLoopInformationRelativeEigenvalueFloor,
+                    1.0);
+
+            inverse_relative_eigenvalues(i, i) =
+                1.0 /
+                safe_relative;
+        }
+
+        Eigen::Matrix<double, 6, 6> covariance_target_rt =
+            hessian_solver.eigenvectors() *
+            inverse_relative_eigenvalues *
+            hessian_solver.eigenvectors().transpose();
+
+        covariance_target_rt =
+            0.5 *
+            (covariance_target_rt +
+             covariance_target_rt.transpose());
+
+        if (!covariance_target_rt.allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Matrix3d R_source_target =
+            T_target_source.rotation().transpose();
+
+        Eigen::Matrix<double, 6, 6> target_to_source =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        target_to_source.block<3, 3>(0, 0) =
+            R_source_target;
+
+        target_to_source.block<3, 3>(3, 3) =
+            R_source_target;
+
+        Eigen::Matrix<double, 6, 6> covariance_source_rt =
+            target_to_source *
+            covariance_target_rt *
+            target_to_source.transpose();
+
+        Eigen::Matrix<double, 6, 6> rt_to_tr =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        rt_to_tr.block<3, 3>(0, 3) =
+            Eigen::Matrix3d::Identity();
+
+        rt_to_tr.block<3, 3>(3, 0) =
+            Eigen::Matrix3d::Identity();
+
+        Eigen::Matrix<double, 6, 6> covariance_tr =
+            rt_to_tr *
+            covariance_source_rt *
+            rt_to_tr.transpose();
+
+        covariance_tr =
+            0.5 *
+            (covariance_tr +
+             covariance_tr.transpose());
+
+        if (!covariance_tr.allFinite())
+        {
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 1> confidence_tr =
+            Eigen::Matrix<double, 6, 1>::Ones();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            const double variance =
+                covariance_tr(i, i);
+
+            if (!std::isfinite(variance) ||
+                variance <= 0.0)
+            {
+                return false;
+            }
+
+            confidence_tr(i) =
+                std::clamp(
+                    1.0 / variance,
+                    kLoopInformationMinimumDirectionalConfidence,
+                    1.0);
+        }
+
+        const double maximum_confidence =
+            confidence_tr.maxCoeff();
+
+        if (!std::isfinite(maximum_confidence) ||
+            maximum_confidence <= 0.0)
+        {
+            return false;
+        }
+
+        confidence_tr /=
+            maximum_confidence;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            confidence_tr(i) =
+                std::clamp(
+                    confidence_tr(i),
+                    kLoopInformationMinimumDirectionalConfidence,
+                    1.0);
+        }
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            covariance_solver(
+                covariance_tr);
+
+        if (covariance_solver.info() != Eigen::Success ||
+            !covariance_solver.eigenvalues().allFinite() ||
+            covariance_solver.eigenvalues().minCoeff() <= 1.0e-12)
+        {
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6> inverse_covariance_eigenvalues =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            inverse_covariance_eigenvalues(i, i) =
+                1.0 /
+                covariance_solver.eigenvalues()(i);
+        }
+
+        Eigen::Matrix<double, 6, 6> precision_shape =
+            covariance_solver.eigenvectors() *
+            inverse_covariance_eigenvalues *
+            covariance_solver.eigenvectors().transpose();
+
+        precision_shape =
+            0.5 *
+            (precision_shape +
+             precision_shape.transpose());
+
+        if (!precision_shape.allFinite())
+        {
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6> standardized_precision =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            if (!std::isfinite(precision_shape(i, i)) ||
+                precision_shape(i, i) <= 0.0)
+            {
+                return false;
+            }
+
+            for (int j = 0;
+                 j < 6;
+                 ++j)
+            {
+                if (!std::isfinite(precision_shape(j, j)) ||
+                    precision_shape(j, j) <= 0.0)
+                {
+                    return false;
+                }
+
+                const double denominator =
+                    std::sqrt(
+                        precision_shape(i, i) *
+                        precision_shape(j, j));
+
+                if (!std::isfinite(denominator) ||
+                    denominator <= 0.0)
+                {
+                    return false;
+                }
+
+                standardized_precision(i, j) =
+                    precision_shape(i, j) /
+                    denominator;
+            }
+        }
+
+        standardized_precision =
+            0.5 *
+            (standardized_precision +
+             standardized_precision.transpose());
+
+        Eigen::Matrix<double, 6, 6> confidence_scale =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            confidence_scale(i, i) =
+                std::sqrt(
+                    confidence_tr(i));
+        }
+
+        information =
+            confidence_scale *
+            standardized_precision *
+            confidence_scale;
+
+        information =
+            0.5 *
+            (information +
+             information.transpose());
+
+        if (!information.allFinite())
+        {
+            information =
+                Eigen::Matrix<double, 6, 6>::Identity();
+            return false;
+        }
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            information_solver(
+                information,
+                Eigen::EigenvaluesOnly);
+
+        if (information_solver.info() != Eigen::Success ||
+            !information_solver.eigenvalues().allFinite() ||
+            information_solver.eigenvalues().minCoeff() <= 1.0e-9)
+        {
+            information =
+                Eigen::Matrix<double, 6, 6>::Identity();
+            return false;
+        }
+
+        return true;
+    }
+
+    // ========================================================================
+    // Loop Full 6x6 information helpers.
+    //
+    // Input/output convention:
+    //     order = [tx ty tz rx ry rz]
+    //     frame = current/to-node LiDAR frame
+    //
+    // The matrix is a relative information SHAPE, not a physical covariance.
+    // Global translation/rotation calibration (currently 1:30) remains in the
+    // PoseGraphOptimizer and is applied there by congruence scaling.
+    // ========================================================================
+    void ComputeLoopInformationStats(
+        const Eigen::Matrix<double, 6, 6> &information,
+        double &maximum_absolute_off_diagonal,
+        double &maximum_translation_rotation_coupling)
+    {
+        maximum_absolute_off_diagonal = 0.0;
+        maximum_translation_rotation_coupling = 0.0;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            for (int j = 0;
+                 j < 6;
+                 ++j)
+            {
+                if (i == j)
+                {
+                    continue;
+                }
+
+                const double absolute_value =
+                    std::abs(
+                        information(i, j));
+
+                maximum_absolute_off_diagonal =
+                    std::max(
+                        maximum_absolute_off_diagonal,
+                        absolute_value);
+
+                const bool translation_rotation_pair =
+                    (i < 3 && j >= 3) ||
+                    (i >= 3 && j < 3);
+
+                if (translation_rotation_pair)
+                {
+                    maximum_translation_rotation_coupling =
+                        std::max(
+                            maximum_translation_rotation_coupling,
+                            absolute_value);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // Ground ICP V1: Trusted Support soft reweighting for realtime frontend.
+    //
+    // Design rules:
+    //   1. Ground V4.0 remains the trust gate.  support_plane_valid alone is
+    //      NEVER sufficient.
+    //   2. The learned LiDAR-to-support clearance anchor is ONLY a confidence
+    //      gate/weight.  It is NOT an optimization residual and therefore does
+    //      not force a fixed sensor height or fixed World-Z.
+    //   3. The actual residual is still LiDAR geometry:
+    //          current trusted support point -> LocalMap target plane.
+    //   4. Ground correspondences are added as a bounded soft boost to the
+    //      existing all-scene point-to-plane objective.
+    //   5. Backend refinement / loop closure / Gravity Guard are untouched.
+    // ========================================================================
+
+    struct GroundIcpRuntime
+    {
+        explicit GroundIcpRuntime(
+            const LidarRegistrationConfig &config)
+            : registration_config(config)
+        {
+            const char *enable_env =
+                std::getenv("FR_SLAM_GROUND_ICP_ENABLE");
+
+            if (enable_env != nullptr)
+            {
+                const std::string value(enable_env);
+
+                enabled =
+                    !(value == "0" ||
+                      value == "false" ||
+                      value == "FALSE" ||
+                      value == "off" ||
+                      value == "OFF");
+            }
+        }
+
+        fr_slam::GroundSegmenter segmenter;
+        LidarRegistrationConfig registration_config;
+
+        bool enabled = true;
+
+        // Ground V4.0 was validated on a dedicated 0.15 m analysis voxel.
+        // Keep that operating point even though the dense branch itself is the
+        // Basic/ROI cloud (~8k-12k points on the current MID-360 data).
+        double analysis_voxel_leaf_m = 0.15;
+
+        // Extra information multiplier applied to trusted support
+        // correspondences.  The actual frame weight is:
+        //
+        //   base_weight * confidence^2 * anchor_factor
+        //
+        // so borderline valid frames remain deliberately weak.
+        double base_weight = 4.0;
+
+        std::size_t maximum_support_points = 160;
+        std::size_t minimum_ground_correspondences = 30;
+
+        double target_normal_compatibility_deg = 20.0;
+        double ground_maximum_residual_m = 0.15;
+        double ground_huber_delta_m = 0.05;
+
+        int maximum_refinement_iterations = 2;
+
+        // Safety envelope for the EXTRA correction relative to the original
+        // accepted Scan-to-LocalMap result.
+        double maximum_total_rotation_correction_deg = 0.50;
+        double maximum_total_translation_correction_m = 0.030;
+
+        // The ordinary all-scene ICP objective is the guardrail.  A Ground
+        // step may not meaningfully degrade it just to improve support points.
+        double maximum_general_rmse_ratio = 1.03;
+        double maximum_general_rmse_absolute_increase_m = 0.002;
+        double minimum_general_correspondence_ratio = 0.85;
+    };
+
+    struct GroundIcpLinearization
+    {
+        Eigen::Matrix<double, 6, 6> H =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        Eigen::Matrix<double, 6, 1> b =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        std::size_t general_correspondences = 0;
+        std::size_t ground_correspondences = 0;
+
+        std::size_t general_downweighted_correspondences = 0;
+        double general_min_robust_weight = 1.0;
+
+        double general_raw_squared_error_sum = 0.0;
+        double general_weighted_squared_error_sum = 0.0;
+        double general_weight_sum = 0.0;
+
+        double ground_raw_squared_error_sum = 0.0;
+        double ground_weighted_squared_error_sum = 0.0;
+        double ground_weight_sum = 0.0;
+
+        std::vector<double> correspondence_ranges;
+
+        double GeneralRmse() const
+        {
+            if (general_correspondences == 0)
+            {
+                return std::numeric_limits<double>::infinity();
+            }
+
+            return std::sqrt(
+                general_raw_squared_error_sum /
+                static_cast<double>(general_correspondences));
+        }
+
+        double GroundRmse() const
+        {
+            if (ground_correspondences == 0)
+            {
+                return std::numeric_limits<double>::infinity();
+            }
+
+            return std::sqrt(
+                ground_raw_squared_error_sum /
+                static_cast<double>(ground_correspondences));
+        }
+
+        double CombinedWeightedMeanSquaredError() const
+        {
+            const double total_weight =
+                general_weight_sum +
+                ground_weight_sum;
+
+            if (!std::isfinite(total_weight) ||
+                total_weight <= 1.0e-12)
+            {
+                return std::numeric_limits<double>::infinity();
+            }
+
+            return
+                (general_weighted_squared_error_sum +
+                 ground_weighted_squared_error_sum) /
+                total_weight;
+        }
+    };
+
+    std::mutex &GroundIcpRuntimeMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    std::unordered_map<
+        const RegistrationScan2LocalMap *,
+        std::unique_ptr<GroundIcpRuntime>> &
+    GroundIcpRuntimeMap()
+    {
+        static std::unordered_map<
+            const RegistrationScan2LocalMap *,
+            std::unique_ptr<GroundIcpRuntime>> runtime_map;
+
+        return runtime_map;
+    }
+
+    GroundIcpRuntime *RegisterGroundIcpRuntime(
+        const RegistrationScan2LocalMap *owner,
+        const LidarRegistrationConfig &registration_config)
+    {
+        if (owner == nullptr)
+        {
+            return nullptr;
+        }
+
+        std::lock_guard<std::mutex> lock(
+            GroundIcpRuntimeMutex());
+
+        std::unique_ptr<GroundIcpRuntime> runtime =
+            std::make_unique<GroundIcpRuntime>(
+                registration_config);
+
+        GroundIcpRuntime *runtime_pointer =
+            runtime.get();
+
+        GroundIcpRuntimeMap()[owner] =
+            std::move(runtime);
+
+        return runtime_pointer;
+    }
+
+    GroundIcpRuntime *GetGroundIcpRuntime(
+        const RegistrationScan2LocalMap *owner)
+    {
+        std::lock_guard<std::mutex> lock(
+            GroundIcpRuntimeMutex());
+
+        const auto iterator =
+            GroundIcpRuntimeMap().find(owner);
+
+        if (iterator == GroundIcpRuntimeMap().end())
+        {
+            return nullptr;
+        }
+
+        return iterator->second.get();
+    }
+
+    void ResetGroundIcpRuntime(
+        const RegistrationScan2LocalMap *owner)
+    {
+        GroundIcpRuntime *runtime =
+            GetGroundIcpRuntime(owner);
+
+        if (runtime != nullptr)
+        {
+            runtime->segmenter.Reset();
+        }
+    }
+
+    void RemoveGroundIcpRuntime(
+        const RegistrationScan2LocalMap *owner)
+    {
+        std::lock_guard<std::mutex> lock(
+            GroundIcpRuntimeMutex());
+
+        GroundIcpRuntimeMap().erase(owner);
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr
+    ConvertToGroundAnalysisCloud(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_xyz(
+            new pcl::PointCloud<pcl::PointXYZ>);
+
+        if (!cloud_lidar)
+        {
+            return cloud_xyz;
+        }
+
+        cloud_xyz->reserve(
+            cloud_lidar->size());
+
+        for (const LIDAR_POINT &point :
+             cloud_lidar->points)
+        {
+            if (!std::isfinite(point.x) ||
+                !std::isfinite(point.y) ||
+                !std::isfinite(point.z))
+            {
+                continue;
+            }
+
+            pcl::PointXYZ point_xyz;
+            point_xyz.x = point.x;
+            point_xyz.y = point.y;
+            point_xyz.z = point.z;
+
+            cloud_xyz->push_back(
+                point_xyz);
+        }
+
+        cloud_xyz->width =
+            static_cast<std::uint32_t>(
+                cloud_xyz->size());
+
+        cloud_xyz->height = 1;
+        cloud_xyz->is_dense = true;
+
+        return cloud_xyz;
+    }
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr
+    VoxelizeGroundAnalysisCloud(
+        const pcl::PointCloud<pcl::PointXYZ>::ConstPtr &cloud,
+        double leaf_size_m)
+    {
+        pcl::PointCloud<pcl::PointXYZ>::Ptr filtered(
+            new pcl::PointCloud<pcl::PointXYZ>);
+
+        if (!cloud ||
+            cloud->empty())
+        {
+            return filtered;
+        }
+
+        if (!std::isfinite(leaf_size_m) ||
+            leaf_size_m <= 0.0)
+        {
+            *filtered = *cloud;
+            return filtered;
+        }
+
+        pcl::VoxelGrid<pcl::PointXYZ> voxel;
+        voxel.setInputCloud(cloud);
+
+        const float leaf =
+            static_cast<float>(leaf_size_m);
+
+        voxel.setLeafSize(
+            leaf,
+            leaf,
+            leaf);
+
+        voxel.filter(*filtered);
+
+        return filtered;
+    }
+
+    fr_slam::GroundSegmentationResult
+    SegmentFrontendGround(
+        const RegistrationScan2LocalMap *owner,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+        const char *input_source)
+    {
+        fr_slam::GroundSegmentationResult result;
+
+        GroundIcpRuntime *runtime =
+            GetGroundIcpRuntime(owner);
+
+        if (runtime == nullptr ||
+            !runtime->enabled)
+        {
+            return result;
+        }
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_xyz =
+            ConvertToGroundAnalysisCloud(
+                cloud_lidar);
+
+        const pcl::PointCloud<pcl::PointXYZ>::Ptr analysis_cloud =
+            VoxelizeGroundAnalysisCloud(
+                cloud_xyz,
+                runtime->analysis_voxel_leaf_m);
+
+        result =
+            runtime->segmenter.Segment(
+                analysis_cloud);
+
+        std::cout
+            << "GROUND_ICP"
+            << " | stage=SEGMENT"
+            << " | input_source="
+            << (input_source != nullptr
+                    ? input_source
+                    : "UNKNOWN")
+            << " | input_raw="
+            << (cloud_lidar
+                    ? cloud_lidar->size()
+                    : 0UL)
+            << " | analysis_voxel="
+            << runtime->analysis_voxel_leaf_m
+            << " | input=" << result.input_points
+            << " | ground_pts=" << result.ground_points
+            << " | support_pts=" << result.support_ground_points
+            << " | support="
+            << (result.support_plane_valid ? "VALID" : "INVALID")
+            << " | constraint="
+            << (result.support_constraint_valid ? "VALID" : "INVALID")
+            << " | conf="
+            << result.support_constraint_confidence
+            << " | anchor="
+            << (result.support_clearance_anchor_valid ? "READY" : "BOOTSTRAP")
+            << " | anchor_err="
+            << result.support_clearance_error_m
+            << " | anchor_tol="
+            << result.support_clearance_anchor_tolerance_m
+            << std::endl;
+
+        return result;
+    }
+
+    double GroundIcpAnchorFactor(
+        const fr_slam::GroundSegmentationResult &ground_result)
+    {
+        if (!ground_result.support_clearance_anchor_valid ||
+            !std::isfinite(
+                ground_result.support_clearance_error_m) ||
+            !std::isfinite(
+                ground_result.support_clearance_anchor_tolerance_m) ||
+            ground_result.support_clearance_anchor_tolerance_m <= 0.0)
+        {
+            return 1.0;
+        }
+
+        // A trusted frame sitting near the outer hard anchor gate should not
+        // suddenly obtain the same optimizer strength as a frame centered on
+        // the learned clearance distribution.
+        const double sigma_m =
+            std::max(
+                0.025,
+                0.5 *
+                    ground_result
+                        .support_clearance_anchor_tolerance_m);
+
+        const double normalized_error =
+            ground_result.support_clearance_error_m /
+            sigma_m;
+
+        return std::exp(
+            -0.5 *
+            normalized_error *
+            normalized_error);
+    }
+
+    double ComputeGroundIcpWeight(
+        const GroundIcpRuntime &runtime,
+        const fr_slam::GroundSegmentationResult &ground_result)
+    {
+        const double confidence =
+            std::clamp(
+                ground_result.support_constraint_confidence,
+                0.0,
+                1.0);
+
+        const double anchor_factor =
+            GroundIcpAnchorFactor(
+                ground_result);
+
+        return std::clamp(
+            runtime.base_weight *
+                confidence *
+                confidence *
+                anchor_factor,
+            0.0,
+            runtime.base_weight);
+    }
+
+
+    bool BuildGroundIcpLinearization(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source,
+        const PreparedLidarTarget &target,
+        const Eigen::Isometry3d &T_target_source,
+        const fr_slam::GroundSegmentationResult &ground_result,
+        const GroundIcpRuntime &runtime,
+        double ground_information_weight,
+        GroundIcpLinearization &linearization)
+    {
+        linearization =
+            GroundIcpLinearization();
+
+        if (!source ||
+            source->empty() ||
+            !target.ready ||
+            !target.cloud ||
+            target.cloud->empty() ||
+            !target.kdtree ||
+            target.planes.size() != target.cloud->size() ||
+            !T_target_source.matrix().allFinite())
+        {
+            return false;
+        }
+
+        const LidarRegistrationConfig &config =
+            runtime.registration_config;
+
+        if (config.knn <= 0)
+        {
+            return false;
+        }
+
+        const double maximum_correspondence_distance_squared =
+            config.max_correspondence_distance *
+            config.max_correspondence_distance;
+
+        std::vector<int> neighbor_indices(
+            static_cast<std::size_t>(config.knn));
+
+        std::vector<float> neighbor_squared_distances(
+            static_cast<std::size_t>(config.knn));
+
+        const Eigen::Vector3d sensor_origin_target =
+            T_target_source.translation();
+
+        const bool use_sensor_centered =
+            config.enable_sensor_centered_perturbation;
+
+        const bool use_hessian_scale_normalization =
+            config.enable_sensor_centered_perturbation &&
+            config.enable_hessian_scale_normalization;
+
+        if (use_hessian_scale_normalization)
+        {
+            linearization.correspondence_ranges.reserve(
+                source->size());
+        }
+
+        // --------------------------------------------------------------------
+        // A. Existing all-scene point-to-plane objective.
+        // --------------------------------------------------------------------
+        for (const LIDAR_POINT &source_point :
+             source->points)
+        {
+            const Eigen::Vector3d p_source(
+                static_cast<double>(source_point.x),
+                static_cast<double>(source_point.y),
+                static_cast<double>(source_point.z));
+
+            if (!p_source.allFinite())
+            {
+                continue;
+            }
+
+            const Eigen::Vector3d p_target =
+                T_target_source *
+                p_source;
+
+            LIDAR_POINT query_point{};
+            query_point.x =
+                static_cast<float>(p_target.x());
+            query_point.y =
+                static_cast<float>(p_target.y());
+            query_point.z =
+                static_cast<float>(p_target.z());
+
+            const int found =
+                target.kdtree->nearestKSearch(
+                    query_point,
+                    config.knn,
+                    neighbor_indices,
+                    neighbor_squared_distances);
+
+            if (found <= 0)
+            {
+                continue;
+            }
+
+            int plane_index = -1;
+
+            for (int j = 0;
+                 j < found;
+                 ++j)
+            {
+                const double neighbor_distance_squared =
+                    static_cast<double>(
+                        neighbor_squared_distances[
+                            static_cast<std::size_t>(j)]);
+
+                if (neighbor_distance_squared >
+                    maximum_correspondence_distance_squared)
+                {
+                    break;
+                }
+
+                const int candidate_index =
+                    neighbor_indices[
+                        static_cast<std::size_t>(j)];
+
+                if (candidate_index < 0)
+                {
+                    continue;
+                }
+
+                const std::size_t candidate =
+                    static_cast<std::size_t>(
+                        candidate_index);
+
+                if (candidate >= target.planes.size() ||
+                    target.planes[candidate].state !=
+                        TargetPlane::State::Valid)
+                {
+                    continue;
+                }
+
+                plane_index =
+                    candidate_index;
+
+                break;
+            }
+
+            if (plane_index < 0)
+            {
+                continue;
+            }
+
+            const TargetPlane &plane =
+                target.planes[
+                    static_cast<std::size_t>(
+                        plane_index)];
+
+            const double residual =
+                plane.normal.dot(
+                    p_target -
+                    plane.point);
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) >
+                    config.max_point_to_plane_distance)
+            {
+                continue;
+            }
+
+            Eigen::Matrix<double, 1, 6> J;
+
+            if (use_sensor_centered)
+            {
+                const Eigen::Vector3d lever_arm_target =
+                    p_target -
+                    sensor_origin_target;
+
+                J.block<1, 3>(0, 0) =
+                    lever_arm_target.cross(
+                        plane.normal).transpose();
+
+                if (use_hessian_scale_normalization)
+                {
+                    const double lever_arm_range =
+                        lever_arm_target.norm();
+
+                    if (std::isfinite(lever_arm_range) &&
+                        lever_arm_range > 1.0e-9)
+                    {
+                        linearization
+                            .correspondence_ranges
+                            .push_back(
+                                lever_arm_range);
+                    }
+                }
+            }
+            else
+            {
+                J.block<1, 3>(0, 0) =
+                    p_target.cross(
+                        plane.normal).transpose();
+            }
+
+            J.block<1, 3>(0, 3) =
+                plane.normal.transpose();
+
+            double robust_weight =
+                1.0;
+
+            const double absolute_residual =
+                std::abs(residual);
+
+            if (config.enable_huber_loss &&
+                absolute_residual >
+                    config.huber_delta)
+            {
+                robust_weight =
+                    config.huber_delta /
+                    absolute_residual;
+
+                ++linearization
+                      .general_downweighted_correspondences;
+            }
+
+            linearization.general_min_robust_weight =
+                std::min(
+                    linearization.general_min_robust_weight,
+                    robust_weight);
+
+            linearization.H.noalias() +=
+                robust_weight *
+                J.transpose() *
+                J;
+
+            linearization.b.noalias() +=
+                robust_weight *
+                J.transpose() *
+                residual;
+
+            linearization.general_raw_squared_error_sum +=
+                residual *
+                residual;
+
+            linearization.general_weighted_squared_error_sum +=
+                robust_weight *
+                residual *
+                residual;
+
+            linearization.general_weight_sum +=
+                robust_weight;
+
+            ++linearization.general_correspondences;
+        }
+
+        // --------------------------------------------------------------------
+        // B. Trusted Ground V4.0 extra point-to-plane information.
+        //
+        // Important: this is NOT residual(distance_to_anchor).  Ground points
+        // are matched against ACTUAL LocalMap planes.  The source support normal
+        // is used only to prevent an accidental support-point -> wall match.
+        // --------------------------------------------------------------------
+        if (!ground_result.support_constraint_valid ||
+            !ground_result.support_plane_valid ||
+            !ground_result.support_ground_cloud ||
+            ground_result.support_ground_cloud->empty() ||
+            ground_information_weight <= 1.0e-9)
+        {
+            return
+                linearization.general_correspondences > 0;
+        }
+
+        Eigen::Vector3d support_normal_source =
+            ground_result.support_ground_normal_L;
+
+        const double support_normal_norm =
+            support_normal_source.norm();
+
+        if (!support_normal_source.allFinite() ||
+            !std::isfinite(support_normal_norm) ||
+            support_normal_norm <= 1.0e-12)
+        {
+            return
+                linearization.general_correspondences > 0;
+        }
+
+        support_normal_source /=
+            support_normal_norm;
+
+        Eigen::Vector3d support_normal_target =
+            T_target_source.rotation() *
+            support_normal_source;
+
+        const double support_normal_target_norm =
+            support_normal_target.norm();
+
+        if (!support_normal_target.allFinite() ||
+            !std::isfinite(support_normal_target_norm) ||
+            support_normal_target_norm <= 1.0e-12)
+        {
+            return
+                linearization.general_correspondences > 0;
+        }
+
+        support_normal_target /=
+            support_normal_target_norm;
+
+        constexpr double kPi =
+            3.14159265358979323846;
+
+        const double normal_cosine_threshold =
+            std::cos(
+                runtime.target_normal_compatibility_deg *
+                kPi /
+                180.0);
+
+        const std::size_t support_size =
+            ground_result.support_ground_cloud->size();
+
+        const std::size_t stride =
+            std::max<std::size_t>(
+                1,
+                (support_size +
+                 runtime.maximum_support_points -
+                 1) /
+                    std::max<std::size_t>(
+                        1,
+                        runtime.maximum_support_points));
+
+        for (std::size_t point_index = 0;
+             point_index < support_size;
+             point_index += stride)
+        {
+            const pcl::PointXYZ &source_point =
+                ground_result
+                    .support_ground_cloud
+                    ->points[point_index];
+
+            const Eigen::Vector3d p_source(
+                static_cast<double>(source_point.x),
+                static_cast<double>(source_point.y),
+                static_cast<double>(source_point.z));
+
+            if (!p_source.allFinite())
+            {
+                continue;
+            }
+
+            const Eigen::Vector3d p_target =
+                T_target_source *
+                p_source;
+
+            LIDAR_POINT query_point{};
+            query_point.x =
+                static_cast<float>(p_target.x());
+            query_point.y =
+                static_cast<float>(p_target.y());
+            query_point.z =
+                static_cast<float>(p_target.z());
+
+            const int found =
+                target.kdtree->nearestKSearch(
+                    query_point,
+                    config.knn,
+                    neighbor_indices,
+                    neighbor_squared_distances);
+
+            if (found <= 0)
+            {
+                continue;
+            }
+
+            int plane_index = -1;
+
+            for (int j = 0;
+                 j < found;
+                 ++j)
+            {
+                const double neighbor_distance_squared =
+                    static_cast<double>(
+                        neighbor_squared_distances[
+                            static_cast<std::size_t>(j)]);
+
+                if (neighbor_distance_squared >
+                    maximum_correspondence_distance_squared)
+                {
+                    break;
+                }
+
+                const int candidate_index =
+                    neighbor_indices[
+                        static_cast<std::size_t>(j)];
+
+                if (candidate_index < 0)
+                {
+                    continue;
+                }
+
+                const std::size_t candidate =
+                    static_cast<std::size_t>(
+                        candidate_index);
+
+                if (candidate >= target.planes.size() ||
+                    target.planes[candidate].state !=
+                        TargetPlane::State::Valid)
+                {
+                    continue;
+                }
+
+                const TargetPlane &candidate_plane =
+                    target.planes[candidate];
+
+                const double normal_alignment =
+                    std::abs(
+                        candidate_plane.normal.dot(
+                            support_normal_target));
+
+                if (!std::isfinite(normal_alignment) ||
+                    normal_alignment <
+                        normal_cosine_threshold)
+                {
+                    continue;
+                }
+
+                plane_index =
+                    candidate_index;
+
+                break;
+            }
+
+            if (plane_index < 0)
+            {
+                continue;
+            }
+
+            const TargetPlane &plane =
+                target.planes[
+                    static_cast<std::size_t>(
+                        plane_index)];
+
+            const double residual =
+                plane.normal.dot(
+                    p_target -
+                    plane.point);
+
+            if (!std::isfinite(residual) ||
+                std::abs(residual) >
+                    runtime.ground_maximum_residual_m)
+            {
+                continue;
+            }
+
+            Eigen::Matrix<double, 1, 6> J;
+
+            if (use_sensor_centered)
+            {
+                const Eigen::Vector3d lever_arm_target =
+                    p_target -
+                    sensor_origin_target;
+
+                J.block<1, 3>(0, 0) =
+                    lever_arm_target.cross(
+                        plane.normal).transpose();
+            }
+            else
+            {
+                J.block<1, 3>(0, 0) =
+                    p_target.cross(
+                        plane.normal).transpose();
+            }
+
+            J.block<1, 3>(0, 3) =
+                plane.normal.transpose();
+
+            // Ground observable-subspace projection.
+            // Parameter order is [rx ry rz tx ty tz].
+            // Ground is allowed to add direct information ONLY to
+            // roll / pitch / z.  General ICP remains full 6-DoF.
+            J(0, 2) = 0.0; // yaw
+            J(0, 3) = 0.0; // x
+            J(0, 4) = 0.0; // y
+
+            double ground_robust_weight =
+                1.0;
+
+            const double absolute_residual =
+                std::abs(residual);
+
+            if (absolute_residual >
+                runtime.ground_huber_delta_m)
+            {
+                ground_robust_weight =
+                    runtime.ground_huber_delta_m /
+                    absolute_residual;
+            }
+
+            const double final_weight =
+                ground_information_weight *
+                ground_robust_weight;
+
+            linearization.H.noalias() +=
+                final_weight *
+                J.transpose() *
+                J;
+
+            linearization.b.noalias() +=
+                final_weight *
+                J.transpose() *
+                residual;
+
+            linearization.ground_raw_squared_error_sum +=
+                residual *
+                residual;
+
+            linearization.ground_weighted_squared_error_sum +=
+                final_weight *
+                residual *
+                residual;
+
+            linearization.ground_weight_sum +=
+                final_weight;
+
+            ++linearization.ground_correspondences;
+        }
+
+        return
+            linearization.general_correspondences > 0;
+    }
+
+    bool ComputeGroundIcpParameterUnscale(
+        const GroundIcpLinearization &linearization,
+        const LidarRegistrationConfig &config,
+        Eigen::Matrix<double, 6, 6> &parameter_unscale,
+        double &characteristic_length)
+    {
+        parameter_unscale =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        characteristic_length =
+            1.0;
+
+        const bool use_hessian_scale_normalization =
+            config.enable_sensor_centered_perturbation &&
+            config.enable_hessian_scale_normalization;
+
+        if (!use_hessian_scale_normalization)
+        {
+            return true;
+        }
+
+        if (linearization.correspondence_ranges.empty())
+        {
+            return false;
+        }
+
+        std::vector<double> ranges =
+            linearization.correspondence_ranges;
+
+        const std::size_t range_count =
+            ranges.size();
+
+        std::vector<double>::iterator middle =
+            ranges.begin() +
+            static_cast<std::ptrdiff_t>(
+                range_count / 2);
+
+        std::nth_element(
+            ranges.begin(),
+            middle,
+            ranges.end());
+
+        double median_range =
+            *middle;
+
+        if ((range_count % 2U) == 0U)
+        {
+            const std::vector<double>::iterator lower_middle =
+                std::max_element(
+                    ranges.begin(),
+                    middle);
+
+            if (lower_middle != middle)
+            {
+                median_range =
+                    0.5 *
+                    (median_range +
+                     *lower_middle);
+            }
+        }
+
+        if (!std::isfinite(median_range) ||
+            median_range <= 0.0)
+        {
+            return false;
+        }
+
+        characteristic_length =
+            std::clamp(
+                median_range,
+                config.hessian_scale_min_range,
+                config.hessian_scale_max_range);
+
+        const double inverse_length =
+            1.0 /
+            characteristic_length;
+
+        parameter_unscale(0, 0) =
+            inverse_length;
+
+        parameter_unscale(1, 1) =
+            inverse_length;
+
+        parameter_unscale(2, 2) =
+            inverse_length;
+
+        return true;
+    }
+
+    bool SolveGroundIcpStep(
+        const GroundIcpLinearization &linearization,
+        const LidarRegistrationConfig &config,
+        Eigen::Matrix<double, 6, 1> &dx,
+        Eigen::Matrix<double, 6, 6> *final_H_analysis = nullptr,
+        Eigen::Matrix<double, 6, 6> *final_parameter_unscale = nullptr)
+    {
+        dx =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        Eigen::Matrix<double, 6, 6> parameter_unscale;
+        double characteristic_length = 1.0;
+
+        if (!ComputeGroundIcpParameterUnscale(
+                linearization,
+                config,
+                parameter_unscale,
+                characteristic_length))
+        {
+            return false;
+        }
+
+        (void)characteristic_length;
+
+        const Eigen::Matrix<double, 6, 6> H_analysis =
+            parameter_unscale.transpose() *
+            linearization.H *
+            parameter_unscale;
+
+        const Eigen::Matrix<double, 6, 1> b_analysis =
+            parameter_unscale.transpose() *
+            linearization.b;
+
+        if (!H_analysis.allFinite() ||
+            !b_analysis.allFinite())
+        {
+            return false;
+        }
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            eigen_solver(
+                H_analysis);
+
+        if (eigen_solver.info() !=
+            Eigen::Success)
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> eigenvalues =
+            eigen_solver.eigenvalues();
+
+        const Eigen::Matrix<double, 6, 6> eigenvectors =
+            eigen_solver.eigenvectors();
+
+        if (!eigenvalues.allFinite() ||
+            !eigenvectors.allFinite())
+        {
+            return false;
+        }
+
+        const double lambda_max =
+            eigenvalues(5);
+
+        if (!std::isfinite(lambda_max) ||
+            lambda_max <=
+                config.degeneracy_absolute_eigenvalue_threshold)
+        {
+            return false;
+        }
+
+        const bool use_hessian_scale_normalization =
+            config.enable_sensor_centered_perturbation &&
+            config.enable_hessian_scale_normalization;
+
+        const double hard_relative_threshold =
+            use_hessian_scale_normalization
+                ? 0.01
+                : config.degeneracy_relative_eigenvalue_threshold;
+
+        const Eigen::Matrix<double, 6, 1> relative_eigenvalues =
+            eigenvalues /
+            lambda_max;
+
+        const Eigen::Matrix<double, 6, 1> gradient_eigen =
+            eigenvectors.transpose() *
+            b_analysis;
+
+        Eigen::Matrix<double, 6, 1> delta_eigen =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        int usable_directions = 0;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            const double lambda =
+                eigenvalues(i);
+
+            const double relative_lambda =
+                relative_eigenvalues(i);
+
+            const bool strong_degenerate =
+                !std::isfinite(lambda) ||
+                lambda <=
+                    config.degeneracy_absolute_eigenvalue_threshold ||
+                !std::isfinite(relative_lambda) ||
+                relative_lambda <
+                    hard_relative_threshold;
+
+            if (strong_degenerate)
+            {
+                continue;
+            }
+
+            delta_eigen(i) =
+                -gradient_eigen(i) /
+                lambda;
+
+            ++usable_directions;
+        }
+
+        if (usable_directions <= 0)
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> delta_analysis =
+            eigenvectors *
+            delta_eigen;
+
+        dx =
+            parameter_unscale *
+            delta_analysis;
+
+        if (!dx.allFinite())
+        {
+            return false;
+        }
+
+        if (final_H_analysis != nullptr)
+        {
+            *final_H_analysis =
+                H_analysis;
+        }
+
+        if (final_parameter_unscale != nullptr)
+        {
+            *final_parameter_unscale =
+                parameter_unscale;
+        }
+
+        return true;
+    }
+
+    Eigen::Isometry3d ApplyGroundIcpIncrement(
+        const Eigen::Isometry3d &T_target_source,
+        const Eigen::Matrix<double, 6, 1> &dx,
+        const LidarRegistrationConfig &config)
+    {
+        Eigen::Isometry3d updated_pose =
+            T_target_source;
+
+        const Eigen::Vector3d delta_rotation =
+            dx.head<3>();
+
+        const Eigen::Vector3d delta_translation =
+            dx.tail<3>();
+
+        const Eigen::Matrix3d delta_R =
+            Sophus::SO3d::exp(
+                delta_rotation).matrix();
+
+        if (config.enable_sensor_centered_perturbation)
+        {
+            updated_pose.linear() =
+                delta_R *
+                updated_pose.rotation();
+
+            updated_pose.translation() +=
+                delta_translation;
+        }
+        else
+        {
+            Eigen::Isometry3d delta_T =
+                Eigen::Isometry3d::Identity();
+
+            delta_T.linear() =
+                delta_R;
+
+            delta_T.translation() =
+                delta_translation;
+
+            updated_pose =
+                delta_T *
+                updated_pose;
+        }
+
+        return updated_pose;
+    }
+
+    bool UpdateGroundIcpRelativeCovariance(
+        const GroundIcpLinearization &linearization,
+        const LidarRegistrationConfig &config,
+        LidarRegistrationResult &result)
+    {
+        const bool use_hessian_scale_normalization =
+            config.enable_sensor_centered_perturbation &&
+            config.enable_hessian_scale_normalization;
+
+        if (!use_hessian_scale_normalization)
+        {
+            return false;
+        }
+
+        Eigen::Matrix<double, 6, 6> parameter_unscale;
+        double characteristic_length = 1.0;
+
+        if (!ComputeGroundIcpParameterUnscale(
+                linearization,
+                config,
+                parameter_unscale,
+                characteristic_length))
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 6> H_analysis =
+            parameter_unscale.transpose() *
+            linearization.H *
+            parameter_unscale;
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            eigen_solver(
+                H_analysis);
+
+        if (eigen_solver.info() !=
+                Eigen::Success ||
+            !eigen_solver.eigenvalues().allFinite() ||
+            !eigen_solver.eigenvectors().allFinite())
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> eigenvalues =
+            eigen_solver.eigenvalues();
+
+        const double lambda_max =
+            eigenvalues(5);
+
+        if (!std::isfinite(lambda_max) ||
+            lambda_max <=
+                config.degeneracy_absolute_eigenvalue_threshold)
+        {
+            return false;
+        }
+
+        const Eigen::Matrix<double, 6, 1> relative_eigenvalues =
+            eigenvalues /
+            lambda_max;
+
+        Eigen::Matrix<double, 6, 6> relative_covariance =
+            Eigen::Matrix<double, 6, 6>::Zero();
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            if (!std::isfinite(
+                    relative_eigenvalues(i)))
+            {
+                return false;
+            }
+
+            const double relative_information =
+                std::clamp(
+                    relative_eigenvalues(i),
+                    0.01,
+                    1.0);
+
+            const Eigen::Matrix<double, 6, 1> direction =
+                eigen_solver.eigenvectors().col(i);
+
+            relative_covariance.noalias() +=
+                (1.0 /
+                 relative_information) *
+                direction *
+                direction.transpose();
+        }
+
+        relative_covariance =
+            0.5 *
+            (relative_covariance +
+             relative_covariance.transpose());
+
+        if (!relative_covariance.allFinite())
+        {
+            return false;
+        }
+
+        result.hessian_relative_covariance =
+            relative_covariance;
+
+        result.hessian_relative_covariance_valid =
+            true;
+
+        return true;
+    }
+
+
+
+
+
+
+
+    // ========================================================================
+    // GROUND_ICP_V13_OBSERVABLE_SUBSPACE_JOINT
+    //
+    // Final frontend Ground design used in this branch:
+    //
+    //   E(T) = E_general_point_to_plane(T)
+    //        + Q_g * E_ground_point_to_local_ground(T)
+    //
+    // Ground V4 supplies the trusted support points and frame quality Q_g.
+    // The historical reference is NOT one frozen world plane.  Each trusted
+    // support point is matched to a nearby, normal-compatible plane already
+    // present in the current Prepared LocalMap target.
+    //
+    // Most importantly, the Ground Jacobian is explicitly projected onto the
+    // physically observable ground subspace:
+    //
+    //       [rx, ry, rz, tx, ty, tz]
+    //        ^   ^                ^
+    //      roll pitch             z
+    //
+    // rz / tx / ty are set to zero for Ground residuals.  General ICP remains
+    // full 6-DoF and continues to estimate x/y/yaw from all scene geometry.
+    //
+    // Therefore BOTH objectives enter the SAME Gauss-Newton system:
+    //
+    //   H_total = H_general + H_ground
+    //   b_total = b_general + b_ground
+    //   H_total * dx = -b_total
+    //
+    // This removes the V1.2B global frozen-height assumption while keeping the
+    // desired quality-weighted roll/pitch/z Ground information.
+    // ========================================================================
+
+    enum class GroundJointIcpStatus
+    {
+        NotEligible,
+        Success,
+        Failed
+    };
+
+    GroundJointIcpStatus RunTrustedGroundJointIcpV12(
+        const RegistrationScan2LocalMap *owner,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source,
+        const PreparedLidarTarget &target,
+        const fr_slam::GroundSegmentationResult &ground_result,
+        const Eigen::Isometry3d &initial_guess,
+        LidarRegistrationResult &result)
+    {
+        result =
+            LidarRegistrationResult();
+
+        result.T_target_source =
+            initial_guess;
+
+        GroundIcpRuntime *runtime =
+            GetGroundIcpRuntime(owner);
+
+        if (runtime == nullptr ||
+            !runtime->enabled)
+        {
+            return GroundJointIcpStatus::NotEligible;
+        }
+
+        if (!ground_result.support_constraint_valid ||
+            !ground_result.support_plane_valid ||
+            !ground_result.support_ground_cloud ||
+            ground_result.support_ground_cloud->empty())
+        {
+            std::cout
+                << "GROUND_ICP_V13"
+                << " | stage=JOINT_SELECT"
+                << " | action=FALLBACK_GENERAL"
+                << " | reason=UNTRUSTED_SUPPORT"
+                << " | support="
+                << (ground_result.support_plane_valid
+                        ? "VALID"
+                        : "INVALID")
+                << " | constraint="
+                << (ground_result.support_constraint_valid
+                        ? "VALID"
+                        : "INVALID")
+                << " | quality="
+                << ground_result.support_constraint_confidence
+                << std::endl;
+
+            return GroundJointIcpStatus::NotEligible;
+        }
+
+        const double ground_information_weight =
+            ComputeGroundIcpWeight(
+                *runtime,
+                ground_result);
+
+        if (!std::isfinite(ground_information_weight) ||
+            ground_information_weight <= 1.0e-3)
+        {
+            std::cout
+                << "GROUND_ICP_V13"
+                << " | stage=JOINT_SELECT"
+                << " | action=FALLBACK_GENERAL"
+                << " | reason=LOW_EFFECTIVE_WEIGHT"
+                << " | quality="
+                << ground_result.support_constraint_confidence
+                << " | anchor_factor="
+                << GroundIcpAnchorFactor(ground_result)
+                << " | weight="
+                << ground_information_weight
+                << std::endl;
+
+            return GroundJointIcpStatus::NotEligible;
+        }
+
+        const LidarRegistrationConfig &config =
+            runtime->registration_config;
+
+        result.robust_kernel_enabled =
+            config.enable_huber_loss;
+
+        result.robust_kernel_delta =
+            config.huber_delta;
+
+        Eigen::Isometry3d current_pose =
+            initial_guess;
+
+        bool completed_iteration =
+            false;
+
+        for (int iteration = 0;
+             iteration < config.max_iterations;
+             ++iteration)
+        {
+            GroundIcpLinearization linearization;
+
+            // General Point-to-Plane + quality-weighted Ground residuals are
+            // assembled together here.  The Ground block inside
+            // BuildGroundIcpLinearization() has its Jacobian projected to
+            // [roll, pitch, z] only.
+            if (!BuildGroundIcpLinearization(
+                    source,
+                    target,
+                    current_pose,
+                    ground_result,
+                    *runtime,
+                    ground_information_weight,
+                    linearization))
+            {
+                std::cout
+                    << "GROUND_ICP_V13"
+                    << " | stage=JOINT_ITER"
+                    << " | iteration=" << iteration
+                    << " | action=FALLBACK_GENERAL"
+                    << " | reason=LINEARIZATION_FAILED"
+                    << std::endl;
+
+                return GroundJointIcpStatus::Failed;
+            }
+
+            if (linearization.general_correspondences <
+                config.min_correspondences)
+            {
+                std::cout
+                    << "GROUND_ICP_V13"
+                    << " | stage=JOINT_ITER"
+                    << " | iteration=" << iteration
+                    << " | action=FALLBACK_GENERAL"
+                    << " | reason=LOW_GENERAL_CORR"
+                    << " | general_corr="
+                    << linearization.general_correspondences
+                    << " | min="
+                    << config.min_correspondences
+                    << std::endl;
+
+                return GroundJointIcpStatus::Failed;
+            }
+
+            if (linearization.ground_correspondences <
+                runtime->minimum_ground_correspondences)
+            {
+                std::cout
+                    << "GROUND_ICP_V13"
+                    << " | stage=JOINT_ITER"
+                    << " | iteration=" << iteration
+                    << " | action=FALLBACK_GENERAL"
+                    << " | reason=LOW_GROUND_CORR"
+                    << " | ground_corr="
+                    << linearization.ground_correspondences
+                    << " | min="
+                    << runtime->minimum_ground_correspondences
+                    << std::endl;
+
+                return iteration == 0
+                           ? GroundJointIcpStatus::NotEligible
+                           : GroundJointIcpStatus::Failed;
+            }
+
+            Eigen::Matrix<double, 6, 1> dx =
+                Eigen::Matrix<double, 6, 1>::Zero();
+
+            if (!SolveGroundIcpStep(
+                    linearization,
+                    config,
+                    dx))
+            {
+                std::cout
+                    << "GROUND_ICP_V13"
+                    << " | stage=JOINT_ITER"
+                    << " | iteration=" << iteration
+                    << " | action=FALLBACK_GENERAL"
+                    << " | reason=SOLVE_FAILED"
+                    << std::endl;
+
+                return GroundJointIcpStatus::Failed;
+            }
+
+            const Eigen::Vector3d delta_rotation =
+                dx.head<3>();
+
+            const Eigen::Vector3d delta_translation =
+                dx.tail<3>();
+
+            const double dR =
+                delta_rotation.norm();
+
+            const double dT =
+                delta_translation.norm();
+
+            const double dR_deg =
+                dR *
+                180.0 /
+                3.14159265358979323846;
+
+            const double robust_rmse =
+                linearization.general_weight_sum > 1.0e-12
+                    ? std::sqrt(
+                          linearization
+                                  .general_weighted_squared_error_sum /
+                              linearization.general_weight_sum)
+                    : std::numeric_limits<double>::infinity();
+
+            const double downweighted_ratio =
+                linearization.general_correspondences > 0
+                    ? static_cast<double>(
+                          linearization
+                              .general_downweighted_correspondences) /
+                          static_cast<double>(
+                              linearization.general_correspondences)
+                    : 0.0;
+
+            std::cout
+                << "GROUND_ICP_V13"
+                << " | stage=JOINT_ITER"
+                << " | iteration=" << iteration
+                << " | reference=LOCALMAP_GROUND_PLANES"
+                << " | dofs=ROLL_PITCH_Z"
+                << " | ground_xy_yaw=OFF"
+                << " | quality="
+                << ground_result.support_constraint_confidence
+                << " | anchor_factor="
+                << GroundIcpAnchorFactor(ground_result)
+                << " | weight="
+                << ground_information_weight
+                << " | general_corr="
+                << linearization.general_correspondences
+                << " | ground_corr="
+                << linearization.ground_correspondences
+                << " | general_rmse="
+                << linearization.GeneralRmse()
+                << " | ground_rmse="
+                << linearization.GroundRmse()
+                << " | robust_rmse="
+                << robust_rmse
+                << " | downweighted_ratio="
+                << downweighted_ratio
+                << " | dR=" << dR
+                << " rad"
+                << " | dR_deg=" << dR_deg
+                << " | dT=" << dT
+                << " m"
+                << " | dx=["
+                << dx.transpose()
+                << "]"
+                << std::endl;
+
+            const Eigen::Isometry3d trial_pose =
+                ApplyGroundIcpIncrement(
+                    current_pose,
+                    dx,
+                    config);
+
+            if (!trial_pose.matrix().allFinite())
+            {
+                return GroundJointIcpStatus::Failed;
+            }
+
+            current_pose =
+                trial_pose;
+
+            completed_iteration =
+                true;
+
+            result.success =
+                true;
+
+            result.converged =
+                false;
+
+            result.iterations =
+                iteration + 1;
+
+            result.correspondences =
+                linearization.general_correspondences;
+
+            result.rmse =
+                linearization.GeneralRmse();
+
+            result.robust_downweighted_correspondences =
+                linearization.general_downweighted_correspondences;
+
+            result.robust_downweighted_ratio =
+                downweighted_ratio;
+
+            result.robust_effective_weight_sum =
+                linearization.general_weight_sum;
+
+            result.robust_min_weight =
+                linearization.general_min_robust_weight;
+
+            result.robust_rmse =
+                robust_rmse;
+
+            result.T_target_source =
+                current_pose;
+
+            if (dR <
+                    config.rotation_convergence_threshold &&
+                dT <
+                    config.translation_convergence_threshold)
+            {
+                result.converged =
+                    true;
+                break;
+            }
+        }
+
+        if (!completed_iteration ||
+            !result.success)
+        {
+            return GroundJointIcpStatus::Failed;
+        }
+
+        GroundIcpLinearization final_linearization;
+
+        if (!BuildGroundIcpLinearization(
+                source,
+                target,
+                current_pose,
+                ground_result,
+                *runtime,
+                ground_information_weight,
+                final_linearization))
+        {
+            return GroundJointIcpStatus::Failed;
+        }
+
+        if (final_linearization.general_correspondences <
+                config.min_correspondences ||
+            final_linearization.ground_correspondences <
+                runtime->minimum_ground_correspondences)
+        {
+            return GroundJointIcpStatus::Failed;
+        }
+
+        const double final_robust_rmse =
+            final_linearization.general_weight_sum > 1.0e-12
+                ? std::sqrt(
+                      final_linearization
+                              .general_weighted_squared_error_sum /
+                          final_linearization.general_weight_sum)
+                : std::numeric_limits<double>::infinity();
+
+        const double final_downweighted_ratio =
+            final_linearization.general_correspondences > 0
+                ? static_cast<double>(
+                      final_linearization
+                          .general_downweighted_correspondences) /
+                      static_cast<double>(
+                          final_linearization.general_correspondences)
+                : 0.0;
+
+        result.correspondences =
+            final_linearization.general_correspondences;
+
+        result.rmse =
+            final_linearization.GeneralRmse();
+
+        result.robust_downweighted_correspondences =
+            final_linearization.general_downweighted_correspondences;
+
+        result.robust_downweighted_ratio =
+            final_downweighted_ratio;
+
+        result.robust_effective_weight_sum =
+            final_linearization.general_weight_sum;
+
+        result.robust_min_weight =
+            final_linearization.general_min_robust_weight;
+
+        result.robust_rmse =
+            final_robust_rmse;
+
+        result.T_target_source =
+            current_pose;
+
+        const bool covariance_updated =
+            UpdateGroundIcpRelativeCovariance(
+                final_linearization,
+                config,
+                result);
+
+        std::cout
+            << "GROUND_ICP_V13"
+            << " | stage=JOINT_RESULT"
+            << " | action=SUCCESS"
+            << " | reference=LOCALMAP_GROUND_PLANES"
+            << " | dofs=ROLL_PITCH_Z"
+            << " | ground_xy_yaw=OFF"
+            << " | quality="
+            << ground_result.support_constraint_confidence
+            << " | anchor_factor="
+            << GroundIcpAnchorFactor(ground_result)
+            << " | weight="
+            << ground_information_weight
+            << " | ground_corr="
+            << final_linearization.ground_correspondences
+            << " | general_corr="
+            << final_linearization.general_correspondences
+            << " | ground_rmse="
+            << final_linearization.GroundRmse()
+            << " | general_rmse="
+            << final_linearization.GeneralRmse()
+            << " | covariance_update="
+            << (covariance_updated
+                    ? "true"
+                    : "false")
+            << std::endl;
+
+        return GroundJointIcpStatus::Success;
+    }
+
+
+    [[maybe_unused]]
+    bool ApplyTrustedGroundSoftRefinement(
+        const RegistrationScan2LocalMap *owner,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source,
+        const PreparedLidarTarget &target,
+        const fr_slam::GroundSegmentationResult &ground_result,
+        LidarRegistrationResult &registration_result)
+    {
+        GroundIcpRuntime *runtime =
+            GetGroundIcpRuntime(owner);
+
+        if (runtime == nullptr)
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=NO_RUNTIME"
+                << std::endl;
+            return false;
+        }
+
+        if (!runtime->enabled)
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=DISABLED"
+                << std::endl;
+            return false;
+        }
+
+        if (!ground_result.support_constraint_valid ||
+            !ground_result.support_plane_valid ||
+            !ground_result.support_ground_cloud ||
+            ground_result.support_ground_cloud->empty())
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=UNTRUSTED_SUPPORT"
+                << " | support="
+                << (ground_result.support_plane_valid ? "VALID" : "INVALID")
+                << " | constraint="
+                << (ground_result.support_constraint_valid ? "VALID" : "INVALID")
+                << " | conf="
+                << ground_result.support_constraint_confidence
+                << std::endl;
+            return false;
+        }
+
+        if (!registration_result.success ||
+            !registration_result.T_target_source.matrix().allFinite())
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=INVALID_ICP_CANDIDATE"
+                << std::endl;
+            return false;
+        }
+
+        const double ground_information_weight =
+            ComputeGroundIcpWeight(
+                *runtime,
+                ground_result);
+
+        if (!std::isfinite(ground_information_weight) ||
+            ground_information_weight <= 1.0e-3)
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=LOW_EFFECTIVE_WEIGHT"
+                << " | conf="
+                << ground_result.support_constraint_confidence
+                << " | anchor_factor="
+                << GroundIcpAnchorFactor(ground_result)
+                << " | weight="
+                << ground_information_weight
+                << std::endl;
+            return false;
+        }
+
+        const Eigen::Isometry3d original_pose =
+            registration_result.T_target_source;
+
+        Eigen::Isometry3d current_pose =
+            original_pose;
+
+        GroundIcpLinearization current_linearization;
+
+        if (!BuildGroundIcpLinearization(
+                source,
+                target,
+                current_pose,
+                ground_result,
+                *runtime,
+                ground_information_weight,
+                current_linearization))
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=LINEARIZATION_FAILED"
+                << std::endl;
+            return false;
+        }
+
+        if (current_linearization.ground_correspondences <
+            runtime->minimum_ground_correspondences)
+        {
+            std::cout
+                << "GROUND_ICP | stage=REFINE | action=SKIP"
+                << " | reason=LOW_GROUND_CORR"
+                << " | ground_corr="
+                << current_linearization.ground_correspondences
+                << " | min="
+                << runtime->minimum_ground_correspondences
+                << " | support_pts="
+                << ground_result.support_ground_points
+                << " | weight="
+                << ground_information_weight
+                << std::endl;
+            return false;
+        }
+
+        const double initial_general_rmse =
+            current_linearization.GeneralRmse();
+
+        const double initial_ground_rmse =
+            current_linearization.GroundRmse();
+
+        const double initial_combined_mse =
+            current_linearization
+                .CombinedWeightedMeanSquaredError();
+
+        const std::size_t initial_general_correspondences =
+            current_linearization.general_correspondences;
+
+        bool accepted_any_step =
+            false;
+
+        const char *last_reject_reason =
+            "NONE";
+
+        for (int iteration = 0;
+             iteration <
+                 runtime->maximum_refinement_iterations;
+             ++iteration)
+        {
+            Eigen::Matrix<double, 6, 1> dx;
+
+            if (!SolveGroundIcpStep(
+                    current_linearization,
+                    runtime->registration_config,
+                    dx))
+            {
+                last_reject_reason =
+                    "SOLVE_FAILED";
+                break;
+            }
+
+            const double step_rotation_deg =
+                dx.head<3>().norm() *
+                180.0 /
+                3.14159265358979323846;
+
+            const double step_translation_m =
+                dx.tail<3>().norm();
+
+            // Tiny extra step: already at a stationary point of the combined
+            // objective.  There is no need to manufacture a correction.
+            if (step_rotation_deg < 1.0e-5 &&
+                step_translation_m < 1.0e-6)
+            {
+                last_reject_reason =
+                    "TINY_STEP";
+                break;
+            }
+
+            const Eigen::Isometry3d trial_pose =
+                ApplyGroundIcpIncrement(
+                    current_pose,
+                    dx,
+                    runtime->registration_config);
+
+            if (!trial_pose.matrix().allFinite())
+            {
+                last_reject_reason =
+                    "NONFINITE_TRIAL";
+                break;
+            }
+
+            const double total_rotation_correction_deg =
+                RelativeRotationDeg(
+                    original_pose,
+                    trial_pose);
+
+            const double total_translation_correction_m =
+                (trial_pose.translation() -
+                 original_pose.translation())
+                    .norm();
+
+            if (!std::isfinite(total_rotation_correction_deg) ||
+                !std::isfinite(total_translation_correction_m) ||
+                total_rotation_correction_deg >
+                    runtime->maximum_total_rotation_correction_deg ||
+                total_translation_correction_m >
+                    runtime->maximum_total_translation_correction_m)
+            {
+                last_reject_reason =
+                    "STEP_SAFETY";
+                break;
+            }
+
+            GroundIcpLinearization trial_linearization;
+
+            if (!BuildGroundIcpLinearization(
+                    source,
+                    target,
+                    trial_pose,
+                    ground_result,
+                    *runtime,
+                    ground_information_weight,
+                    trial_linearization))
+            {
+                last_reject_reason =
+                    "TRIAL_LINEARIZATION_FAILED";
+                break;
+            }
+
+            const double current_general_rmse =
+                current_linearization.GeneralRmse();
+
+            const double trial_general_rmse =
+                trial_linearization.GeneralRmse();
+
+            const double current_ground_rmse =
+                current_linearization.GroundRmse();
+
+            const double trial_ground_rmse =
+                trial_linearization.GroundRmse();
+
+            const double current_combined_mse =
+                current_linearization
+                    .CombinedWeightedMeanSquaredError();
+
+            const double trial_combined_mse =
+                trial_linearization
+                    .CombinedWeightedMeanSquaredError();
+
+            const std::size_t minimum_general_correspondences =
+                static_cast<std::size_t>(
+                    std::floor(
+                        runtime
+                            ->minimum_general_correspondence_ratio *
+                        static_cast<double>(
+                            std::max<std::size_t>(
+                                1,
+                                current_linearization
+                                    .general_correspondences))));
+
+            const bool general_correspondence_ok =
+                trial_linearization.general_correspondences >=
+                minimum_general_correspondences;
+
+            const double general_rmse_limit =
+                std::max(
+                    current_general_rmse *
+                        runtime->maximum_general_rmse_ratio,
+                    current_general_rmse +
+                        runtime
+                            ->maximum_general_rmse_absolute_increase_m);
+
+            const bool general_quality_ok =
+                std::isfinite(trial_general_rmse) &&
+                trial_general_rmse <=
+                    general_rmse_limit;
+
+            const bool ground_quality_ok =
+                trial_linearization.ground_correspondences >=
+                    runtime->minimum_ground_correspondences &&
+                std::isfinite(trial_ground_rmse) &&
+                trial_ground_rmse <=
+                    current_ground_rmse +
+                    5.0e-4;
+
+            const bool combined_objective_ok =
+                std::isfinite(trial_combined_mse) &&
+                std::isfinite(current_combined_mse) &&
+                trial_combined_mse <=
+                    current_combined_mse +
+                    1.0e-12;
+
+            std::cout
+                << "GROUND_ICP"
+                << " | stage=ITER"
+                << " | iteration=" << iteration
+                << " | weight=" << ground_information_weight
+                << " | general_corr="
+                << current_linearization.general_correspondences
+                << "->"
+                << trial_linearization.general_correspondences
+                << " | ground_corr="
+                << current_linearization.ground_correspondences
+                << "->"
+                << trial_linearization.ground_correspondences
+                << " | general_rmse="
+                << current_general_rmse
+                << "->"
+                << trial_general_rmse
+                << " | ground_rmse="
+                << current_ground_rmse
+                << "->"
+                << trial_ground_rmse
+                << " | combined_mse="
+                << current_combined_mse
+                << "->"
+                << trial_combined_mse
+                << " | step_rot="
+                << step_rotation_deg
+                << " deg"
+                << " | step_trans="
+                << step_translation_m
+                << " m"
+                << " | accept="
+                << (general_correspondence_ok &&
+                            general_quality_ok &&
+                            ground_quality_ok &&
+                            combined_objective_ok
+                        ? "true"
+                        : "false")
+                << std::endl;
+
+            if (!general_correspondence_ok)
+            {
+                last_reject_reason =
+                    "GENERAL_CORR_DROP";
+                break;
+            }
+
+            if (!general_quality_ok)
+            {
+                last_reject_reason =
+                    "GENERAL_RMSE_DEGRADE";
+                break;
+            }
+
+            if (!ground_quality_ok)
+            {
+                last_reject_reason =
+                    "GROUND_RMSE_DEGRADE";
+                break;
+            }
+
+            if (!combined_objective_ok)
+            {
+                last_reject_reason =
+                    "COMBINED_OBJECTIVE";
+                break;
+            }
+
+            current_pose =
+                trial_pose;
+
+            current_linearization =
+                trial_linearization;
+
+            accepted_any_step =
+                true;
+
+            last_reject_reason =
+                "NONE";
+        }
+
+        if (!accepted_any_step)
+        {
+            std::cout
+                << "GROUND_ICP"
+                << " | stage=REFINE"
+                << " | action=KEEP_ORIGINAL"
+                << " | reason="
+                << last_reject_reason
+                << " | conf="
+                << ground_result.support_constraint_confidence
+                << " | anchor_factor="
+                << GroundIcpAnchorFactor(ground_result)
+                << " | weight="
+                << ground_information_weight
+                << " | general_corr="
+                << initial_general_correspondences
+                << " | ground_corr="
+                << current_linearization.ground_correspondences
+                << " | general_rmse="
+                << initial_general_rmse
+                << " | ground_rmse="
+                << initial_ground_rmse
+                << std::endl;
+
+            return false;
+        }
+
+        const double final_total_rotation_correction_deg =
+            RelativeRotationDeg(
+                original_pose,
+                current_pose);
+
+        const Eigen::Vector3d total_translation_correction =
+            current_pose.translation() -
+            original_pose.translation();
+
+        registration_result.T_target_source =
+            current_pose;
+
+        registration_result.correspondences =
+            current_linearization.general_correspondences;
+
+        registration_result.rmse =
+            current_linearization.GeneralRmse();
+
+        const bool covariance_updated =
+            UpdateGroundIcpRelativeCovariance(
+                current_linearization,
+                runtime->registration_config,
+                registration_result);
+
+        std::cout
+            << "GROUND_ICP"
+            << " | stage=REFINE"
+            << " | action=APPLIED"
+            << " | conf="
+            << ground_result.support_constraint_confidence
+            << " | anchor_factor="
+            << GroundIcpAnchorFactor(ground_result)
+            << " | weight="
+            << ground_information_weight
+            << " | support_pts="
+            << ground_result.support_ground_points
+            << " | general_corr="
+            << initial_general_correspondences
+            << "->"
+            << current_linearization.general_correspondences
+            << " | ground_corr="
+            << current_linearization.ground_correspondences
+            << " | general_rmse="
+            << initial_general_rmse
+            << "->"
+            << current_linearization.GeneralRmse()
+            << " | ground_rmse="
+            << initial_ground_rmse
+            << "->"
+            << current_linearization.GroundRmse()
+            << " | combined_mse="
+            << initial_combined_mse
+            << "->"
+            << current_linearization
+                   .CombinedWeightedMeanSquaredError()
+            << " | correction_rot="
+            << final_total_rotation_correction_deg
+            << " deg"
+            << " | correction_t=["
+            << total_translation_correction.transpose()
+            << "]"
+            << " | correction_t_norm="
+            << total_translation_correction.norm()
+            << " m"
+            << " | covariance_update="
+            << (covariance_updated ? "true" : "false")
+            << std::endl;
+
+        return true;
+    }
+
 } // namespace
 
 // ============================================================================
@@ -324,6 +4815,9 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
     const LidarRegistrationConfig &registration_config,
     const LocalMapConfig &local_map_config)
     : registration_(registration_config),
+      backend_refinement_registration_(
+          MakeBackendRefinementRegistrationConfig(
+              registration_config)),
 
       // Submap V1 defaults:
       //     15 keyframes / Submap
@@ -346,6 +4840,509 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
       // not against the previous ordinary LiDAR frame.
       keyframe_detector_(0.5, 5.0)
 {
+    GroundIcpRuntime *ground_icp_runtime =
+        RegisterGroundIcpRuntime(
+            this,
+            registration_config);
+
+    std::cout
+        << "Ground ICP V1.3 Quality-Weighted Observable-Subspace Joint-Hessian"
+        << " | enabled="
+        << (ground_icp_runtime != nullptr &&
+                    ground_icp_runtime->enabled
+                ? "ON"
+                : "OFF")
+        << " | base_weight="
+        << (ground_icp_runtime != nullptr
+                ? ground_icp_runtime->base_weight
+                : 0.0)
+        << " | support_cap="
+        << (ground_icp_runtime != nullptr
+                ? ground_icp_runtime->maximum_support_points
+                : 0UL)
+        << " | min_ground_corr="
+        << (ground_icp_runtime != nullptr
+                ? ground_icp_runtime->minimum_ground_correspondences
+                : 0UL)
+        << " | ground_voxel="
+        << (ground_icp_runtime != nullptr
+                ? ground_icp_runtime->analysis_voxel_leaf_m
+                : 0.0)
+        << " | ground_input=BASIC_PRE_VOXEL_SOR_ROR"
+        << " | main_solver=JOINT_HESSIAN"
+        << " | ground_reference=LOCALMAP_GROUND_PLANES"
+        << " | ground_quality=V4_CONFIDENCE_X_CLEARANCE"
+        << " | ground_dofs=ROLL_PITCH_Z"
+        << " | ground_xy_yaw=OFF"
+        << " | post_refinement=OFF"
+        << " | local_ground_map=PREPARED_LOCALMAP_PLANES"
+        << " | anchor_is_residual=NO"
+        << " | backend_unchanged=YES"
+        << std::endl;
+
+    std::cout
+        << "Frontend Robust ICP V1 + Degeneracy V2B"
+        << " | huber="
+        << (registration_config.enable_huber_loss
+                ? "ON"
+                : "OFF")
+        << " | delta="
+        << registration_config.huber_delta
+        << " m"
+        << " | hard_pt2plane_gate="
+        << registration_config.max_point_to_plane_distance
+        << " m"
+        << " | sensor_centered="
+        << (registration_config.enable_sensor_centered_perturbation
+                ? "ON"
+                : "OFF")
+        << " | hessian_scale="
+        << (registration_config.enable_hessian_scale_normalization
+                ? "MEDIAN_RANGE_V2B"
+                : "OFF")
+        << " | scale_min="
+        << registration_config.hessian_scale_min_range
+        << " m"
+        << " | scale_max="
+        << registration_config.hessian_scale_max_range
+        << " m"
+        << " | backend_refinement_huber=OFF"
+        << " | backend_refinement_sensor_centered=OFF"
+        << " | backend_refinement_hessian_scale=OFF"
+        << std::endl;
+
+    RefreshBackendOutputSnapshot();
+    StartBackendWorker();
+}
+
+RegistrationScan2LocalMap::~RegistrationScan2LocalMap()
+{
+    StopBackendWorker();
+    RemoveWorldZDecompositionRuntime(this);
+    RemoveGroundIcpRuntime(this);
+}
+
+// ============================================================================
+// Backend worker lifecycle.
+// ============================================================================
+void RegistrationScan2LocalMap::StartBackendWorker()
+{
+    bool expected = false;
+
+    if (!backend_running_.compare_exchange_strong(
+            expected,
+            true))
+    {
+        return;
+    }
+
+    backend_thread_ =
+        std::thread(
+            &RegistrationScan2LocalMap::BackendLoop,
+            this);
+}
+
+void RegistrationScan2LocalMap::StopBackendWorker()
+{
+    if (!backend_running_.exchange(false))
+    {
+        if (backend_thread_.joinable())
+        {
+            backend_thread_.join();
+        }
+
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            backend_queue_mutex_);
+
+        backend_queue_.clear();
+    }
+
+    backend_condition_.notify_all();
+
+    if (backend_thread_.joinable())
+    {
+        backend_thread_.join();
+    }
+}
+
+bool RegistrationScan2LocalMap::BuildFinishedSubmapSnapshot(
+    std::size_t submap_id,
+    BackendSubmapSnapshot &snapshot) const
+{
+    for (const Submap &submap :
+         submap_manager_.GetAllSubmaps())
+    {
+        if (submap.id != submap_id)
+        {
+            continue;
+        }
+
+        if (!submap.finished ||
+            !submap.has_frozen_cloud ||
+            !submap.has_origin_pose ||
+            !submap.cloud_S ||
+            submap.cloud_S->empty() ||
+            !submap.T_WS.matrix().allFinite())
+        {
+            return false;
+        }
+
+        snapshot = BackendSubmapSnapshot();
+        snapshot.id = submap.id;
+        snapshot.T_WS = submap.T_WS;
+        snapshot.keyframe_ids = submap.keyframe_ids;
+        snapshot.cloud_S = submap.cloud_S;
+
+        return true;
+    }
+
+    return false;
+}
+
+bool RegistrationScan2LocalMap::EnqueueBackendKeyframe(
+    const Keyframe &keyframe,
+    std::size_t current_submap_id)
+{
+    if (!backend_running_.load() ||
+        !keyframe.cloud ||
+        keyframe.cloud->empty() ||
+        !keyframe.T_WL.matrix().allFinite())
+    {
+        return false;
+    }
+
+    BackendKeyframeJob job;
+    job.keyframe = keyframe;
+    job.current_submap_id = current_submap_id;
+
+    if (submap_manager_.LastAddStartedNewSubmap())
+    {
+        BackendSubmapSnapshot finished_snapshot;
+
+        if (BuildFinishedSubmapSnapshot(
+                submap_manager_.LastFinishedSubmapId(),
+                finished_snapshot))
+        {
+            job.has_finished_submap = true;
+            job.finished_submap =
+                std::move(finished_snapshot);
+        }
+    }
+
+    std::size_t queue_size = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            backend_queue_mutex_);
+
+        if (!backend_running_.load())
+        {
+            return false;
+        }
+
+        backend_queue_.push_back(
+            std::move(job));
+
+        queue_size =
+            backend_queue_.size();
+    }
+
+    backend_condition_.notify_one();
+
+    if (queue_size >
+        backend_backlog_warning_threshold_)
+    {
+        RCLCPP_WARN(
+            kTimingLogger,
+            "FR_BACKEND backlog growing"
+            " | queued_keyframes=%zu"
+            " | warning_threshold=%zu",
+            queue_size,
+            backend_backlog_warning_threshold_);
+    }
+
+    return true;
+}
+
+void RegistrationScan2LocalMap::StoreBackendFinishedSubmap(
+    const BackendSubmapSnapshot &snapshot)
+{
+    if (snapshot.id ==
+            std::numeric_limits<std::size_t>::max() ||
+        !snapshot.cloud_S ||
+        snapshot.cloud_S->empty() ||
+        !snapshot.T_WS.matrix().allFinite())
+    {
+        return;
+    }
+
+    for (BackendSubmapSnapshot &stored :
+         backend_finished_submaps_)
+    {
+        if (stored.id == snapshot.id)
+        {
+            stored = snapshot;
+            return;
+        }
+    }
+
+    backend_finished_submaps_.push_back(
+        snapshot);
+}
+
+void RegistrationScan2LocalMap::RefreshBackendOutputSnapshot()
+{
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    backend_pose_graph_snapshot_ =
+        pose_graph_;
+
+    backend_raw_map_snapshot_ =
+        incremental_global_map_.GetRawMap();
+
+    backend_optimized_map_snapshot_ =
+        incremental_global_map_.GetOptimizedMap();
+
+    backend_refined_map_snapshot_ =
+        incremental_global_map_.GetRefinedMap();
+
+    backend_refinement_historical_target_snapshot_ =
+        refinement_historical_target_debug_;
+
+    backend_refinement_current_before_snapshot_ =
+        refinement_current_before_debug_;
+
+    backend_refinement_current_after_snapshot_ =
+        refinement_current_after_debug_;
+
+    backend_global_map_revision_snapshot_ =
+        global_map_revision_;
+
+    backend_refined_map_revision_snapshot_ =
+        refined_map_revision_;
+
+    backend_refinement_debug_revision_snapshot_ =
+        refinement_debug_revision_;
+
+    backend_T_map_odom_snapshot_ =
+        T_map_odom_;
+
+    backend_has_map_odom_correction_snapshot_ =
+        has_map_odom_correction_;
+
+    backend_map_odom_revision_snapshot_ =
+        map_odom_revision_;
+}
+
+void RegistrationScan2LocalMap::ProcessBackendJob(
+    const BackendKeyframeJob &job)
+{
+    const std::chrono::steady_clock::time_point
+        backend_start =
+            std::chrono::steady_clock::now();
+
+    double pose_graph_ms = 0.0;
+    double global_map_ms = 0.0;
+    double scan_context_ms = 0.0;
+    double loop_ms = 0.0;
+
+    if (job.has_finished_submap)
+    {
+        StoreBackendFinishedSubmap(
+            job.finished_submap);
+    }
+
+    if (FindBackendKeyframeById(
+            job.keyframe.id) == nullptr)
+    {
+        backend_keyframes_.push_back(
+            job.keyframe);
+    }
+
+    const std::chrono::steady_clock::time_point
+        pose_graph_start =
+            std::chrono::steady_clock::now();
+
+    const bool pose_graph_ok =
+        AddKeyframeToPoseGraph(
+            job.keyframe);
+
+    pose_graph_ms =
+        ElapsedMilliseconds(
+            pose_graph_start,
+            std::chrono::steady_clock::now());
+
+    if (!pose_graph_ok)
+    {
+        std::cerr
+            << "Async backend PoseGraph insert failed"
+            << " | keyframe=" << job.keyframe.id
+            << std::endl;
+
+        RefreshBackendOutputSnapshot();
+        return;
+    }
+
+    const std::chrono::steady_clock::time_point
+        global_map_start =
+            std::chrono::steady_clock::now();
+
+    const bool global_map_ok =
+        UpdateIncrementalGlobalMaps(
+            "NEW_KEYFRAME",
+            false);
+
+    global_map_ms =
+        ElapsedMilliseconds(
+            global_map_start,
+            std::chrono::steady_clock::now());
+
+    if (!global_map_ok)
+    {
+        std::cerr
+            << "Async backend global map update failed"
+            << " | keyframe=" << job.keyframe.id
+            << std::endl;
+    }
+
+    const std::chrono::steady_clock::time_point
+        scan_context_start =
+            std::chrono::steady_clock::now();
+
+    const bool scan_context_ok =
+        loop_detector_.AddKeyframe(
+            job.keyframe);
+
+    scan_context_ms =
+        ElapsedMilliseconds(
+            scan_context_start,
+            std::chrono::steady_clock::now());
+
+    if (scan_context_ok)
+    {
+        const std::chrono::steady_clock::time_point
+            loop_start =
+                std::chrono::steady_clock::now();
+
+        DetectAndVerifyLoopFromKeyframe(
+            job.keyframe,
+            job.current_submap_id);
+
+        loop_ms =
+            ElapsedMilliseconds(
+                loop_start,
+                std::chrono::steady_clock::now());
+    }
+    else
+    {
+        std::cerr
+            << "Async backend Scan Context registration failed"
+            << " | keyframe=" << job.keyframe.id
+            << std::endl;
+    }
+
+    RefreshBackendOutputSnapshot();
+
+    std::size_t remaining_queue = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            backend_queue_mutex_);
+
+        remaining_queue =
+            backend_queue_.size();
+    }
+
+    const double total_ms =
+        ElapsedMilliseconds(
+            backend_start,
+            std::chrono::steady_clock::now());
+
+    RCLCPP_INFO(
+        kTimingLogger,
+        "FR_TIMING BACKEND_JOB"
+        " | keyframe=%zu"
+        " | total=%.3f ms"
+        " | pose_graph=%.3f"
+        " | global_map=%.3f"
+        " | scan_context_insert=%.3f"
+        " | loop_backend=%.3f"
+        " | remaining_queue=%zu"
+        " | backend_keyframes=%zu"
+        " | backend_submaps=%zu",
+        job.keyframe.id,
+        total_ms,
+        pose_graph_ms,
+        global_map_ms,
+        scan_context_ms,
+        loop_ms,
+        remaining_queue,
+        backend_keyframes_.size(),
+        backend_finished_submaps_.size());
+}
+
+void RegistrationScan2LocalMap::BackendLoop()
+{
+    while (true)
+    {
+        BackendKeyframeJob job;
+
+        {
+            std::unique_lock<std::mutex> lock(
+                backend_queue_mutex_);
+
+            backend_condition_.wait(
+                lock,
+                [this]()
+                {
+                    return !backend_running_.load() ||
+                           !backend_queue_.empty();
+                });
+
+            if (!backend_running_.load() &&
+                backend_queue_.empty())
+            {
+                break;
+            }
+
+            if (backend_queue_.empty())
+            {
+                continue;
+            }
+
+            job =
+                std::move(
+                    backend_queue_.front());
+
+            backend_queue_.pop_front();
+        }
+
+        try
+        {
+            ProcessBackendJob(
+                job);
+        }
+        catch (const std::exception &exception)
+        {
+            std::cerr
+                << "Async backend exception"
+                << " | keyframe=" << job.keyframe.id
+                << " | what=" << exception.what()
+                << std::endl;
+        }
+        catch (...)
+        {
+            std::cerr
+                << "Async backend unknown exception"
+                << " | keyframe=" << job.keyframe.id
+                << std::endl;
+        }
+    }
 }
 
 // ============================================================================
@@ -414,6 +5411,16 @@ bool RegistrationScan2LocalMap::AddFrame(
     LidarRegistrationResult &registration_result,
     const Eigen::Quaterniond *imu_relative_rotation)
 {
+    FrameTimingDiagnostics frame_timing;
+    frame_timing.keyframes_before =
+        keyframe_manager_.Size();
+
+    frame_timing.keyframes_after =
+        frame_timing.keyframes_before;
+
+    FrameTimingReporter frame_timing_reporter(
+        frame_timing);
+
     // =========================================================================
     // 0. Validate input.
     // =========================================================================
@@ -434,6 +5441,51 @@ bool RegistrationScan2LocalMap::AddFrame(
     }
 
     // =========================================================================
+    // Ground ICP V1.1 dual-branch input stage.
+    //
+    // Ordinary Scan-to-LocalMap keeps using cloud_lidar, i.e. the final sparse
+    // registration cloud after the normal Voxel/SOR/ROR chain.
+    //
+    // Ground V4.0 instead consumes the one-shot Basic/ROI/CropBox cloud captured
+    // by PreProcessor::preprocess() BEFORE the coarse registration voxel and
+    // outlier filters.  Inside SegmentFrontendGround it is brought back to the
+    // validated Ground-V4 operating point with a dedicated 0.15 m voxel.
+    //
+    // If the dense bridge is unavailable for any reason, we fall back to the
+    // original registration cloud.  This preserves the V1 fail-safe behavior.
+    // =========================================================================
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr ground_input_cloud =
+        fr_slam::ConsumeGroundIcpDenseInput();
+
+    const char *ground_input_source =
+        "BASIC_BRIDGE";
+
+    if (!ground_input_cloud ||
+        ground_input_cloud->empty())
+    {
+        ground_input_cloud =
+            cloud_lidar;
+
+        ground_input_source =
+            "REGISTRATION_FALLBACK";
+    }
+
+    const std::chrono::steady_clock::time_point
+        ground_segment_start =
+            std::chrono::steady_clock::now();
+
+    const fr_slam::GroundSegmentationResult frontend_ground_result =
+        SegmentFrontendGround(
+            this,
+            ground_input_cloud,
+            ground_input_source);
+
+    frame_timing.ground_segment_ms +=
+        ElapsedMilliseconds(
+            ground_segment_start,
+            std::chrono::steady_clock::now());
+
+    // =========================================================================
     // 1. First frame initialization.
     //
     // There is no LocalMap yet, so the first frame does not run ICP.
@@ -445,6 +5497,9 @@ bool RegistrationScan2LocalMap::AddFrame(
     // =========================================================================
     if (!initialized_)
     {
+        frame_timing.first_frame = true;
+        frame_timing.keyframe = true;
+
         // The very first accepted LiDAR scan defines the World origin.
         //
         // Therefore:
@@ -471,10 +5526,25 @@ bool RegistrationScan2LocalMap::AddFrame(
         // ---------------------------------------------------------------------
         // 1.1 Store KF0 in complete historical KeyframeManager.
         // ---------------------------------------------------------------------
-        if (!keyframe_manager_.AddKeyframe(
+        const std::chrono::steady_clock::time_point
+            first_keyframe_store_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_keyframe_stored =
+            keyframe_manager_.AddKeyframe(
                 timestamp,
                 T_WL_,
-                cloud_lidar))
+                cloud_lidar);
+
+        frame_timing.keyframe_store_ms +=
+            ElapsedMilliseconds(
+                first_keyframe_store_start,
+                std::chrono::steady_clock::now());
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        if (!first_keyframe_stored)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
@@ -496,35 +5566,11 @@ bool RegistrationScan2LocalMap::AddFrame(
         }
 
         // ---------------------------------------------------------------------
-        // 1.2 Add KF0 as the fixed KEYFRAME PoseGraph vertex.
+        // 1.2 Backend work is asynchronous.
         //
-        // V6 backend rule:
-        //     every Keyframe enters the graph immediately.
-        //
-        // Submap lifecycle is irrelevant to graph vertex creation.
+        // PoseGraph / global map / Scan Context / loop verification are no
+        // longer executed on the LiDAR processing thread.
         // ---------------------------------------------------------------------
-        if (!AddKeyframeToPoseGraph(*first_keyframe))
-        {
-            std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to initialize Keyframe PoseGraph."
-                << std::endl;
-            return false;
-        }
-
-        // Backend visualization map grows from KF0 onward.  This cache is
-        // independent from frontend Submap lifecycle and is optional for
-        // tracking, so a map-cache failure must not invalidate SLAM.
-        if (!UpdateIncrementalGlobalMaps(
-                "NEW_KEYFRAME",
-                false))
-        {
-            std::cerr
-                << "Incremental global map update failed"
-                << " | reason=NEW_KEYFRAME"
-                << " | keyframe=" << first_keyframe->id
-                << std::endl;
-        }
 
         // ---------------------------------------------------------------------
         // 1.3 Create Active Submap 0 and insert KF0.
@@ -533,8 +5579,20 @@ bool RegistrationScan2LocalMap::AddFrame(
         //
         //     transform -> merge -> voxel
         // ---------------------------------------------------------------------
-        if (!submap_manager_.AddKeyframe(
-                *first_keyframe))
+        const std::chrono::steady_clock::time_point
+            first_submap_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_submap_ok =
+            submap_manager_.AddKeyframe(
+                *first_keyframe);
+
+        frame_timing.submap_insert_ms +=
+            ElapsedMilliseconds(
+                first_submap_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_submap_ok)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
@@ -544,40 +5602,51 @@ bool RegistrationScan2LocalMap::AddFrame(
         }
 
         // ---------------------------------------------------------------------
-        // 1.4 Register KF0 in the KEYFRAME Scan Context database.
-        //
-        // This database is independent from Submap finalization. KF0 obviously
-        // cannot form a loop yet, so we only store its descriptor here.
-        // ---------------------------------------------------------------------
-        if (!loop_detector_.AddKeyframe(*first_keyframe))
-        {
-            std::cerr
-                << "Keyframe Scan Context registration failed"
-                << " | keyframe=" << first_keyframe->id
-                << std::endl;
-        }
-        else
-        {
-            std::cout
-                << "Keyframe Scan Context registered"
-                << " | keyframe=" << first_keyframe->id
-                << " | descriptors="
-                << loop_detector_.DescriptorCount()
-                << std::endl;
-        }
-
-        // ---------------------------------------------------------------------
         // 1.5 Prepare point-to-plane target from the current Submap tracking map.
         // ---------------------------------------------------------------------
-        if (!registration_.PrepareTarget(
+        const std::chrono::steady_clock::time_point
+            first_prepare_target_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_prepare_target_ok =
+            registration_.PrepareTarget(
                 submap_manager_.GetTrackingMap(),
-                prepared_tracking_target_))
+                prepared_tracking_target_);
+
+        frame_timing.prepare_target_ms +=
+            ElapsedMilliseconds(
+                first_prepare_target_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_prepare_target_ok)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
                 << "failed to prepare first Submap tracking target."
                 << std::endl;
             return false;
+        }
+
+        const std::chrono::steady_clock::time_point
+            first_backend_enqueue_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_backend_enqueued =
+            EnqueueBackendKeyframe(
+                *first_keyframe,
+                submap_manager_.ActiveSubmapId());
+
+        frame_timing.backend_enqueue_ms +=
+            ElapsedMilliseconds(
+                first_backend_enqueue_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_backend_enqueued)
+        {
+            std::cerr
+                << "Async backend enqueue failed"
+                << " | keyframe=" << first_keyframe->id
+                << std::endl;
         }
 
         // The first keyframe becomes the detector reference pose.
@@ -595,6 +5664,32 @@ bool RegistrationScan2LocalMap::AddFrame(
         registration_result.correspondences = 0;
         registration_result.rmse = 0.0;
         registration_result.T_target_source = T_WL_;
+
+        if (!ResetWorldZDecompositionRuntime(
+                this,
+                timestamp,
+                T_WL_))
+        {
+            std::cerr
+                << "FR_Z_DECOMP"
+                << " | failed to initialize diagnostic"
+                << std::endl;
+        }
+
+        if (!WriteFrontendZDriftDiagnostic(
+                true,
+                first_keyframe->id,
+                -1,
+                timestamp,
+                T_WL_,
+                nullptr,
+                registration_result))
+        {
+            std::cerr
+                << "FR_FRONTEND_Z_DIAGNOSTIC"
+                << " | failed to write KF0"
+                << std::endl;
+        }
 
         T_WL = T_WL_;
 
@@ -614,6 +5709,10 @@ bool RegistrationScan2LocalMap::AddFrame(
             << " | target_points="
             << submap_manager_.TrackingPointCount()
             << std::endl;
+
+        frame_timing.accepted = true;
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
 
         return true;
     }
@@ -817,12 +5916,59 @@ bool RegistrationScan2LocalMap::AddFrame(
     // =========================================================================
     LidarRegistrationResult result;
 
-    bool registration_success =
-        registration_.Align(
+    const std::chrono::steady_clock::time_point
+        primary_align_start =
+            std::chrono::steady_clock::now();
+
+    bool used_ground_joint =
+        false;
+
+    const GroundJointIcpStatus primary_joint_status =
+        RunTrustedGroundJointIcpV12(
+            this,
             cloud_lidar,
             prepared_tracking_target_,
+            frontend_ground_result,
             initial_guess,
             result);
+
+    bool registration_success =
+        false;
+
+    if (primary_joint_status ==
+        GroundJointIcpStatus::Success)
+    {
+        registration_success =
+            result.success;
+
+        used_ground_joint =
+            true;
+    }
+    else
+    {
+        if (primary_joint_status ==
+            GroundJointIcpStatus::Failed)
+        {
+            std::cout
+                << "GROUND_ICP_V13"
+                << " | stage=PRIMARY"
+                << " | action=FALLBACK_GENERAL"
+                << " | reason=JOINT_FAILED"
+                << std::endl;
+        }
+
+        registration_success =
+            registration_.Align(
+                cloud_lidar,
+                prepared_tracking_target_,
+                initial_guess,
+                result);
+    }
+
+    frame_timing.primary_align_ms +=
+        ElapsedMilliseconds(
+            primary_align_start,
+            std::chrono::steady_clock::now());
 
     // =========================================================================
     // 5.1 Candidate quality check helper.
@@ -929,6 +6075,8 @@ bool RegistrationScan2LocalMap::AddFrame(
 
     if (!candidate_passed)
     {
+        frame_timing.recovery_triggered = true;
+
         std::cout
             << "Tracking Recovery V2 triggered"
             << " | primary_success="
@@ -1049,6 +6197,10 @@ bool RegistrationScan2LocalMap::AddFrame(
         Eigen::Isometry3d T_WL_coarse =
             initial_guess;
 
+        const std::chrono::steady_clock::time_point
+            recovery_coarse_start =
+                std::chrono::steady_clock::now();
+
         const bool coarse_success =
             RunCoarsePointToPointRecovery(
                 cloud_lidar,
@@ -1056,6 +6208,11 @@ bool RegistrationScan2LocalMap::AddFrame(
                 initial_guess,
                 T_WL_coarse,
                 coarse_fitness);
+
+        frame_timing.recovery_coarse_ms +=
+            ElapsedMilliseconds(
+                recovery_coarse_start,
+                std::chrono::steady_clock::now());
 
         std::cout
             << "Recovery coarse Point-to-Point ICP"
@@ -1115,12 +6272,45 @@ bool RegistrationScan2LocalMap::AddFrame(
             // -------------------------------------------------------------
             LidarRegistrationResult refined_result;
 
-            const bool refined_success =
-                registration_.Align(
+            const std::chrono::steady_clock::time_point
+                recovery_refine_start =
+                    std::chrono::steady_clock::now();
+
+            const GroundJointIcpStatus recovery_joint_status =
+                RunTrustedGroundJointIcpV12(
+                    this,
                     cloud_lidar,
                     prepared_tracking_target_,
+                    frontend_ground_result,
                     T_WL_coarse,
                     refined_result);
+
+            bool recovery_used_ground_joint =
+                recovery_joint_status ==
+                GroundJointIcpStatus::Success;
+
+            bool refined_success =
+                false;
+
+            if (recovery_used_ground_joint)
+            {
+                refined_success =
+                    refined_result.success;
+            }
+            else
+            {
+                refined_success =
+                    registration_.Align(
+                        cloud_lidar,
+                        prepared_tracking_target_,
+                        T_WL_coarse,
+                        refined_result);
+            }
+
+            frame_timing.recovery_refine_ms +=
+                ElapsedMilliseconds(
+                    recovery_refine_start,
+                    std::chrono::steady_clock::now());
 
             const bool refined_passed =
                 CandidatePassesQualityGate(
@@ -1201,9 +6391,35 @@ bool RegistrationScan2LocalMap::AddFrame(
             if (candidate_passed)
             {
                 used_coarse_recovery = true;
+                frame_timing.coarse_recovery_accepted = true;
+
+                used_ground_joint =
+                    recovery_used_ground_joint;
             }
         }
     }
+
+    // =========================================================================
+    // 5.3 Ground ICP V1.3 Quality-Weighted Observable-Subspace Joint-Hessian.
+    //
+    // No post-refinement is performed here.  When Ground V4 is trusted, it
+    // has already participated in EVERY main GN iteration through:
+    //
+    //     H_total = H_general + lambda_g * H_ground
+    //     b_total = b_general + lambda_g * b_ground
+    //
+    // When Ground is not trusted, the candidate came from the unchanged
+    // ordinary registration_.Align() fallback.
+    // =========================================================================
+    std::cout
+        << "GROUND_ICP_V13"
+        << " | stage=FINAL_MODE"
+        << " | mode="
+        << (used_ground_joint
+                ? "GROUND_OBSERVABLE_JOINT"
+                : "GENERAL_ONLY")
+        << " | post_refinement=OFF"
+        << std::endl;
 
     // Always expose the final candidate diagnostics to the caller.
     registration_result = result;
@@ -1298,6 +6514,9 @@ bool RegistrationScan2LocalMap::AddFrame(
                 << consecutive_rejected_frames_
                 << std::endl;
         }
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
 
         return false;
     }
@@ -1416,11 +6635,23 @@ bool RegistrationScan2LocalMap::AddFrame(
     double keyframe_translation = 0.0;
     double keyframe_rotation_deg = 0.0;
 
+    const std::chrono::steady_clock::time_point
+        keyframe_decision_start =
+            std::chrono::steady_clock::now();
+
     const bool is_keyframe =
         keyframe_detector_.ShouldCreateKeyframe(
             T_WL_current,
             keyframe_translation,
             keyframe_rotation_deg);
+
+    frame_timing.keyframe_decision_ms +=
+        ElapsedMilliseconds(
+            keyframe_decision_start,
+            std::chrono::steady_clock::now());
+
+    frame_timing.keyframe =
+        is_keyframe;
 
     std::cout
         << "Keyframe decision"
@@ -1442,13 +6673,128 @@ bool RegistrationScan2LocalMap::AddFrame(
     // =========================================================================
     if (is_keyframe)
     {
+        const Keyframe *previous_keyframe_for_diagnostic =
+            keyframe_manager_.Latest();
+
+        bool has_previous_keyframe_for_diagnostic =
+            false;
+
+        std::size_t previous_keyframe_id_for_diagnostic =
+            0;
+
+        Eigen::Isometry3d T_WL_previous_keyframe_for_diagnostic =
+            Eigen::Isometry3d::Identity();
+
+        if (previous_keyframe_for_diagnostic != nullptr)
+        {
+            has_previous_keyframe_for_diagnostic =
+                true;
+
+            previous_keyframe_id_for_diagnostic =
+                previous_keyframe_for_diagnostic->id;
+
+            T_WL_previous_keyframe_for_diagnostic =
+                previous_keyframe_for_diagnostic->T_WL;
+        }
+
         // ---------------------------------------------------------------------
         // 9.1 Store historical Keyframe.
         // ---------------------------------------------------------------------
-        if (!keyframe_manager_.AddKeyframe(
+        const std::chrono::steady_clock::time_point
+            keyframe_store_start =
+                std::chrono::steady_clock::now();
+
+        Eigen::Matrix<double, 6, 6> odom_information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        const bool dynamic_information_valid =
+            BuildOdometryInformationV2(
+                result,
+                T_WL_current,
+                odom_information);
+
+        double maximum_absolute_off_diagonal =
+            0.0;
+
+        double maximum_translation_rotation_coupling =
+            0.0;
+
+        if (dynamic_information_valid)
+        {
+            for (int i = 0;
+                 i < 6;
+                 ++i)
+            {
+                for (int j = 0;
+                     j < 6;
+                     ++j)
+                {
+                    if (i == j)
+                    {
+                        continue;
+                    }
+
+                    maximum_absolute_off_diagonal =
+                        std::max(
+                            maximum_absolute_off_diagonal,
+                            std::abs(
+                                odom_information(i, j)));
+
+                    const bool translation_rotation_pair =
+                        (i < 3 && j >= 3) ||
+                        (i >= 3 && j < 3);
+
+                    if (translation_rotation_pair)
+                    {
+                        maximum_translation_rotation_coupling =
+                            std::max(
+                                maximum_translation_rotation_coupling,
+                                std::abs(
+                                    odom_information(i, j)));
+                    }
+                }
+            }
+        }
+
+        std::cout
+            << "ODOM_INFORMATION_V2"
+            << " | valid="
+            << (dynamic_information_valid
+                    ? "true"
+                    : "false")
+            << " | order=[tx ty tz rx ry rz]"
+            << " | base_diag=["
+            << odom_information(0, 0) << " "
+            << odom_information(1, 1) << " "
+            << odom_information(2, 2) << " "
+            << odom_information(3, 3) << " "
+            << odom_information(4, 4) << " "
+            << odom_information(5, 5)
+            << "]"
+            << " | max_offdiag="
+            << maximum_absolute_off_diagonal
+            << " | max_tr_coupling="
+            << maximum_translation_rotation_coupling
+            << std::endl;
+
+        const bool keyframe_stored =
+            keyframe_manager_.AddKeyframe(
                 timestamp,
                 T_WL_current,
-                cloud_lidar))
+                cloud_lidar,
+                dynamic_information_valid
+                    ? &odom_information
+                    : nullptr);
+
+        frame_timing.keyframe_store_ms +=
+            ElapsedMilliseconds(
+                keyframe_store_start,
+                std::chrono::steady_clock::now());
+
+        frame_timing.keyframes_after =
+            keyframe_manager_.Size();
+
+        if (!keyframe_stored)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
@@ -1469,35 +6815,35 @@ bool RegistrationScan2LocalMap::AddFrame(
             return false;
         }
 
-        // ---------------------------------------------------------------------
-        // 9.2 Add the new KEYFRAME vertex + sequential KF odometry edge.
-        //
-        // This is now the backend graph update point. It happens for every
-        // Keyframe and does NOT wait for any Submap to finish.
-        // ---------------------------------------------------------------------
-        if (!AddKeyframeToPoseGraph(*new_keyframe))
+        if (!WriteFrontendZDriftDiagnostic(
+                false,
+                new_keyframe->id,
+                has_previous_keyframe_for_diagnostic
+                    ? static_cast<long long>(
+                          previous_keyframe_id_for_diagnostic)
+                    : -1,
+                timestamp,
+                T_WL_current,
+                has_previous_keyframe_for_diagnostic
+                    ? &T_WL_previous_keyframe_for_diagnostic
+                    : nullptr,
+                result))
         {
             std::cerr
-                << "RegistrationScan2LocalMap::AddFrame(): "
-                << "failed to update Keyframe PoseGraph."
+                << "FR_FRONTEND_Z_DIAGNOSTIC"
+                << " | failed"
+                << " | kf="
+                << new_keyframe->id
                 << std::endl;
-            return false;
         }
 
-        // Grow the backend map cache immediately for every Keyframe.  In the
-        // common case this rebuilds only the one backend block containing the
-        // new Keyframe.  Old refinement override blocks remain valid until the
-        // next main PoseGraph optimization.
-        if (!UpdateIncrementalGlobalMaps(
-                "NEW_KEYFRAME",
-                false))
-        {
-            std::cerr
-                << "Incremental global map update failed"
-                << " | reason=NEW_KEYFRAME"
-                << " | keyframe=" << new_keyframe->id
-                << std::endl;
-        }
+        // ---------------------------------------------------------------------
+        // 9.2 Backend work is asynchronous.
+        //
+        // The frontend only stores the Keyframe and updates its tracking
+        // Submap. PoseGraph / map / Scan Context / LoopVerifier run later in
+        // backend_thread_.
+        // ---------------------------------------------------------------------
 
         // ---------------------------------------------------------------------
         // 9.3 Capture the frontend Submap that OWNS this Keyframe BEFORE insertion.
@@ -1526,36 +6872,26 @@ bool RegistrationScan2LocalMap::AddFrame(
 
         // Add Keyframe to Active Submap. If it becomes full, SubmapManager may
         // finish it and create the next Active Submap here.
-        if (!submap_manager_.AddKeyframe(
-                *new_keyframe))
+        const std::chrono::steady_clock::time_point
+            submap_insert_start =
+                std::chrono::steady_clock::now();
+
+        const bool submap_insert_ok =
+            submap_manager_.AddKeyframe(
+                *new_keyframe);
+
+        frame_timing.submap_insert_ms +=
+            ElapsedMilliseconds(
+                submap_insert_start,
+                std::chrono::steady_clock::now());
+
+        if (!submap_insert_ok)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
                 << "failed to update SubmapManager."
                 << std::endl;
             return false;
-        }
-
-        // ---------------------------------------------------------------------
-        // 9.4 KEYFRAME-DRIVEN LOOP QUERY.
-        //
-        // This is the lifecycle fix:
-        //     New Keyframe -> Scan Context query NOW
-        //
-        // It does NOT wait for the current Submap to become finished.
-        // ---------------------------------------------------------------------
-        if (!loop_detector_.AddKeyframe(*new_keyframe))
-        {
-            std::cerr
-                << "Keyframe Scan Context registration failed"
-                << " | keyframe=" << new_keyframe->id
-                << std::endl;
-        }
-        else
-        {
-            DetectAndVerifyLoopFromKeyframe(
-                *new_keyframe,
-                current_owner_submap_id);
         }
 
         if (submap_manager_.LastAddStartedNewSubmap())
@@ -1583,9 +6919,21 @@ bool RegistrationScan2LocalMap::AddFrame(
         // ---------------------------------------------------------------------
         PreparedLidarTarget new_prepared_active_submap;
 
-        if (!registration_.PrepareTarget(
+        const std::chrono::steady_clock::time_point
+            prepare_target_start =
+                std::chrono::steady_clock::now();
+
+        const bool prepare_target_ok =
+            registration_.PrepareTarget(
                 submap_manager_.GetTrackingMap(),
-                new_prepared_active_submap))
+                new_prepared_active_submap);
+
+        frame_timing.prepare_target_ms +=
+            ElapsedMilliseconds(
+                prepare_target_start,
+                std::chrono::steady_clock::now());
+
+        if (!prepare_target_ok)
         {
             std::cerr
                 << "RegistrationScan2LocalMap::AddFrame(): "
@@ -1597,6 +6945,28 @@ bool RegistrationScan2LocalMap::AddFrame(
         prepared_tracking_target_ =
             std::move(
                 new_prepared_active_submap);
+
+        const std::chrono::steady_clock::time_point
+            backend_enqueue_start =
+                std::chrono::steady_clock::now();
+
+        const bool backend_enqueued =
+            EnqueueBackendKeyframe(
+                *new_keyframe,
+                current_owner_submap_id);
+
+        frame_timing.backend_enqueue_ms +=
+            ElapsedMilliseconds(
+                backend_enqueue_start,
+                std::chrono::steady_clock::now());
+
+        if (!backend_enqueued)
+        {
+            std::cerr
+                << "Async backend enqueue failed"
+                << " | keyframe=" << new_keyframe->id
+                << std::endl;
+        }
 
         keyframe_detector_.SetLastKeyframePose(
             T_WL_current);
@@ -1817,6 +7187,24 @@ bool RegistrationScan2LocalMap::AddFrame(
     //     registration succeeded
     //     Quality Gate passed
     //     keyframe update (if required) succeeded
+    //
+    // World-Z decomposition is intentionally evaluated HERE: Ground ICP has
+    // already produced the final candidate and every later frontend operation
+    // that can reject the frame has succeeded. Therefore this diagnostic never
+    // accumulates an uncommitted/rejected pose.
+    if (!AccumulateWorldZDecomposition(
+            this,
+            timestamp,
+            T_WL_previous,
+            T_WL_current))
+    {
+        std::cerr
+            << "FR_Z_DECOMP"
+            << " | accumulation failed"
+            << " | timestamp=" << timestamp
+            << std::endl;
+    }
+
     T_WL_ =
         T_WL_current;
 
@@ -1966,6 +7354,10 @@ bool RegistrationScan2LocalMap::AddFrame(
         << " | rmse=" << result.rmse
         << std::endl;
 
+    frame_timing.accepted = true;
+    frame_timing.keyframes_after =
+        keyframe_manager_.Size();
+
     return true;
 }
 
@@ -2014,7 +7406,7 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
         Eigen::Isometry3d::Identity();
 
     const std::vector<Keyframe> &all_keyframes =
-        keyframe_manager_.GetAllKeyframes();
+        backend_keyframes_;
 
     if (!fixed)
     {
@@ -2205,8 +7597,108 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
         return true;
     }
 
-    const Eigen::Matrix<double, 6, 6> information =
+    Eigen::Matrix<double, 6, 6> information =
         Eigen::Matrix<double, 6, 6>::Identity();
+
+    const char *information_mode =
+        "IDENTITY_FALLBACK";
+
+    if (keyframe.has_odom_information &&
+        keyframe.odom_information.allFinite())
+    {
+        const Eigen::Matrix<double, 6, 6>
+            symmetric_information =
+                0.5 *
+                (keyframe.odom_information +
+                 keyframe.odom_information.transpose());
+
+        const double asymmetry =
+            (keyframe.odom_information -
+             keyframe.odom_information.transpose())
+                .cwiseAbs()
+                .maxCoeff();
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            solver(
+                symmetric_information,
+                Eigen::EigenvaluesOnly);
+
+        const bool information_valid =
+            std::isfinite(asymmetry) &&
+            asymmetry <= 1.0e-8 &&
+            solver.info() == Eigen::Success &&
+            solver.eigenvalues().allFinite() &&
+            solver.eigenvalues().minCoeff() > 1.0e-9;
+
+        if (information_valid)
+        {
+            information =
+                symmetric_information;
+
+            information_mode =
+                "V2B_FULL_6X6_V2";
+        }
+    }
+
+    double pose_graph_maximum_off_diagonal =
+        0.0;
+
+    double pose_graph_maximum_tr_coupling =
+        0.0;
+
+    for (int i = 0;
+         i < 6;
+         ++i)
+    {
+        for (int j = 0;
+             j < 6;
+             ++j)
+        {
+            if (i == j)
+            {
+                continue;
+            }
+
+            pose_graph_maximum_off_diagonal =
+                std::max(
+                    pose_graph_maximum_off_diagonal,
+                    std::abs(
+                        information(i, j)));
+
+            const bool translation_rotation_pair =
+                (i < 3 && j >= 3) ||
+                (i >= 3 && j < 3);
+
+            if (translation_rotation_pair)
+            {
+                pose_graph_maximum_tr_coupling =
+                    std::max(
+                        pose_graph_maximum_tr_coupling,
+                        std::abs(
+                            information(i, j)));
+            }
+        }
+    }
+
+    std::cout
+        << "Keyframe PoseGraph odometry information"
+        << " | from=" << previous_keyframe->id
+        << " | to=" << keyframe.id
+        << " | mode=" << information_mode
+        << " | base_diag=["
+        << information(0, 0) << " "
+        << information(1, 1) << " "
+        << information(2, 2) << " "
+        << information(3, 3) << " "
+        << information(4, 4) << " "
+        << information(5, 5)
+        << "]"
+        << " | max_offdiag="
+        << pose_graph_maximum_off_diagonal
+        << " | max_tr_coupling="
+        << pose_graph_maximum_tr_coupling
+        << std::endl;
 
     if (!pose_graph_.AddOdometryEdge(
             previous_keyframe->id,
@@ -2242,21 +7734,16 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
 
 
 // ============================================================================
-// FindSubmapById()
-//
-// Read-only backend lookup used by LoopVerifier integration.
+// Backend-only snapshot lookup helpers.
 // ============================================================================
-const Submap *RegistrationScan2LocalMap::FindSubmapById(
+const RegistrationScan2LocalMap::BackendSubmapSnapshot *
+RegistrationScan2LocalMap::FindBackendSubmapById(
     std::size_t submap_id) const
 {
-    const std::vector<Submap> &submaps =
-        submap_manager_.GetAllSubmaps();
-
-    for (const Submap &submap :
-         submaps)
+    for (const BackendSubmapSnapshot &submap :
+         backend_finished_submaps_)
     {
-        if (submap.id ==
-            submap_id)
+        if (submap.id == submap_id)
         {
             return &submap;
         }
@@ -2266,11 +7753,12 @@ const Submap *RegistrationScan2LocalMap::FindSubmapById(
 }
 
 
-const Keyframe *RegistrationScan2LocalMap::FindKeyframeById(
+const Keyframe *
+RegistrationScan2LocalMap::FindBackendKeyframeById(
     std::size_t keyframe_id) const
 {
     for (const Keyframe &keyframe :
-         keyframe_manager_.GetAllKeyframes())
+         backend_keyframes_)
     {
         if (keyframe.id == keyframe_id)
         {
@@ -2285,26 +7773,23 @@ const Keyframe *RegistrationScan2LocalMap::FindKeyframeById(
 // ============================================================================
 // FindBestFinishedSubmapForKeyframe()
 //
-// A Keyframe may appear in two Submaps because of overlap. For geometry
-// verification choose a FINISHED/FROZEN Submap containing the candidate KF and
-// prefer the one where that KF lies closest to the center of the window.
+// The backend never reads frontend SubmapManager storage.  It searches only
+// immutable finished-submap snapshots transferred by BackendKeyframeJob.
 // ============================================================================
-const Submap *
+const RegistrationScan2LocalMap::BackendSubmapSnapshot *
 RegistrationScan2LocalMap::FindBestFinishedSubmapForKeyframe(
     std::size_t keyframe_id) const
 {
-    const Submap *best = nullptr;
+    const BackendSubmapSnapshot *best = nullptr;
+
     std::size_t best_center_distance =
         std::numeric_limits<std::size_t>::max();
 
-    for (const Submap &submap :
-         submap_manager_.GetAllSubmaps())
+    for (const BackendSubmapSnapshot &submap :
+         backend_finished_submaps_)
     {
-        if (!submap.finished ||
-            !submap.has_frozen_cloud ||
-            !submap.cloud_S ||
+        if (!submap.cloud_S ||
             submap.cloud_S->empty() ||
-            !submap.has_origin_pose ||
             !submap.T_WS.matrix().allFinite())
         {
             continue;
@@ -2373,6 +7858,15 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     const Keyframe &current_keyframe,
     std::size_t current_submap_id)
 {
+    LoopTimingDiagnostics loop_timing;
+    loop_timing.current_keyframe_id =
+        current_keyframe.id;
+    loop_timing.current_submap_id =
+        current_submap_id;
+
+    LoopTimingReporter loop_timing_reporter(
+        loop_timing);
+
     if (!current_keyframe.cloud ||
         current_keyframe.cloud->empty() ||
         !current_keyframe.T_WL.matrix().allFinite())
@@ -2407,9 +7901,21 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         return;
     }
 
+    const std::chrono::steady_clock::time_point
+        scan_context_detect_start =
+            std::chrono::steady_clock::now();
+
     const std::vector<LoopCandidate> candidates =
         loop_detector_.Detect(
             current_keyframe.id);
+
+    loop_timing.scan_context_detect_ms +=
+        ElapsedMilliseconds(
+            scan_context_detect_start,
+            std::chrono::steady_clock::now());
+
+    loop_timing.candidates =
+        candidates.size();
 
     std::cout
         << "Keyframe loop detection"
@@ -2449,7 +7955,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
             candidates.size());
 
     const LoopCandidate *best_candidate = nullptr;
-    const Submap *best_historical_submap = nullptr;
+    const BackendSubmapSnapshot *best_historical_submap = nullptr;
     LoopVerificationResult best_verification;
 
     // Do not run ICP repeatedly against the same historical Submap merely
@@ -2463,7 +7969,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         const LoopCandidate &candidate =
             candidates[index];
 
-        const Submap *historical_submap =
+        const BackendSubmapSnapshot *historical_submap =
             FindBestFinishedSubmapForKeyframe(
                 candidate.candidate_id);
 
@@ -2556,7 +8062,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         // +/- Scan Context yaw explicitly.
         // --------------------------------------------------------------------
         const Keyframe *historical_keyframe =
-            FindKeyframeById(candidate.candidate_id);
+            FindBackendKeyframeById(candidate.candidate_id);
 
         if (historical_keyframe == nullptr ||
             !historical_keyframe->T_WL.matrix().allFinite())
@@ -2611,24 +8117,146 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 negative);
         }
 
+        // --------------------------------------------------------------------
+        // LoopVerifier V3: cheap pre-score -> ranked full ICP -> early exit.
+        //
+        // Previous behavior ran one FULL ICP for every initial guess.  With
+        // CANDIDATE_POSE / +SC / -SC this meant three 50-iteration ICP runs per
+        // historical candidate even when the first hypothesis was already good.
+        //
+        // V3 first evaluates each hypothesis at its INITIAL pose using the
+        // cached downsampled source + historical target KD-tree.  No ICP
+        // iteration is performed during this stage.  The hypotheses are then
+        // tried in descending geometric-overlap order.
+        //
+        // Safety behavior:
+        //   * The pre-score gate is deliberately loose (default 3% overlap at
+        //     2 m), far below the final 15% overlap gate.
+        //   * If the best full ICP is rejected, the next plausible hypothesis
+        //     is still tried.
+        //   * As soon as one ranked hypothesis passes the ORIGINAL full
+        //     LoopVerifier geometry gate, we stop.
+        // --------------------------------------------------------------------
+        struct RankedInitialGuess
+        {
+            const char *name = "NONE";
+            Eigen::Isometry3d transform =
+                Eigen::Isometry3d::Identity();
+            LoopVerifierInitialGuessScore score;
+        };
+
+        std::vector<RankedInitialGuess> ranked_guesses;
+        ranked_guesses.reserve(initial_guesses.size());
+
+        for (const auto &guess_entry : initial_guesses)
+        {
+            RankedInitialGuess ranked_guess;
+            ranked_guess.name = guess_entry.first;
+            ranked_guess.transform = guess_entry.second;
+
+            const std::chrono::steady_clock::time_point
+                prescore_start =
+                    std::chrono::steady_clock::now();
+
+            const bool score_ok =
+                loop_verifier_.ScoreInitialGuess(
+                    current_keyframe.cloud,
+                    historical_submap->cloud_S,
+                    ranked_guess.transform,
+                    ranked_guess.score);
+
+            loop_timing.verifier_prescore_ms +=
+                ElapsedMilliseconds(
+                    prescore_start,
+                    std::chrono::steady_clock::now());
+
+            ++loop_timing.verifier_prescore_calls;
+
+            ranked_guess.score.valid =
+                score_ok && ranked_guess.score.valid;
+
+            ranked_guesses.push_back(
+                ranked_guess);
+        }
+
+        std::sort(
+            ranked_guesses.begin(),
+            ranked_guesses.end(),
+            [](const RankedInitialGuess &lhs,
+               const RankedInitialGuess &rhs)
+            {
+                if (lhs.score.valid != rhs.score.valid)
+                {
+                    return lhs.score.valid;
+                }
+
+                if (std::abs(
+                        lhs.score.overlap_ratio -
+                        rhs.score.overlap_ratio) > 1.0e-12)
+                {
+                    return lhs.score.overlap_ratio >
+                           rhs.score.overlap_ratio;
+                }
+
+                return lhs.score.rmse < rhs.score.rmse;
+            });
+
+        std::cout
+            << "LoopVerifier prescore"
+            << " | current_kf=" << current_keyframe.id
+            << " | historical_kf=" << candidate.candidate_id;
+
+        for (const RankedInitialGuess &ranked_guess : ranked_guesses)
+        {
+            std::cout
+                << " | " << ranked_guess.name
+                << "=[valid:"
+                << (ranked_guess.score.valid ? "true" : "false")
+                << ",overlap:" << ranked_guess.score.overlap_ratio
+                << ",rmse:" << ranked_guess.score.rmse
+                << "]";
+        }
+
+        std::cout << std::endl;
+
         LoopVerificationResult verification;
         bool verification_success = false;
         const char *best_initial_guess_name = "NONE";
 
-        for (const auto &guess_entry : initial_guesses)
+        const LoopVerifierConfig &verifier_config =
+            loop_verifier_.GetConfig();
+
+        for (const RankedInitialGuess &ranked_guess : ranked_guesses)
         {
+            if (!ranked_guess.score.valid ||
+                ranked_guess.score.overlap_ratio <
+                    verifier_config.prescore_min_overlap_ratio)
+            {
+                continue;
+            }
+
             LoopVerificationResult trial;
 
             // NaN disables LoopVerifier's own absolute-yaw replacement. We
-            // already applied the Keyframe->historical-Submap yaw correctly
-            // above, including the candidate KF orientation inside H.
+            // already generated the candidate-centered yaw hypothesis above.
+            const std::chrono::steady_clock::time_point
+                verifier_start =
+                    std::chrono::steady_clock::now();
+
             const bool trial_success =
                 loop_verifier_.Verify(
                     current_keyframe.cloud,
                     historical_submap->cloud_S,
-                    guess_entry.second,
+                    ranked_guess.transform,
                     std::numeric_limits<double>::quiet_NaN(),
                     trial);
+
+            loop_timing.verifier_ms +=
+                ElapsedMilliseconds(
+                    verifier_start,
+                    std::chrono::steady_clock::now());
+
+            ++loop_timing.verifier_calls;
 
             if (!trial_success)
             {
@@ -2664,7 +8292,16 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
             {
                 verification = trial;
                 verification_success = true;
-                best_initial_guess_name = guess_entry.first;
+                best_initial_guess_name = ranked_guess.name;
+            }
+
+            // The initial guesses were already ranked by the cheap geometric
+            // pre-score.  Once a hypothesis passes the unchanged full geometry
+            // gate, spending another 1-2 complete ICP runs gives little benefit
+            // compared with its backend cost.
+            if (trial.accepted)
+            {
+                break;
             }
         }
 
@@ -2773,6 +8410,8 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         return;
     }
 
+    loop_timing.geometry_accepted = true;
+
     // ------------------------------------------------------------------------
     // Convert the ICP result from historical Submap coordinates to the
     // historical CANDIDATE KEYFRAME coordinates.
@@ -2792,7 +8431,7 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     // PoseGraph.
     // ------------------------------------------------------------------------
     const Keyframe *best_historical_keyframe =
-        FindKeyframeById(best_candidate->candidate_id);
+        FindBackendKeyframeById(best_candidate->candidate_id);
 
     if (best_historical_keyframe == nullptr ||
         !best_historical_keyframe->T_WL.matrix().allFinite())
@@ -2819,6 +8458,87 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         best_historical_keyframe->T_WL *
         T_K_L;
 
+    // ========================================================================
+    // FR_FRONTEND_LOOP_DRIFT_DIAG_V1
+    //
+    // Pure PRE-PGO diagnostic.
+    //
+    // K = historical Keyframe
+    // L = current Keyframe
+    //
+    // Frontend accumulated relative pose:
+    //
+    //     T_K_L_frontend
+    //         =
+    //     T_W_K_frontend^-1 * T_W_L_frontend
+    //
+    // Independent loop-verifier geometry:
+    //
+    //     T_K_L
+    //
+    // Loop-implied current world pose:
+    //
+    //     T_W_L_loop
+    //         =
+    //     T_W_K_frontend * T_K_L
+    //
+    // Therefore this block directly measures the discrepancy that already
+    // exists BEFORE AddLoopEdge() and BEFORE g2o optimization.
+    //
+    // IMPORTANT:
+    //   * No value below is fed back to the frontend.
+    //   * No loop measurement is modified.
+    //   * No information matrix is modified.
+    //   * No graph state is modified.
+    // ========================================================================
+
+    const Eigen::Isometry3d T_K_L_frontend =
+        best_historical_keyframe->T_WL.inverse() *
+        current_keyframe.T_WL;
+
+    if (!T_K_L_frontend.matrix().allFinite() ||
+        !T_W_L_loop.matrix().allFinite())
+    {
+        return;
+    }
+
+    const Eigen::Vector3d world_error_W =
+        current_keyframe.T_WL.translation() -
+        T_W_L_loop.translation();
+
+    const double world_error_norm_m =
+        world_error_W.norm();
+
+    const Eigen::Isometry3d T_K_L_error =
+        T_K_L.inverse() *
+        T_K_L_frontend;
+
+    if (!T_K_L_error.matrix().allFinite())
+    {
+        return;
+    }
+
+    const Eigen::Vector3d frontend_relative_rpy =
+        FrontendRotationToRpy(
+            T_K_L_frontend.rotation());
+
+    const Eigen::Vector3d loop_relative_rpy =
+        FrontendRotationToRpy(
+            T_K_L.rotation());
+
+    const Eigen::Vector3d relative_error_rpy =
+        FrontendRotationToRpy(
+            T_K_L_error.rotation());
+
+    constexpr double kFrontendLoopDriftRadToDeg =
+        180.0 /
+        3.14159265358979323846;
+
+    const double relative_rotation_error_deg =
+        RelativeRotationDeg(
+            T_K_L,
+            T_K_L_frontend);
+
     const double graph_correction_translation =
         (T_W_L_loop.translation() -
          current_keyframe.T_WL.translation())
@@ -2828,6 +8548,184 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         RelativeRotationDeg(
             current_keyframe.T_WL,
             T_W_L_loop);
+
+    const bool frontend_loop_drift_graph_gate_pass =
+        std::isfinite(graph_correction_translation) &&
+        std::isfinite(graph_correction_rotation) &&
+        graph_correction_translation <=
+            max_loop_graph_correction_translation_ &&
+        graph_correction_rotation <=
+            max_loop_graph_correction_rotation_deg_;
+
+    RCLCPP_WARN(
+        rclcpp::get_logger(
+            "scan2local_map.frontend_loop_drift"),
+        "FR_FRONTEND_LOOP_DRIFT"
+        " | stage=PRE_PGO"
+        " | current_kf=%zu"
+        " | historical_kf=%zu"
+        " | current_submap=%zu"
+        " | historical_submap=%zu"
+        " | overlap=%.6f"
+        " | loop_rmse=%.6f"
+        " | world_error=[%.6f %.6f %.6f]"
+        " | world_error_norm=%.6f"
+        " | relative_error_t=[%.6f %.6f %.6f]"
+        " | relative_error_rpy_deg=[%.6f %.6f %.6f]"
+        " | relative_translation_norm=%.6f"
+        " | relative_rotation_deg=%.6f"
+        " | graph_gate=%s",
+        current_keyframe.id,
+        best_historical_keyframe->id,
+        current_submap_id,
+        best_historical_submap->id,
+        best_verification.overlap_ratio,
+        best_verification.rmse,
+        world_error_W.x(),
+        world_error_W.y(),
+        world_error_W.z(),
+        world_error_norm_m,
+        T_K_L_error.translation().x(),
+        T_K_L_error.translation().y(),
+        T_K_L_error.translation().z(),
+        relative_error_rpy.x() *
+            kFrontendLoopDriftRadToDeg,
+        relative_error_rpy.y() *
+            kFrontendLoopDriftRadToDeg,
+        relative_error_rpy.z() *
+            kFrontendLoopDriftRadToDeg,
+        T_K_L_error.translation().norm(),
+        relative_rotation_error_deg,
+        frontend_loop_drift_graph_gate_pass
+            ? "PASS"
+            : "REJECT");
+
+    try
+    {
+        static bool frontend_loop_drift_csv_initialized =
+            false;
+
+        const std::filesystem::path frontend_loop_drift_directory =
+            FrontendDiagnosticDirectory();
+
+        std::filesystem::create_directories(
+            frontend_loop_drift_directory);
+
+        const std::filesystem::path frontend_loop_drift_csv_path =
+            frontend_loop_drift_directory /
+            "frontend_loop_drift.csv";
+
+        std::ios_base::openmode frontend_loop_drift_mode =
+            std::ios::out;
+
+        if (!frontend_loop_drift_csv_initialized)
+        {
+            frontend_loop_drift_mode |=
+                std::ios::trunc;
+        }
+        else
+        {
+            frontend_loop_drift_mode |=
+                std::ios::app;
+        }
+
+        std::ofstream frontend_loop_drift_file(
+            frontend_loop_drift_csv_path,
+            frontend_loop_drift_mode);
+
+        if (frontend_loop_drift_file.is_open())
+        {
+            frontend_loop_drift_file
+                << std::fixed
+                << std::setprecision(9);
+
+            if (!frontend_loop_drift_csv_initialized)
+            {
+                frontend_loop_drift_file
+                    << "current_kf,historical_kf,"
+                    << "current_submap,historical_submap,"
+                    << "overlap,loop_rmse,"
+                    << "frontend_world_x,frontend_world_y,frontend_world_z,"
+                    << "loop_world_x,loop_world_y,loop_world_z,"
+                    << "world_error_dx,world_error_dy,world_error_dz,"
+                    << "world_error_norm,"
+                    << "frontend_rel_tx,frontend_rel_ty,frontend_rel_tz,"
+                    << "frontend_rel_roll_deg,frontend_rel_pitch_deg,frontend_rel_yaw_deg,"
+                    << "loop_rel_tx,loop_rel_ty,loop_rel_tz,"
+                    << "loop_rel_roll_deg,loop_rel_pitch_deg,loop_rel_yaw_deg,"
+                    << "relative_error_tx,relative_error_ty,relative_error_tz,"
+                    << "relative_error_roll_deg,relative_error_pitch_deg,relative_error_yaw_deg,"
+                    << "relative_translation_norm,relative_rotation_deg,"
+                    << "graph_correction_translation,graph_correction_rotation_deg,"
+                    << "graph_gate_pass\n";
+            }
+
+            frontend_loop_drift_file
+                << current_keyframe.id << ","
+                << best_historical_keyframe->id << ","
+                << current_submap_id << ","
+                << best_historical_submap->id << ","
+                << best_verification.overlap_ratio << ","
+                << best_verification.rmse << ","
+                << current_keyframe.T_WL.translation().x() << ","
+                << current_keyframe.T_WL.translation().y() << ","
+                << current_keyframe.T_WL.translation().z() << ","
+                << T_W_L_loop.translation().x() << ","
+                << T_W_L_loop.translation().y() << ","
+                << T_W_L_loop.translation().z() << ","
+                << world_error_W.x() << ","
+                << world_error_W.y() << ","
+                << world_error_W.z() << ","
+                << world_error_norm_m << ","
+                << T_K_L_frontend.translation().x() << ","
+                << T_K_L_frontend.translation().y() << ","
+                << T_K_L_frontend.translation().z() << ","
+                << frontend_relative_rpy.x() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << frontend_relative_rpy.y() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << frontend_relative_rpy.z() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << T_K_L.translation().x() << ","
+                << T_K_L.translation().y() << ","
+                << T_K_L.translation().z() << ","
+                << loop_relative_rpy.x() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << loop_relative_rpy.y() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << loop_relative_rpy.z() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << T_K_L_error.translation().x() << ","
+                << T_K_L_error.translation().y() << ","
+                << T_K_L_error.translation().z() << ","
+                << relative_error_rpy.x() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << relative_error_rpy.y() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << relative_error_rpy.z() *
+                       kFrontendLoopDriftRadToDeg << ","
+                << T_K_L_error.translation().norm() << ","
+                << relative_rotation_error_deg << ","
+                << graph_correction_translation << ","
+                << graph_correction_rotation << ","
+                << (frontend_loop_drift_graph_gate_pass ? 1 : 0)
+                << "\n";
+
+            frontend_loop_drift_file.flush();
+            frontend_loop_drift_csv_initialized = true;
+        }
+    }
+    catch (const std::exception &exception)
+    {
+        RCLCPP_WARN(
+            rclcpp::get_logger(
+                "scan2local_map.frontend_loop_drift"),
+            "FR_FRONTEND_LOOP_DRIFT"
+            " | stage=CSV"
+            " | action=FAILED"
+            " | what=%s",
+            exception.what());
+    }
 
     std::cout
         << "Keyframe loop geometry best"
@@ -3415,9 +9313,6 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
             << " | action=STAGE_AND_OPTIMIZE"
             << std::endl;
 
-        const Eigen::Matrix<double, 6, 6> loop_information =
-            Eigen::Matrix<double, 6, 6>::Identity();
-
         std::vector<std::pair<std::size_t, std::size_t>>
             staged_loop_edges;
 
@@ -3438,6 +9333,61 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 break;
             }
 
+            Eigen::Matrix<double, 6, 6> loop_information =
+                Eigen::Matrix<double, 6, 6>::Identity();
+
+            std::size_t loop_shadow_correspondences = 0;
+            double loop_median_range =
+                std::numeric_limits<double>::quiet_NaN();
+            double loop_min_relative =
+                std::numeric_limits<double>::quiet_NaN();
+
+            bool dynamic_loop_information = false;
+
+            const Keyframe *loop_current_keyframe =
+                FindBackendKeyframeById(
+                    constraint.current_keyframe_id);
+
+            const Keyframe *loop_historical_keyframe =
+                FindBackendKeyframeById(
+                    constraint.historical_keyframe_id);
+
+            const BackendSubmapSnapshot *loop_historical_submap =
+                FindBackendSubmapById(
+                    constraint.historical_submap_id);
+
+            if (loop_current_keyframe != nullptr &&
+                loop_historical_keyframe != nullptr &&
+                loop_historical_submap != nullptr &&
+                loop_current_keyframe->cloud &&
+                loop_historical_submap->cloud_S &&
+                loop_historical_submap->T_WS.matrix().allFinite() &&
+                loop_historical_keyframe->T_WL.matrix().allFinite())
+            {
+                const Eigen::Isometry3d T_H_K_for_information =
+                    loop_historical_submap->T_WS.inverse() *
+                    loop_historical_keyframe->T_WL;
+
+                const Eigen::Isometry3d T_H_L_for_information =
+                    T_H_K_for_information *
+                    constraint.T_historical_current;
+
+                if (T_H_K_for_information.matrix().allFinite() &&
+                    T_H_L_for_information.matrix().allFinite())
+                {
+                    dynamic_loop_information =
+                        BuildLoopShadowInformationFull6x6(
+                            loop_current_keyframe->cloud,
+                            loop_historical_submap->cloud_S,
+                            T_H_L_for_information,
+                            loop_verifier_.GetConfig(),
+                            loop_information,
+                            loop_shadow_correspondences,
+                            loop_median_range,
+                            loop_min_relative);
+                }
+            }
+
             if (!pose_graph_.AddLoopEdge(
                     constraint.historical_keyframe_id,
                     constraint.current_keyframe_id,
@@ -3447,6 +9397,14 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 batch_stage_ok = false;
                 break;
             }
+
+            double loop_max_offdiag = 0.0;
+            double loop_max_tr_coupling = 0.0;
+
+            ComputeLoopInformationStats(
+                loop_information,
+                loop_max_offdiag,
+                loop_max_tr_coupling);
 
             staged_loop_edges.emplace_back(
                 constraint.historical_keyframe_id,
@@ -3459,6 +9417,28 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 << " | to_kf="
                 << constraint.current_keyframe_id
                 << " | edge_mode=FIRST_BATCH"
+                << " | information_mode="
+                << (dynamic_loop_information
+                        ? "SHADOW_FULL_6X6"
+                        : "IDENTITY_FALLBACK")
+                << " | base_diag=["
+                << loop_information(0, 0) << " "
+                << loop_information(1, 1) << " "
+                << loop_information(2, 2) << " "
+                << loop_information(3, 3) << " "
+                << loop_information(4, 4) << " "
+                << loop_information(5, 5)
+                << "]"
+                << " | max_offdiag="
+                << loop_max_offdiag
+                << " | max_tr_coupling="
+                << loop_max_tr_coupling
+                << " | shadow_corr="
+                << loop_shadow_correspondences
+                << " | median_range="
+                << loop_median_range
+                << " | min_relative="
+                << loop_min_relative
                 << " | measurement_translation_norm="
                 << constraint.T_historical_current.translation().norm()
                 << " m"
@@ -3490,9 +9470,23 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
 
         PoseGraphOptimizationResult optimization_result;
 
-        if (!pose_graph_optimizer_.Optimize(
+        const std::chrono::steady_clock::time_point
+            first_batch_pgo_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_batch_pgo_ok =
+            pose_graph_optimizer_.Optimize(
                 pose_graph_,
-                optimization_result))
+                optimization_result);
+
+        loop_timing.pose_graph_optimize_ms +=
+            ElapsedMilliseconds(
+                first_batch_pgo_start,
+                std::chrono::steady_clock::now());
+
+        ++loop_timing.pose_graph_optimize_calls;
+
+        if (!first_batch_pgo_ok)
         {
             std::size_t rollback_count = 0;
 
@@ -3534,6 +9528,9 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 << std::endl;
             return;
         }
+
+        loop_timing.optimization_accepted = true;
+        loop_timing.loop_edge_accepted = true;
 
         const PendingLoopConstraint &last_constraint =
             pending_first_loop_batch_.back();
@@ -3592,8 +9589,20 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
             << " | guards=PASS"
             << std::endl;
 
-        if (!UpdateMapOdomCorrection(
-                last_online_loop_current_keyframe_id_))
+        const std::chrono::steady_clock::time_point
+            first_batch_map_odom_start =
+                std::chrono::steady_clock::now();
+
+        const bool first_batch_map_odom_ok =
+            UpdateMapOdomCorrection(
+                last_online_loop_current_keyframe_id_);
+
+        loop_timing.map_odom_ms +=
+            ElapsedMilliseconds(
+                first_batch_map_odom_start,
+                std::chrono::steady_clock::now());
+
+        if (!first_batch_map_odom_ok)
         {
             std::cerr
                 << "Map->odom correction update failed"
@@ -3602,24 +9611,48 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                 << std::endl;
         }
 
+        const std::chrono::steady_clock::time_point
+            first_batch_global_map_start =
+                std::chrono::steady_clock::now();
+
         const bool global_map_rebuilt =
             RebuildGlobalMapSnapshots();
+
+        loop_timing.global_map_rebuild_ms +=
+            ElapsedMilliseconds(
+                first_batch_global_map_start,
+                std::chrono::steady_clock::now());
 
         if (!global_map_rebuilt)
         {
             std::cerr
                 << "Global map snapshot rebuild failed"
-                << " | keyframes=" << keyframe_manager_.Size()
+                << " | keyframes=" << backend_keyframes_.size()
                 << " | graph_nodes=" << pose_graph_.NodeCount()
                 << std::endl;
         }
-        else if (!RebuildPostPgoRefinedMap())
+        else
         {
-            std::cerr
-                << "Post-PGO refined map rebuild skipped/failed"
-                << " | global_revision=" << global_map_revision_
-                << " | keyframes=" << keyframe_manager_.Size()
-                << std::endl;
+            const std::chrono::steady_clock::time_point
+                first_batch_refinement_start =
+                    std::chrono::steady_clock::now();
+
+            const bool refinement_ok =
+                RebuildPostPgoRefinedMap();
+
+            loop_timing.refinement_ms +=
+                ElapsedMilliseconds(
+                    first_batch_refinement_start,
+                    std::chrono::steady_clock::now());
+
+            if (!refinement_ok)
+            {
+                std::cerr
+                    << "Post-PGO refined map rebuild skipped/failed"
+                    << " | global_revision=" << global_map_revision_
+                    << " | keyframes=" << backend_keyframes_.size()
+                    << std::endl;
+            }
         }
 
         return;
@@ -3746,16 +9779,16 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         //     E = (A * Z2)^-1 * (Z1 * B)
         // --------------------------------------------------------------------
         const Keyframe *last_historical_keyframe =
-            FindKeyframeById(
+            FindBackendKeyframeById(
                 last_online_loop_historical_keyframe_id_);
         const Keyframe *last_current_loop_keyframe =
-            FindKeyframeById(
+            FindBackendKeyframeById(
                 last_online_loop_current_keyframe_id_);
         const Keyframe *new_historical_keyframe =
-            FindKeyframeById(
+            FindBackendKeyframeById(
                 edge_historical_keyframe_id);
         const Keyframe *new_current_loop_keyframe =
-            FindKeyframeById(
+            FindBackendKeyframeById(
                 edge_current_keyframe_id);
 
         if (last_historical_keyframe == nullptr ||
@@ -3868,8 +9901,25 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         return;
     }
 
-    const Eigen::Matrix<double, 6, 6> loop_information =
+    Eigen::Matrix<double, 6, 6> loop_information =
         Eigen::Matrix<double, 6, 6>::Identity();
+
+    std::size_t loop_shadow_correspondences = 0;
+    double loop_median_range =
+        std::numeric_limits<double>::quiet_NaN();
+    double loop_min_relative =
+        std::numeric_limits<double>::quiet_NaN();
+
+    const bool dynamic_loop_information =
+        BuildLoopShadowInformationFull6x6(
+            current_keyframe.cloud,
+            best_historical_submap->cloud_S,
+            best_verification.T_target_source,
+            loop_verifier_.GetConfig(),
+            loop_information,
+            loop_shadow_correspondences,
+            loop_median_range,
+            loop_min_relative);
 
     if (!pose_graph_.AddLoopEdge(
             edge_historical_keyframe_id,
@@ -3885,6 +9935,14 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         return;
     }
 
+    double loop_max_offdiag = 0.0;
+    double loop_max_tr_coupling = 0.0;
+
+    ComputeLoopInformationStats(
+        loop_information,
+        loop_max_offdiag,
+        loop_max_tr_coupling);
+
     // Gravity Guard V1 makes loop insertion transactional.  The loop edge is
     // temporarily present while g2o evaluates it, but the online loop-sequence
     // anchors are NOT committed yet.  If optimization violates the gravity
@@ -3898,6 +9956,28 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         << " | support=" << online_loop_track_.support
         << " | edge_mode="
         << "SEQUENCE_CYCLE_OK"
+        << " | information_mode="
+        << (dynamic_loop_information
+                ? "SHADOW_FULL_6X6"
+                : "IDENTITY_FALLBACK")
+        << " | base_diag=["
+        << loop_information(0, 0) << " "
+        << loop_information(1, 1) << " "
+        << loop_information(2, 2) << " "
+        << loop_information(3, 3) << " "
+        << loop_information(4, 4) << " "
+        << loop_information(5, 5)
+        << "]"
+        << " | max_offdiag="
+        << loop_max_offdiag
+        << " | max_tr_coupling="
+        << loop_max_tr_coupling
+        << " | shadow_corr="
+        << loop_shadow_correspondences
+        << " | median_range="
+        << loop_median_range
+        << " | min_relative="
+        << loop_min_relative
         << " | current_edge_gap=" << loop_edge_current_gap
         << " | historical_edge_gap=" << loop_edge_historical_gap
         << " | measurement_translation_norm="
@@ -3919,9 +9999,23 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     // ========================================================================
     PoseGraphOptimizationResult optimization_result;
 
-    if (!pose_graph_optimizer_.Optimize(
+    const std::chrono::steady_clock::time_point
+        sequence_pgo_start =
+            std::chrono::steady_clock::now();
+
+    const bool sequence_pgo_ok =
+        pose_graph_optimizer_.Optimize(
             pose_graph_,
-            optimization_result))
+            optimization_result);
+
+    loop_timing.pose_graph_optimize_ms +=
+        ElapsedMilliseconds(
+            sequence_pgo_start,
+            std::chrono::steady_clock::now());
+
+    ++loop_timing.pose_graph_optimize_calls;
+
+    if (!sequence_pgo_ok)
     {
         const bool loop_edge_rolled_back =
             pose_graph_.RemoveLoopEdge(
@@ -3956,6 +10050,9 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
 
     // Optimization + gravity validation succeeded.  Only now is this loop
     // considered a real backend constraint for future sequence/cycle logic.
+    loop_timing.optimization_accepted = true;
+    loop_timing.loop_edge_accepted = true;
+
     has_last_online_loop_edge_ = true;
     last_online_loop_current_keyframe_id_ =
         edge_current_keyframe_id;
@@ -4015,8 +10112,20 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     // IMPORTANT: this does NOT overwrite Keyframe::T_WL or the live frontend
     // pose.  It only creates a bridge for corrected real-time output.
     // ------------------------------------------------------------------------
-    if (!UpdateMapOdomCorrection(
-            current_keyframe.id))
+    const std::chrono::steady_clock::time_point
+        sequence_map_odom_start =
+            std::chrono::steady_clock::now();
+
+    const bool sequence_map_odom_ok =
+        UpdateMapOdomCorrection(
+            current_keyframe.id);
+
+    loop_timing.map_odom_ms +=
+        ElapsedMilliseconds(
+            sequence_map_odom_start,
+            std::chrono::steady_clock::now());
+
+    if (!sequence_map_odom_ok)
     {
         std::cerr
             << "Map->odom correction update failed"
@@ -4032,27 +10141,51 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
     // This is intentionally executed only after successful G2O optimization,
     // not on every LiDAR frame.
     // ------------------------------------------------------------------------
+    const std::chrono::steady_clock::time_point
+        sequence_global_map_start =
+            std::chrono::steady_clock::now();
+
     const bool global_map_rebuilt =
         RebuildGlobalMapSnapshots();
+
+    loop_timing.global_map_rebuild_ms +=
+        ElapsedMilliseconds(
+            sequence_global_map_start,
+            std::chrono::steady_clock::now());
 
     if (!global_map_rebuilt)
     {
         std::cerr
             << "Global map snapshot rebuild failed"
-            << " | keyframes=" << keyframe_manager_.Size()
+            << " | keyframes=" << backend_keyframes_.size()
             << " | graph_nodes=" << pose_graph_.NodeCount()
             << std::endl;
     }
-    else if (!RebuildPostPgoRefinedMap())
+    else
     {
-        // Refinement is an OPTIONAL backend product.  A failure here must not
-        // invalidate the already-successful PoseGraph optimization or the raw
-        // / optimized global-map snapshots.
-        std::cerr
-            << "Post-PGO refined map rebuild skipped/failed"
-            << " | global_revision=" << global_map_revision_
-            << " | keyframes=" << keyframe_manager_.Size()
-            << std::endl;
+        const std::chrono::steady_clock::time_point
+            sequence_refinement_start =
+                std::chrono::steady_clock::now();
+
+        const bool refinement_ok =
+            RebuildPostPgoRefinedMap();
+
+        loop_timing.refinement_ms +=
+            ElapsedMilliseconds(
+                sequence_refinement_start,
+                std::chrono::steady_clock::now());
+
+        if (!refinement_ok)
+        {
+            // Refinement is an OPTIONAL backend product.  A failure here must not
+            // invalidate the already-successful PoseGraph optimization or the raw
+            // / optimized global-map snapshots.
+            std::cerr
+                << "Post-PGO refined map rebuild skipped/failed"
+                << " | global_revision=" << global_map_revision_
+                << " | keyframes=" << backend_keyframes_.size()
+                << std::endl;
+        }
     }
 }
 
@@ -4083,8 +10216,12 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
     const char *reason,
     bool clear_refined_overrides)
 {
+    const std::chrono::steady_clock::time_point
+        map_update_start =
+            std::chrono::steady_clock::now();
+
     const std::vector<Keyframe> &keyframes =
-        keyframe_manager_.GetAllKeyframes();
+        backend_keyframes_;
 
     if (keyframes.empty() ||
         pose_graph_.NodeCount() == 0)
@@ -4105,6 +10242,10 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
             false);
 
     std::size_t missing_graph_nodes = 0;
+
+    const std::chrono::steady_clock::time_point
+        pose_snapshot_start =
+            std::chrono::steady_clock::now();
 
     for (std::size_t i = 0;
          i < keyframes.size();
@@ -4128,13 +10269,31 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
             true;
     }
 
+    const double pose_snapshot_ms =
+        ElapsedMilliseconds(
+            pose_snapshot_start,
+            std::chrono::steady_clock::now());
+
     IncrementalGlobalMap::UpdateStats raw_stats;
     IncrementalGlobalMap::UpdateStats optimized_stats;
+
+    const std::chrono::steady_clock::time_point
+        raw_update_start =
+            std::chrono::steady_clock::now();
 
     const bool raw_ok =
         incremental_global_map_.UpdateRaw(
             keyframes,
             raw_stats);
+
+    const double raw_update_ms =
+        ElapsedMilliseconds(
+            raw_update_start,
+            std::chrono::steady_clock::now());
+
+    const std::chrono::steady_clock::time_point
+        optimized_update_start =
+            std::chrono::steady_clock::now();
 
     const bool optimized_ok =
         incremental_global_map_.UpdateOptimized(
@@ -4143,6 +10302,11 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
             optimized_pose_valid,
             clear_refined_overrides,
             optimized_stats);
+
+    const double optimized_update_ms =
+        ElapsedMilliseconds(
+            optimized_update_start,
+            std::chrono::steady_clock::now());
 
     const pcl::PointCloud<LIDAR_POINT>::ConstPtr raw_map =
         incremental_global_map_.GetRawMap();
@@ -4208,6 +10372,35 @@ bool RegistrationScan2LocalMap::UpdateIncrementalGlobalMaps(
         << incremental_global_map_.VoxelLeafSize() << " m"
         << std::endl;
 
+    const double map_update_total_ms =
+        ElapsedMilliseconds(
+            map_update_start,
+            std::chrono::steady_clock::now());
+
+    RCLCPP_INFO(
+        kTimingLogger,
+        "FR_TIMING GLOBAL_MAP"
+        " | reason=%s"
+        " | total=%.3f ms"
+        " | pose_snapshot=%.3f"
+        " | raw_update=%.3f"
+        " | optimized_update=%.3f"
+        " | keyframes=%zu"
+        " | raw_dirty_blocks=%zu"
+        " | optimized_dirty_blocks=%zu"
+        " | raw_points=%zu"
+        " | optimized_points=%zu",
+        reason != nullptr ? reason : "UNKNOWN",
+        map_update_total_ms,
+        pose_snapshot_ms,
+        raw_update_ms,
+        optimized_update_ms,
+        keyframes.size(),
+        raw_stats.dirty_blocks,
+        optimized_stats.dirty_blocks,
+        raw_map->size(),
+        optimized_map->size());
+
     return true;
 }
 
@@ -4230,19 +10423,23 @@ bool RegistrationScan2LocalMap::RebuildGlobalMapSnapshots()
 // ============================================================================
 // RebuildPostPgoRefinedMap()
 //
-// Post-PGO refinement V3: local-window multi-pose optimization.
+// Post-PGO refinement V4: sparse-geometry local-window multi-pose optimization.
 //
-// Each current-window Keyframe gets its own SE(3) variable.  Per-Keyframe
-// point-to-plane registration against one frozen historical LocalMap supplies
-// soft geometry anchor edges, while frozen G2O relative poses provide stronger
-// consecutive odometry edges.  The temporary graph solution is used only for
+// Every current-window Keyframe still gets its own SE(3) variable and every
+// consecutive odometry edge is retained.  The expensive point-to-plane
+// registration is evaluated only on a uniformly distributed subset of
+// Keyframes.  Those accepted geometry anchors constrain the whole local graph,
+// and the odometry chain propagates the correction to unregistered Keyframes.
+// The temporary graph solution is used only for
 // /refined_map and never overwrites the main PoseGraph.
 //
-// Why V3 exists:
+// Why V4 exists:
 //     V1: each Keyframe independently registered to a LocalMap -> too free.
 //     V2: one shared rigid correction for the whole window -> too rigid.
+//     V3: local pose graph works well, but performs Full Align for every KF.
+//     V4: keep the V3 graph, but sparsify only the expensive geometry anchors.
 //
-// V3 uses a small temporary Keyframe PoseGraph:
+// V4 uses the same small temporary Keyframe PoseGraph:
 //
 //     fixed map anchor (Identity)
 //          |       |       |       geometry edges from point-to-plane ICP
@@ -4268,8 +10465,15 @@ bool RegistrationScan2LocalMap::RebuildGlobalMapSnapshots()
 // ============================================================================
 bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
 {
+    RefinementTimingDiagnostics refinement_timing;
+    RefinementTimingReporter refinement_timing_reporter(
+        refinement_timing);
+
     const std::vector<Keyframe> &keyframes =
-        keyframe_manager_.GetAllKeyframes();
+        backend_keyframes_;
+
+    refinement_timing.keyframes =
+        keyframes.size();
 
     if (keyframes.empty() ||
         pose_graph_.NodeCount() == 0 ||
@@ -4280,20 +10484,16 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
 
     refined_map_revision_ = 0;
 
-    if (refinement_historical_target_debug_)
-    {
-        refinement_historical_target_debug_->clear();
-    }
+    // Publish-side snapshots may still reference the previous debug clouds.
+    // Replace the handles instead of clearing those shared buffers in place.
+    refinement_historical_target_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
 
-    if (refinement_current_before_debug_)
-    {
-        refinement_current_before_debug_->clear();
-    }
+    refinement_current_before_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
 
-    if (refinement_current_after_debug_)
-    {
-        refinement_current_after_debug_->clear();
-    }
+    refinement_current_after_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
 
     refinement_debug_revision_ = 0;
 
@@ -4405,6 +10605,9 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                    rhs.current_id;
         });
 
+    refinement_timing.loop_anchors =
+        loop_anchors.size();
+
     std::size_t groups_considered = 0;
     std::size_t groups_prepared = 0;
     std::size_t groups_optimized = 0;
@@ -4412,12 +10615,23 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
     std::size_t groups_rejected_overlap = 0;
     std::size_t groups_rejected_quality = 0;
     std::size_t groups_rejected_large_update = 0;
+    std::size_t geometry_candidates_total = 0;
+    std::size_t geometry_primary_selected_total = 0;
     std::size_t geometry_attempts_total = 0;
+    std::size_t geometry_fallback_calls_total = 0;
     std::size_t geometry_anchors_total = 0;
     std::size_t adjusted_keyframes = 0;
 
+    // V4 keeps all local graph states and odometry edges, but limits the
+    // expensive point-to-plane observations.  A 16-KF window therefore uses
+    // at most 8 primary geometry registrations.  If too few primary anchors
+    // pass the existing quality gates, up to 4 additional untested Keyframes
+    // are tried before rejecting the refinement group.
+    constexpr std::size_t kSparsePrimaryGeometryAnchors = 8;
+    constexpr std::size_t kSparseMaxFallbackGeometryCalls = 4;
+
     std::cout
-        << "Post-PGO local-window refinement V3 started"
+        << "Post-PGO local-window refinement V5 SPARSE+GATE_DIAG started"
         << " | global_revision=" << global_map_revision_
         << " | keyframes=" << keyframes.size()
         << " | loop_anchors=" << loop_anchors.size()
@@ -4425,6 +10639,8 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         << " | historical_window=" << refinement_historical_keyframe_window_
         << " | historical_radius=" << refinement_historical_radius_ << " m"
         << " | min_geometry_anchors=" << refinement_min_geometry_anchors_
+        << " | sparse_primary_anchors=" << kSparsePrimaryGeometryAnchors
+        << " | sparse_fallback_max=" << kSparseMaxFallbackGeometryCalls
         << " | odom_info_scale=" << refinement_local_odom_information_scale_
         << " | geometry_info_scale=" << refinement_geometry_information_scale_
         << " | max_window_dt=" << refinement_window_max_translation_update_ << " m"
@@ -4468,12 +10684,18 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         }
 
         ++groups_considered;
+        refinement_timing.groups_considered =
+            groups_considered;
 
         // --------------------------------------------------------------------
         // Current revisit window: one independent SE(3) state per Keyframe.
         // The window ends at the current loop endpoint because those poses are
         // already available when the online loop is accepted.
         // --------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            current_select_start =
+                std::chrono::steady_clock::now();
+
         std::vector<std::size_t>
             current_indices;
 
@@ -4509,6 +10731,11 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
 
             current_indices.push_back(i);
         }
+
+        refinement_timing.current_select_ms +=
+            ElapsedMilliseconds(
+                current_select_start,
+                std::chrono::steady_clock::now());
 
         if (current_indices.size() <
             refinement_min_current_keyframes_)
@@ -4550,6 +10777,10 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         // of the accepted loop edge.  Every current Keyframe uses exactly this
         // same target, so the geometry constraints are mutually comparable.
         // --------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            historical_select_start =
+                std::chrono::steady_clock::now();
+
         std::vector<std::pair<double, std::size_t>>
             historical_candidates;
 
@@ -4638,6 +10869,15 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                 refinement_max_historical_keyframes_);
         }
 
+        refinement_timing.historical_select_ms +=
+            ElapsedMilliseconds(
+                historical_select_start,
+                std::chrono::steady_clock::now());
+
+        const std::chrono::steady_clock::time_point
+            historical_build_start =
+                std::chrono::steady_clock::now();
+
         pcl::PointCloud<LIDAR_POINT>::Ptr
             historical_target_accumulated =
                 pcl::make_shared<
@@ -4678,6 +10918,11 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                 historical_world_cloud;
         }
 
+        refinement_timing.historical_build_ms +=
+            ElapsedMilliseconds(
+                historical_build_start,
+                std::chrono::steady_clock::now());
+
         if (historical_target_accumulated->empty())
         {
             ++groups_rejected_quality;
@@ -4700,8 +10945,17 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         target_voxel.setInputCloud(
             historical_target_accumulated);
 
+        const std::chrono::steady_clock::time_point
+            historical_voxel_start =
+                std::chrono::steady_clock::now();
+
         target_voxel.filter(
             *historical_target_filtered);
+
+        refinement_timing.historical_voxel_ms +=
+            ElapsedMilliseconds(
+                historical_voxel_start,
+                std::chrono::steady_clock::now());
 
         if (historical_target_filtered->size() <
             refinement_min_target_points_)
@@ -4713,15 +10967,33 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         PreparedLidarTarget
             prepared_refinement_target;
 
-        if (!registration_.PrepareTarget(
+        const std::chrono::steady_clock::time_point
+            prepare_target_start =
+                std::chrono::steady_clock::now();
+
+        const bool prepare_target_ok =
+            backend_refinement_registration_.PrepareTarget(
                 historical_target_filtered,
-                prepared_refinement_target))
+                prepared_refinement_target);
+
+        refinement_timing.prepare_target_ms +=
+            ElapsedMilliseconds(
+                prepare_target_start,
+                std::chrono::steady_clock::now());
+
+        if (!prepare_target_ok)
         {
             ++groups_rejected_quality;
             continue;
         }
 
         ++groups_prepared;
+        refinement_timing.groups_prepared =
+            groups_prepared;
+
+        const std::chrono::steady_clock::time_point
+            local_graph_start =
+                std::chrono::steady_clock::now();
 
         // --------------------------------------------------------------------
         // Temporary LOCAL PoseGraph.
@@ -4819,8 +11091,18 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             continue;
         }
 
+        refinement_timing.local_graph_build_ms +=
+            ElapsedMilliseconds(
+                local_graph_start,
+                std::chrono::steady_clock::now());
+
         std::vector<bool>
             geometry_anchor_valid(
+                current_indices.size(),
+                false);
+
+        std::vector<bool>
+            geometry_was_tested(
                 current_indices.size(),
                 false);
 
@@ -4845,41 +11127,273 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                 std::numeric_limits<double>::infinity());
 
         std::size_t geometry_anchor_count = 0;
+        std::size_t geometry_primary_selected = 0;
+        std::size_t geometry_fallback_calls = 0;
+
+        // V5 diagnostic counters. These counters are observational only;
+        // they do not change any geometry acceptance threshold or graph math.
+        std::size_t geometry_attempts_group = 0;
+        std::size_t geometry_reject_align_failed = 0;
+        std::size_t geometry_reject_result_failed = 0;
+        std::size_t geometry_reject_not_converged = 0;
+        std::size_t geometry_reject_transform_nonfinite = 0;
+        std::size_t geometry_reject_rmse_nonfinite = 0;
+        std::size_t geometry_reject_corr_low = 0;
+        std::size_t geometry_reject_rmse_high = 0;
+        std::size_t geometry_reject_correction_nonfinite = 0;
+        std::size_t geometry_reject_delta_t_high = 0;
+        std::size_t geometry_reject_delta_R_high = 0;
+        std::size_t geometry_reject_add_edge_failed = 0;
+
+        geometry_candidates_total +=
+            current_indices.size();
+
+        refinement_timing.geometry_candidates +=
+            current_indices.size();
 
         const Eigen::Matrix<double, 6, 6>
             geometry_information =
                 Eigen::Matrix<double, 6, 6>::Identity() *
                 refinement_geometry_information_scale_;
 
-        for (std::size_t k = 0;
-             k < current_indices.size();
-             ++k)
+        // --------------------------------------------------------------------
+        // V4 sparse geometry selection.
+        //
+        // Keep the first and last Keyframes and distribute the remaining
+        // anchors approximately uniformly over the local window.  For the
+        // current default 16-KF window this selects:
+        //
+        //     0, 2, 4, 6, 9, 11, 13, 15
+        //
+        // (exact integer rounding is intentional).  All 16 graph nodes and
+        // all 15 odometry edges remain in the optimization.
+        // --------------------------------------------------------------------
+        const std::size_t primary_target_count =
+            std::min(
+                kSparsePrimaryGeometryAnchors,
+                current_indices.size());
+
+        std::vector<std::size_t>
+            primary_geometry_indices;
+
+        primary_geometry_indices.reserve(
+            primary_target_count);
+
+        if (primary_target_count == 1)
         {
+            primary_geometry_indices.push_back(0);
+        }
+        else if (primary_target_count > 1)
+        {
+            const std::size_t last_index =
+                current_indices.size() - 1;
+
+            const std::size_t denominator =
+                primary_target_count - 1;
+
+            for (std::size_t slot = 0;
+                 slot < primary_target_count;
+                 ++slot)
+            {
+                const std::size_t numerator =
+                    slot * last_index;
+
+                // Rounded integer interpolation in [0, last_index].
+                const std::size_t k =
+                    (numerator + denominator / 2) /
+                    denominator;
+
+                if (primary_geometry_indices.empty() ||
+                    primary_geometry_indices.back() != k)
+                {
+                    primary_geometry_indices.push_back(k);
+                }
+            }
+
+            // Defensive guarantee: the current loop endpoint is always tested.
+            if (primary_geometry_indices.empty() ||
+                primary_geometry_indices.back() != last_index)
+            {
+                primary_geometry_indices.push_back(
+                    last_index);
+            }
+        }
+
+        geometry_primary_selected =
+            primary_geometry_indices.size();
+
+        geometry_primary_selected_total +=
+            geometry_primary_selected;
+
+        refinement_timing.geometry_primary_selected +=
+            geometry_primary_selected;
+
+        auto log_geometry_attempt =
+            [&](const char *outcome,
+                const char *reason,
+                const std::size_t k,
+                const std::size_t source_keyframe_id,
+                const bool is_fallback,
+                const std::size_t correspondences,
+                const double rmse,
+                const double correction_translation,
+                const double correction_rotation_deg)
+        {
+            RCLCPP_INFO(
+                kTimingLogger,
+                "FR_REFINEMENT_GEOMETRY_ATTEMPT"
+                " | historical_kf=%zu"
+                " | current_kf=%zu"
+                " | source_kf=%zu"
+                " | local_index=%zu"
+                " | sample=%s"
+                " | outcome=%s"
+                " | reason=%s"
+                " | corr=%zu"
+                " | rmse=%.6f"
+                " | delta_t=%.6f"
+                " | delta_R_deg=%.6f",
+                anchor.historical_id,
+                anchor.current_id,
+                source_keyframe_id,
+                k,
+                is_fallback ? "fallback" : "primary",
+                outcome,
+                reason,
+                correspondences,
+                rmse,
+                correction_translation,
+                correction_rotation_deg);
+        };
+
+        auto try_geometry_anchor =
+            [&](const std::size_t k,
+                const bool is_fallback) -> bool
+        {
+            if (k >= current_indices.size() ||
+                geometry_was_tested[k])
+            {
+                return true;
+            }
+
+            geometry_was_tested[k] = true;
+
             const std::size_t source_index =
                 current_indices[k];
 
             const Keyframe &source_keyframe =
                 keyframes[source_index];
 
+            ++geometry_attempts_group;
             ++geometry_attempts_total;
+            ++refinement_timing.geometry_calls;
 
-            LidarRegistrationResult
-                geometry_result;
+            if (is_fallback)
+            {
+                ++geometry_fallback_calls;
+                ++geometry_fallback_calls_total;
+                ++refinement_timing.geometry_fallback_calls;
+            }
+
+            LidarRegistrationResult geometry_result;
+
+            const std::chrono::steady_clock::time_point
+                geometry_align_start =
+                    std::chrono::steady_clock::now();
 
             const bool align_success =
-                registration_.Align(
+                backend_refinement_registration_.Align(
                     source_keyframe.cloud,
                     prepared_refinement_target,
                     frozen_graph_poses[source_index],
                     geometry_result);
 
-            if (!align_success ||
-                !geometry_result.success ||
-                !geometry_result.converged ||
-                !geometry_result.T_target_source.matrix().allFinite() ||
-                !std::isfinite(geometry_result.rmse))
+            refinement_timing.geometry_align_ms +=
+                ElapsedMilliseconds(
+                    geometry_align_start,
+                    std::chrono::steady_clock::now());
+
+            const double nan_value =
+                std::numeric_limits<double>::quiet_NaN();
+
+            if (!align_success)
             {
-                continue;
+                ++geometry_reject_align_failed;
+                log_geometry_attempt(
+                    "REJECT",
+                    "ALIGN_RETURN_FALSE",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    0,
+                    nan_value,
+                    nan_value,
+                    nan_value);
+                return true;
+            }
+
+            if (!geometry_result.success)
+            {
+                ++geometry_reject_result_failed;
+                log_geometry_attempt(
+                    "REJECT",
+                    "RESULT_SUCCESS_FALSE",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    nan_value,
+                    nan_value);
+                return true;
+            }
+
+            if (!geometry_result.converged)
+            {
+                ++geometry_reject_not_converged;
+                log_geometry_attempt(
+                    "REJECT",
+                    "NOT_CONVERGED",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    nan_value,
+                    nan_value);
+                return true;
+            }
+
+            if (!geometry_result.T_target_source.matrix().allFinite())
+            {
+                ++geometry_reject_transform_nonfinite;
+                log_geometry_attempt(
+                    "REJECT",
+                    "TRANSFORM_NONFINITE",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    nan_value,
+                    nan_value);
+                return true;
+            }
+
+            if (!std::isfinite(geometry_result.rmse))
+            {
+                ++geometry_reject_rmse_nonfinite;
+                log_geometry_attempt(
+                    "REJECT",
+                    "RMSE_NONFINITE",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    nan_value,
+                    nan_value);
+                return true;
             }
 
             geometry_correspondences[k] =
@@ -4906,21 +11420,176 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             geometry_delta_R_deg[k] =
                 correction_rotation_deg;
 
+            // ------------------------------------------------------------
+            // Refinement pose-delta diagnostics.
+            //
+            // T_local_delta answers:
+            //     how much does this Keyframe need to move relative to its
+            //     current post-PGO pose, expressed in the Keyframe-local
+            //     perturbation convention used by the existing gate?
+            //
+            // T_world_delta answers:
+            //     is there a coherent rigid correction in the map/world
+            //     frame shared by several current-window Keyframes?
+            //
+            // If many good ICP results show nearly the same world-frame
+            // yaw / translation, the current absolute 0.40 m / 3 deg gate is
+            // rejecting a coherent correction rather than random outliers.
+            // ------------------------------------------------------------
+            const Eigen::Isometry3d T_local_delta =
+                T_initial_geometry;
+
+            const Eigen::Isometry3d T_world_delta =
+                geometry_result.T_target_source *
+                frozen_graph_poses[source_index].inverse();
+
+            const Eigen::Vector3d local_rpy_zyx =
+                T_local_delta.rotation().eulerAngles(2, 1, 0);
+
+            const Eigen::Vector3d world_rpy_zyx =
+                T_world_delta.rotation().eulerAngles(2, 1, 0);
+
+            constexpr double kRadToDeg =
+                180.0 / M_PI;
+
+            const double local_yaw_deg =
+                local_rpy_zyx[0] * kRadToDeg;
+            const double local_pitch_deg =
+                local_rpy_zyx[1] * kRadToDeg;
+            const double local_roll_deg =
+                local_rpy_zyx[2] * kRadToDeg;
+
+            const double world_yaw_deg =
+                world_rpy_zyx[0] * kRadToDeg;
+            const double world_pitch_deg =
+                world_rpy_zyx[1] * kRadToDeg;
+            const double world_roll_deg =
+                world_rpy_zyx[2] * kRadToDeg;
+
+            RCLCPP_INFO(
+                kTimingLogger,
+                "FR_REFINEMENT_DELTA_COMPONENTS"
+                " | historical_kf=%zu"
+                " | current_kf=%zu"
+                " | source_kf=%zu"
+                " | local_index=%zu"
+                " | sample=%s"
+                " | corr=%zu"
+                " | rmse=%.6f"
+                " | local_dt=[%.6f %.6f %.6f]"
+                " | local_rpy_deg=[%.6f %.6f %.6f]"
+                " | world_dt=[%.6f %.6f %.6f]"
+                " | world_rpy_deg=[%.6f %.6f %.6f]"
+                " | delta_t_norm=%.6f"
+                " | delta_R_deg=%.6f",
+                anchor.historical_id,
+                anchor.current_id,
+                source_keyframe.id,
+                k,
+                is_fallback ? "fallback" : "primary",
+                geometry_result.correspondences,
+                geometry_result.rmse,
+                T_local_delta.translation().x(),
+                T_local_delta.translation().y(),
+                T_local_delta.translation().z(),
+                local_roll_deg,
+                local_pitch_deg,
+                local_yaw_deg,
+                T_world_delta.translation().x(),
+                T_world_delta.translation().y(),
+                T_world_delta.translation().z(),
+                world_roll_deg,
+                world_pitch_deg,
+                world_yaw_deg,
+                correction_translation,
+                correction_rotation_deg);
+
             if (geometry_result.correspondences <
-                    refinement_geometry_min_correspondences_ ||
-                geometry_result.rmse >
-                    refinement_geometry_max_rmse_ ||
-                !std::isfinite(correction_translation) ||
-                !std::isfinite(correction_rotation_deg) ||
-                correction_translation >
-                    refinement_geometry_max_translation_correction_ ||
-                correction_rotation_deg >
-                    refinement_geometry_max_rotation_correction_deg_)
+                refinement_geometry_min_correspondences_)
             {
-                continue;
+                ++geometry_reject_corr_low;
+                log_geometry_attempt(
+                    "REJECT",
+                    "CORRESPONDENCES_LOW",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return true;
             }
 
-            // Fixed node 0 is Identity in map coordinates.  Therefore the
+            if (geometry_result.rmse >
+                refinement_geometry_max_rmse_)
+            {
+                ++geometry_reject_rmse_high;
+                log_geometry_attempt(
+                    "REJECT",
+                    "RMSE_HIGH",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return true;
+            }
+
+            if (!std::isfinite(correction_translation) ||
+                !std::isfinite(correction_rotation_deg))
+            {
+                ++geometry_reject_correction_nonfinite;
+                log_geometry_attempt(
+                    "REJECT",
+                    "CORRECTION_NONFINITE",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return true;
+            }
+
+            if (correction_translation >
+                refinement_geometry_max_translation_correction_)
+            {
+                ++geometry_reject_delta_t_high;
+                log_geometry_attempt(
+                    "REJECT",
+                    "DELTA_T_HIGH",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return true;
+            }
+
+            if (correction_rotation_deg >
+                refinement_geometry_max_rotation_correction_deg_)
+            {
+                ++geometry_reject_delta_R_high;
+                log_geometry_attempt(
+                    "REJECT",
+                    "DELTA_R_HIGH",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return true;
+            }
+
+            // Fixed node 0 is Identity in map coordinates. Therefore the
             // measurement 0 -> k is simply the absolute map pose returned by
             // the point-to-plane registration.
             if (!local_pose_graph.AddLoopEdge(
@@ -4929,16 +11598,146 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                     geometry_result.T_target_source,
                     geometry_information))
             {
-                local_graph_ok = false;
-                break;
+                ++geometry_reject_add_edge_failed;
+                log_geometry_attempt(
+                    "REJECT",
+                    "ADD_LOOP_EDGE_FAILED",
+                    k,
+                    source_keyframe.id,
+                    is_fallback,
+                    geometry_result.correspondences,
+                    geometry_result.rmse,
+                    correction_translation,
+                    correction_rotation_deg);
+                return false;
             }
 
-            geometry_anchor_valid[k] =
-                true;
+            geometry_anchor_valid[k] = true;
 
             ++geometry_anchor_count;
             ++geometry_anchors_total;
+
+            refinement_timing.geometry_anchors =
+                geometry_anchors_total;
+
+            log_geometry_attempt(
+                "ACCEPT",
+                "OK",
+                k,
+                source_keyframe.id,
+                is_fallback,
+                geometry_result.correspondences,
+                geometry_result.rmse,
+                correction_translation,
+                correction_rotation_deg);
+
+            return true;
+        };
+
+        for (const std::size_t k :
+             primary_geometry_indices)
+        {
+            if (!try_geometry_anchor(
+                    k,
+                    false))
+            {
+                local_graph_ok = false;
+                break;
+            }
         }
+
+        // If the sparse primary set happens to fall on weak geometry, test a
+        // few additional Keyframes.  The fallback is intentionally bounded so
+        // V4 cannot silently return to V3's all-frame Full Align cost.
+        if (local_graph_ok &&
+            geometry_anchor_count <
+                refinement_min_geometry_anchors_)
+        {
+            for (std::size_t k = 0;
+                 k < current_indices.size() &&
+                 geometry_anchor_count <
+                     refinement_min_geometry_anchors_ &&
+                 geometry_fallback_calls <
+                     kSparseMaxFallbackGeometryCalls;
+                 ++k)
+            {
+                if (geometry_was_tested[k])
+                {
+                    continue;
+                }
+
+                if (!try_geometry_anchor(
+                        k,
+                        true))
+                {
+                    local_graph_ok = false;
+                    break;
+                }
+            }
+        }
+
+        RCLCPP_INFO(
+            kTimingLogger,
+            "FR_REFINEMENT_GEOMETRY_SUMMARY"
+            " | historical_kf=%zu"
+            " | current_kf=%zu"
+            " | candidates=%zu"
+            " | primary_selected=%zu"
+            " | fallback_calls=%zu"
+            " | attempts=%zu"
+            " | accepted=%zu"
+            " | reject_align_failed=%zu"
+            " | reject_result_failed=%zu"
+            " | reject_not_converged=%zu"
+            " | reject_transform_nonfinite=%zu"
+            " | reject_rmse_nonfinite=%zu"
+            " | reject_corr_low=%zu"
+            " | reject_rmse_high=%zu"
+            " | reject_correction_nonfinite=%zu"
+            " | reject_delta_t_high=%zu"
+            " | reject_delta_R_high=%zu"
+            " | reject_add_edge_failed=%zu"
+            " | min_corr=%zu"
+            " | max_rmse=%.6f"
+            " | max_delta_t=%.6f"
+            " | max_delta_R_deg=%.6f",
+            anchor.historical_id,
+            anchor.current_id,
+            current_indices.size(),
+            geometry_primary_selected,
+            geometry_fallback_calls,
+            geometry_attempts_group,
+            geometry_anchor_count,
+            geometry_reject_align_failed,
+            geometry_reject_result_failed,
+            geometry_reject_not_converged,
+            geometry_reject_transform_nonfinite,
+            geometry_reject_rmse_nonfinite,
+            geometry_reject_corr_low,
+            geometry_reject_rmse_high,
+            geometry_reject_correction_nonfinite,
+            geometry_reject_delta_t_high,
+            geometry_reject_delta_R_high,
+            geometry_reject_add_edge_failed,
+            refinement_geometry_min_correspondences_,
+            refinement_geometry_max_rmse_,
+            refinement_geometry_max_translation_correction_,
+            refinement_geometry_max_rotation_correction_deg_);
+
+        std::cout
+            << "Post-PGO sparse geometry sampling"
+            << " | historical_kf=" << anchor.historical_id
+            << " | current_kf=" << anchor.current_id
+            << " | candidates=" << current_indices.size()
+            << " | primary_selected=" << geometry_primary_selected
+            << " | fallback_calls=" << geometry_fallback_calls
+            << " | total_calls="
+            << std::count(
+                   geometry_was_tested.begin(),
+                   geometry_was_tested.end(),
+                   true)
+            << " | accepted_anchors=" << geometry_anchor_count
+            << std::endl;
 
         if (!local_graph_ok ||
             geometry_anchor_count <
@@ -4962,9 +11761,21 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         PoseGraphOptimizationResult
             local_optimization_result;
 
-        if (!pose_graph_optimizer_.Optimize(
+        const std::chrono::steady_clock::time_point
+            local_pgo_start =
+                std::chrono::steady_clock::now();
+
+        const bool local_pgo_ok =
+            pose_graph_optimizer_.Optimize(
                 local_pose_graph,
-                local_optimization_result) ||
+                local_optimization_result);
+
+        refinement_timing.local_pgo_ms +=
+            ElapsedMilliseconds(
+                local_pgo_start,
+                std::chrono::steady_clock::now());
+
+        if (!local_pgo_ok ||
             !local_optimization_result.success)
         {
             ++groups_rejected_quality;
@@ -4972,6 +11783,8 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         }
 
         ++groups_optimized;
+        refinement_timing.groups_optimized =
+            groups_optimized;
 
         std::vector<
             Eigen::Isometry3d,
@@ -5085,13 +11898,77 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             }
         }
 
-        if (!optimized_window_valid ||
-            max_pose_delta_t >
-                refinement_window_max_translation_update_ ||
-            max_pose_delta_R_deg >
-                refinement_window_max_rotation_update_deg_)
+        const bool refinement_window_translation_ok =
+            optimized_window_valid &&
+            max_pose_delta_t <=
+                refinement_window_max_translation_update_;
+
+        const bool refinement_window_rotation_ok =
+            optimized_window_valid &&
+            max_pose_delta_R_deg <=
+                refinement_window_max_rotation_update_deg_;
+
+        const bool refinement_window_relative_translation_ok =
+            optimized_window_valid &&
+            max_relative_odom_translation_change <=
+                refinement_window_max_relative_odom_translation_change_;
+
+        const bool refinement_window_relative_rotation_ok =
+            optimized_window_valid &&
+            max_relative_odom_rotation_change_deg <=
+                refinement_window_max_relative_odom_rotation_change_deg_;
+
+        // Coherent refinement gate:
+        //   1) allow a reasonably large absolute rigid correction after the
+        //      global loop optimization;
+        //   2) reject solutions that distort the local odometry shape.
+        const bool refinement_window_gate_accepted =
+            optimized_window_valid &&
+            refinement_window_translation_ok &&
+            refinement_window_rotation_ok &&
+            refinement_window_relative_translation_ok &&
+            refinement_window_relative_rotation_ok;
+
+        RCLCPP_INFO(
+            kTimingLogger,
+            "FR_REFINEMENT_WINDOW_GATE | historical_kf=%zu | current_kf=%zu "
+            "| geometry_anchors=%zu | chi2_before=%.9f | chi2_after=%.9f "
+            "| max_delta_t=%.6f | max_delta_t_limit=%.6f "
+            "| max_delta_R_deg=%.6f | max_delta_R_limit_deg=%.6f "
+            "| max_rel_odom_dt=%.6f | max_rel_odom_dt_limit=%.6f "
+            "| max_rel_odom_dR_deg=%.6f | max_rel_odom_dR_limit_deg=%.6f "
+            "| optimized_window_valid=%s | translation_ok=%s | rotation_ok=%s "
+            "| relative_translation_ok=%s | relative_rotation_ok=%s "
+            "| decision=%s",
+            anchor.historical_id,
+            anchor.current_id,
+            geometry_anchor_count,
+            local_optimization_result.chi2_before,
+            local_optimization_result.chi2_after,
+            max_pose_delta_t,
+            refinement_window_max_translation_update_,
+            max_pose_delta_R_deg,
+            refinement_window_max_rotation_update_deg_,
+            max_relative_odom_translation_change,
+            refinement_window_max_relative_odom_translation_change_,
+            max_relative_odom_rotation_change_deg,
+            refinement_window_max_relative_odom_rotation_change_deg_,
+            optimized_window_valid ? "true" : "false",
+            refinement_window_translation_ok ? "true" : "false",
+            refinement_window_rotation_ok ? "true" : "false",
+            refinement_window_relative_translation_ok ? "true" : "false",
+            refinement_window_relative_rotation_ok ? "true" : "false",
+            refinement_window_gate_accepted ? "ACCEPT" : "REJECT");
+
+        if (!refinement_window_gate_accepted)
         {
             ++groups_rejected_large_update;
+
+            const char *rejection_reason =
+                (!refinement_window_relative_translation_ok ||
+                 !refinement_window_relative_rotation_ok)
+                    ? "RELATIVE_ODOM_SHAPE_CHANGE"
+                    : "LARGE_LOCAL_WINDOW_UPDATE";
 
             std::cout
                 << "Post-PGO local-window refinement rejected"
@@ -5102,7 +11979,11 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
                 << " | chi2_after=" << local_optimization_result.chi2_after
                 << " | max_delta_t=" << max_pose_delta_t << " m"
                 << " | max_delta_R=" << max_pose_delta_R_deg << " deg"
-                << " | reason=LARGE_LOCAL_WINDOW_UPDATE"
+                << " | max_odom_rel_dt="
+                << max_relative_odom_translation_change << " m"
+                << " | max_odom_rel_dR="
+                << max_relative_odom_rotation_change_deg << " deg"
+                << " | reason=" << rejection_reason
                 << std::endl;
 
             continue;
@@ -5148,6 +12029,8 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             std::cout
                 << "Post-PGO local pose refined"
                 << " | keyframe=" << keyframes[source_index].id
+                << " | geometry_tested="
+                << (geometry_was_tested[k] ? "true" : "false")
                 << " | geometry_anchor="
                 << (geometry_anchor_valid[k] ? "true" : "false")
                 << " | geometry_corr=" << geometry_correspondences[k]
@@ -5166,6 +12049,10 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         // intentional: the three RViz topics must always describe exactly the
         // same historical/current window rather than a confusing mixture.
         // --------------------------------------------------------------------
+        const std::chrono::steady_clock::time_point
+            debug_clouds_start =
+                std::chrono::steady_clock::now();
+
         pcl::PointCloud<LIDAR_POINT>::Ptr current_before_debug =
             pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
 
@@ -5253,7 +12140,14 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             << refinement_current_after_debug_->size()
             << std::endl;
 
+        refinement_timing.debug_clouds_ms +=
+            ElapsedMilliseconds(
+                debug_clouds_start,
+                std::chrono::steady_clock::now());
+
         ++groups_accepted;
+        refinement_timing.groups_accepted =
+            groups_accepted;
 
         std::cout
             << "Post-PGO local-window refined"
@@ -5262,6 +12156,9 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
             << " | current_kfs=" << current_indices.size()
             << " | historical_kfs=" << historical_candidates.size()
             << " | target_points=" << historical_target_filtered->size()
+            << " | geometry_candidates=" << current_indices.size()
+            << " | geometry_primary_selected=" << geometry_primary_selected
+            << " | geometry_fallback_calls=" << geometry_fallback_calls
             << " | geometry_anchors=" << geometry_anchor_count
             << " | odom_edges=" << (current_indices.size() - 1)
             << " | chi2_before=" << local_optimization_result.chi2_before
@@ -5308,17 +12205,29 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
     IncrementalGlobalMap::UpdateStats
         refined_stats;
 
-    if (!incremental_global_map_.UpdateRefinedOverrides(
+    const std::chrono::steady_clock::time_point
+        refined_map_update_start =
+            std::chrono::steady_clock::now();
+
+    const bool refined_update_ok =
+        incremental_global_map_.UpdateRefinedOverrides(
             keyframes,
             refined_keyframe_poses_,
             refined_keyframe_pose_was_adjusted_,
-            refined_stats))
-    {
-        return false;
-    }
+            refined_stats);
 
     const pcl::PointCloud<LIDAR_POINT>::ConstPtr refined_map =
         incremental_global_map_.GetRefinedMap();
+
+    refinement_timing.refined_map_update_ms +=
+        ElapsedMilliseconds(
+            refined_map_update_start,
+            std::chrono::steady_clock::now());
+
+    if (!refined_update_ok)
+    {
+        return false;
+    }
 
     if (!refined_map ||
         refined_map->empty())
@@ -5340,7 +12249,10 @@ bool RegistrationScan2LocalMap::RebuildPostPgoRefinedMap()
         << " | groups_rejected_quality=" << groups_rejected_quality
         << " | groups_rejected_large_update="
         << groups_rejected_large_update
+        << " | geometry_candidates=" << geometry_candidates_total
+        << " | geometry_primary_selected=" << geometry_primary_selected_total
         << " | geometry_attempts=" << geometry_attempts_total
+        << " | geometry_fallback_calls=" << geometry_fallback_calls_total
         << " | geometry_anchors=" << geometry_anchors_total
         << " | adjusted_keyframes=" << adjusted_keyframes
         << " | used_keyframes=" << used_keyframes
@@ -5388,7 +12300,7 @@ bool RegistrationScan2LocalMap::UpdateMapOdomCorrection(
     std::size_t anchor_keyframe_id)
 {
     const Keyframe *anchor_keyframe =
-        FindKeyframeById(
+        FindBackendKeyframeById(
             anchor_keyframe_id);
 
     const PoseGraphNode *anchor_node =
@@ -5499,80 +12411,142 @@ Eigen::Isometry3d RegistrationScan2LocalMap::GetPose() const
 }
 
 // Return the ACTUAL current registration target.
-//
-// ACTIVE mode:
-//     Active Submap cloud.
-//
-// TRANSITION mode:
-//     voxelized Previous + Active cloud.
-//
-// The old GetLocalMap() API name is kept so the ROS publisher does not need to
-// change.  RViz therefore shows the same map that registration is using.
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetLocalMap() const
 {
     return submap_manager_.GetTrackingMap();
 }
 
+RegistrationScan2LocalMap::BackendMapSnapshot
+RegistrationScan2LocalMap::GetBackendMapSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    BackendMapSnapshot snapshot;
+
+    snapshot.raw_map =
+        backend_raw_map_snapshot_;
+
+    snapshot.optimized_map =
+        backend_optimized_map_snapshot_;
+
+    snapshot.refined_map =
+        backend_refined_map_snapshot_;
+
+    snapshot.refinement_historical_target =
+        backend_refinement_historical_target_snapshot_;
+
+    snapshot.refinement_current_before =
+        backend_refinement_current_before_snapshot_;
+
+    snapshot.refinement_current_after =
+        backend_refinement_current_after_snapshot_;
+
+    snapshot.global_revision =
+        backend_global_map_revision_snapshot_;
+
+    snapshot.refined_revision =
+        backend_refined_map_revision_snapshot_;
+
+    snapshot.refinement_debug_revision =
+        backend_refinement_debug_revision_snapshot_;
+
+    return snapshot;
+}
+
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetRawKeyframeMap() const
 {
-    return incremental_global_map_.GetRawMap();
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_raw_map_snapshot_;
 }
 
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetOptimizedMap() const
 {
-    return incremental_global_map_.GetOptimizedMap();
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_optimized_map_snapshot_;
 }
 
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetRefinedMap() const
 {
-    return incremental_global_map_.GetRefinedMap();
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refined_map_snapshot_;
 }
 
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetRefinementHistoricalTarget() const
 {
-    return refinement_historical_target_debug_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refinement_historical_target_snapshot_;
 }
 
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetRefinementCurrentBefore() const
 {
-    return refinement_current_before_debug_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refinement_current_before_snapshot_;
 }
 
 pcl::PointCloud<LIDAR_POINT>::ConstPtr
 RegistrationScan2LocalMap::GetRefinementCurrentAfter() const
 {
-    return refinement_current_after_debug_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refinement_current_after_snapshot_;
 }
 
 std::size_t RegistrationScan2LocalMap::RefinementDebugRevision() const
 {
-    return refinement_debug_revision_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refinement_debug_revision_snapshot_;
 }
 
 std::size_t RegistrationScan2LocalMap::RefinedMapRevision() const
 {
-    return refined_map_revision_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_refined_map_revision_snapshot_;
 }
 
 std::size_t RegistrationScan2LocalMap::GlobalMapRevision() const
 {
-    return global_map_revision_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_global_map_revision_snapshot_;
 }
 
 bool RegistrationScan2LocalMap::HasMapOdomCorrection() const
 {
-    return has_map_odom_correction_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_has_map_odom_correction_snapshot_;
 }
 
 Eigen::Isometry3d RegistrationScan2LocalMap::GetMapOdomCorrection() const
 {
-    return T_map_odom_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_T_map_odom_snapshot_;
 }
 
 Eigen::Isometry3d RegistrationScan2LocalMap::GetCorrectedPose(
@@ -5583,15 +12557,27 @@ Eigen::Isometry3d RegistrationScan2LocalMap::GetCorrectedPose(
         return Eigen::Isometry3d::Identity();
     }
 
-    // Before the first loop optimization T_map_odom_ is Identity, so this is
-    // intentionally identical to the raw frontend pose.
-    return T_map_odom_ *
+    Eigen::Isometry3d T_map_odom =
+        Eigen::Isometry3d::Identity();
+
+    {
+        std::lock_guard<std::mutex> lock(
+            backend_output_mutex_);
+
+        T_map_odom =
+            backend_T_map_odom_snapshot_;
+    }
+
+    return T_map_odom *
            T_odom_lidar;
 }
 
 std::size_t RegistrationScan2LocalMap::MapOdomRevision() const
 {
-    return map_odom_revision_;
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_map_odom_revision_snapshot_;
 }
 
 // Backward-compatible diagnostic:
@@ -5634,34 +12620,48 @@ RegistrationScan2LocalMap::GetPreviousSubmap() const
     return submap_manager_.PreviousSubmap();
 }
 
+PoseGraph
+RegistrationScan2LocalMap::GetPoseGraphSnapshot() const
+{
+    std::lock_guard<std::mutex> lock(
+        backend_output_mutex_);
+
+    return backend_pose_graph_snapshot_;
+}
+
 const PoseGraph &
 RegistrationScan2LocalMap::GetPoseGraph() const
 {
-    return pose_graph_;
+    thread_local PoseGraph snapshot;
+
+    snapshot =
+        GetPoseGraphSnapshot();
+
+    return snapshot;
 }
 
 std::size_t
 RegistrationScan2LocalMap::PoseGraphNodeCount() const
 {
-    return pose_graph_.NodeCount();
+    return GetPoseGraphSnapshot().NodeCount();
 }
 
 std::size_t
 RegistrationScan2LocalMap::PoseGraphEdgeCount() const
 {
-    return pose_graph_.EdgeCount();
+    return GetPoseGraphSnapshot().EdgeCount();
 }
 
 std::size_t
 RegistrationScan2LocalMap::PoseGraphOdometryEdgeCount() const
 {
-    return pose_graph_.OdometryEdgeCount();
+    return GetPoseGraphSnapshot().OdometryEdgeCount();
 }
 
 std::size_t
 RegistrationScan2LocalMap::PoseGraphLoopEdgeCount() const
 {
-    return pose_graph_.LoopEdgeCount();
+    return GetPoseGraphSnapshot().LoopEdgeCount();
 }
 
 // ============================================================================
@@ -5682,59 +12682,63 @@ RegistrationScan2LocalMap::PoseGraphLoopEdgeCount() const
 
 void RegistrationScan2LocalMap::Reset()
 {
-    // Reset accepted global pose.
-    T_WL_ = Eigen::Isometry3d::Identity();
+    // Stop the backend first so no backend-owned state is being read/written
+    // while the frontend and backend histories are cleared.
+    StopBackendWorker();
 
-    // Reset LiDAR constant-motion prediction.
-    last_relative_transform_ = Eigen::Isometry3d::Identity();
+    // Reset the pure-LiDAR Ground V4 temporal/anchor state together with the
+    // rest of the frontend so a new SLAM session bootstraps its own clearance.
+    ResetGroundIcpRuntime(this);
+    ClearWorldZDecompositionRuntime(this);
 
-    // Reset short-term tracking recovery state.
+    T_WL_ =
+        Eigen::Isometry3d::Identity();
+
+    last_relative_transform_ =
+        Eigen::Isometry3d::Identity();
+
     consecutive_rejected_frames_ = 0;
 
-    // Clear ALL Submaps and their internal LocalMap builders.
+    // Frontend-only state.
     submap_manager_.Clear();
-
-    // Clear backend PoseGraph nodes / edges.
-    pose_graph_.Clear();
-
-    // Clear Scan Context descriptor database.
-    loop_detector_.Clear();
-
-    // Clear keyframe-level online loop temporal state and multi-loop edge
-    // sparsification anchors.
-    online_loop_track_ = OnlineLoopTrack();
-    has_last_online_loop_edge_ = false;
-    last_online_loop_current_keyframe_id_ =
-        std::numeric_limits<std::size_t>::max();
-    last_online_loop_historical_keyframe_id_ =
-        std::numeric_limits<std::size_t>::max();
-    last_online_loop_measurement_ =
-        Eigen::Isometry3d::Identity();
-    pending_first_loop_batch_.clear();
-
-    // Clear cached Submap tracking registration target.
     prepared_tracking_target_ = PreparedLidarTarget();
-
-    // Clear COMPLETE historical keyframe storage.
     keyframe_manager_.Clear();
+    keyframe_detector_.Reset();
 
-    // Clear incremental backend global-map block caches.
+    // Backend-only history/state.
+    backend_keyframes_.clear();
+    backend_finished_submaps_.clear();
+
+    pose_graph_.Clear();
+    loop_detector_.Clear();
+    loop_verifier_.ClearCache();
     incremental_global_map_.Clear();
 
-    if (refinement_historical_target_debug_)
-    {
-        refinement_historical_target_debug_->clear();
-    }
+    online_loop_track_ = OnlineLoopTrack();
 
-    if (refinement_current_before_debug_)
-    {
-        refinement_current_before_debug_->clear();
-    }
+    has_last_online_loop_edge_ = false;
 
-    if (refinement_current_after_debug_)
-    {
-        refinement_current_after_debug_->clear();
-    }
+    last_online_loop_current_keyframe_id_ =
+        std::numeric_limits<std::size_t>::max();
+
+    last_online_loop_historical_keyframe_id_ =
+        std::numeric_limits<std::size_t>::max();
+
+    last_online_loop_measurement_ =
+        Eigen::Isometry3d::Identity();
+
+    pending_first_loop_batch_.clear();
+
+    // Create fresh debug clouds instead of mutating a cloud that may still be
+    // referenced by a ROS-side snapshot.
+    refinement_historical_target_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
+
+    refinement_current_before_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
+
+    refinement_current_after_debug_ =
+        pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
 
     refined_keyframe_poses_.clear();
     refined_keyframe_pose_was_adjusted_.clear();
@@ -5743,21 +12747,19 @@ void RegistrationScan2LocalMap::Reset()
     refined_map_revision_ = 0;
     refinement_debug_revision_ = 0;
 
-    // Reset backend map-frame <-> frontend odom-frame bridge.
     T_map_odom_ =
         Eigen::Isometry3d::Identity();
 
     has_map_odom_correction_ =
         false;
 
-    map_odom_revision_ =
-        0;
+    map_odom_revision_ = 0;
 
     map_odom_anchor_keyframe_id_ =
         std::numeric_limits<std::size_t>::max();
 
-    // Reset latest-keyframe reference.
-    keyframe_detector_.Reset();
-
     initialized_ = false;
+
+    RefreshBackendOutputSnapshot();
+    StartBackendWorker();
 }

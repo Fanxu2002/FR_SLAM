@@ -4,6 +4,12 @@
 
 #include <cmath>
 
+namespace
+{
+constexpr double kImuTimeEpsilonSec =
+    1.0e-6;
+}
+
 bool ImuIntegrator::InterpolateImu(const IMU_DATA &imu_a,
                                    const IMU_DATA &imu_b,
                                    double timestamp,
@@ -33,58 +39,94 @@ bool ImuIntegrator::Extract(const std::vector<IMU_DATA> &raw_imu,
                             std::vector<IMU_DATA> &extract_imu)
 {
         extract_imu.clear();
+
         if (raw_imu.size() < 2)
         {
                 return false;
         }
+
         if (start_time >= end_time)
         {
                 return false;
         }
-        if (raw_imu.front().timestamp > start_time)
+
+        if (raw_imu.front().timestamp >
+            start_time + kImuTimeEpsilonSec)
         {
                 return false;
         }
-        if (raw_imu.back().timestamp < end_time)
+
+        if (raw_imu.back().timestamp +
+                kImuTimeEpsilonSec <
+            end_time)
         {
                 return false;
         }
 
         bool start_found = false;
-        for (std::size_t t = 0; t + 1 < raw_imu.size(); ++t)
-        {
-                const IMU_DATA &imu_a = raw_imu[t];
-                const IMU_DATA &imu_b = raw_imu[t + 1];
 
-                if ((imu_a.timestamp <= start_time) && (start_time <= imu_b.timestamp))
+        // If the requested start is only a floating-point ULP before the
+        // first IMU sample, extend that first measurement back by <=1 us.
+        // This avoids rejecting a physically identical timestamp boundary.
+        if (start_time < raw_imu.front().timestamp &&
+            raw_imu.front().timestamp - start_time <=
+                kImuTimeEpsilonSec)
+        {
+                IMU_DATA start_imu =
+                    raw_imu.front();
+
+                start_imu.timestamp =
+                    start_time;
+
+                extract_imu.push_back(
+                    start_imu);
+
+                start_found = true;
+        }
+        else
+        {
+                for (std::size_t t = 0;
+                     t + 1 < raw_imu.size();
+                     ++t)
                 {
-                        IMU_DATA start_imu;
-                        if (!InterpolateImu(imu_a,
-                                            imu_b,
-                                            start_time,
-                                            start_imu))
+                        const IMU_DATA &imu_a = raw_imu[t];
+                        const IMU_DATA &imu_b = raw_imu[t + 1];
+
+                        if ((imu_a.timestamp <= start_time) &&
+                            (start_time <= imu_b.timestamp))
                         {
-                                return false;
+                                IMU_DATA start_imu;
+                                if (!InterpolateImu(imu_a,
+                                                    imu_b,
+                                                    start_time,
+                                                    start_imu))
+                                {
+                                        return false;
+                                }
+                                extract_imu.push_back(start_imu);
+                                start_found = true;
+                                break;
                         }
-                        extract_imu.push_back(start_imu);
-                        start_found = true;
-                        break;
                 }
         }
+
         if (!start_found)
         {
                 return false;
         }
 
-        for (auto &imu : raw_imu)
+        for (const auto &imu : raw_imu)
         {
-                if (imu.timestamp > start_time && imu.timestamp < end_time)
+                if (imu.timestamp > start_time &&
+                    imu.timestamp < end_time)
                 {
                         extract_imu.push_back(imu);
                 }
         }
+
         bool end_found = false;
 
+        // Normal case: interpolate with a real IMU sample on both sides.
         for (std::size_t i = 0;
              i + 1 < raw_imu.size();
              ++i)
@@ -112,6 +154,28 @@ bool ImuIntegrator::Extract(const std::vector<IMU_DATA> &raw_imu,
 
                         break;
                 }
+        }
+
+        // Floating-point boundary fallback. In the observed failure the gap
+        // was 0.238 us, exactly one double-precision step at the epoch-sized
+        // timestamp. Holding gyro/accel constant for <=1 us is negligible
+        // compared with a ~5 ms IMU period and keeps the deskew trajectory
+        // covering the exact LiDAR endpoint.
+        if (!end_found &&
+            end_time > raw_imu.back().timestamp &&
+            end_time - raw_imu.back().timestamp <=
+                kImuTimeEpsilonSec)
+        {
+                IMU_DATA end_imu =
+                    raw_imu.back();
+
+                end_imu.timestamp =
+                    end_time;
+
+                extract_imu.push_back(
+                    end_imu);
+
+                end_found = true;
         }
 
         if (!end_found)

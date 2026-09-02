@@ -1,7 +1,11 @@
 #include "fr_slam/fr_lidar_registration.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <iostream>
+#include <limits>
+#include <memory>
 #include <vector>
 
 #include <Eigen/Eigenvalues>
@@ -25,10 +29,6 @@ bool LidarRegistration::FitLocalPlane(
     {
         return false;
     }
-
-    // ============================================================
-    // 1. Centroid
-    // ============================================================
 
     Eigen::Vector3d centroid =
         Eigen::Vector3d::Zero();
@@ -57,10 +57,6 @@ bool LidarRegistration::FitLocalPlane(
         static_cast<double>(
             neighbor_indices.size());
 
-    // ============================================================
-    // 2. Covariance
-    // ============================================================
-
     double c_xx = 0.0;
     double c_xy = 0.0;
     double c_xz = 0.0;
@@ -68,9 +64,14 @@ bool LidarRegistration::FitLocalPlane(
     double c_yz = 0.0;
     double c_zz = 0.0;
 
-    const double cx = centroid.x();
-    const double cy = centroid.y();
-    const double cz = centroid.z();
+    const double cx =
+        centroid.x();
+
+    const double cy =
+        centroid.y();
+
+    const double cz =
+        centroid.z();
 
     for (const int index :
          neighbor_indices)
@@ -112,13 +113,6 @@ bool LidarRegistration::FitLocalPlane(
         c_yz * inv_n,
         c_zz * inv_n;
 
-    // ============================================================
-    // 3. Eigen solve
-    //
-    // The eigenvector corresponding to the smallest eigenvalue is
-    // the local plane normal.
-    // ============================================================
-
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
         eigen_solver;
 
@@ -141,17 +135,13 @@ bool LidarRegistration::FitLocalPlane(
         normal.norm();
 
     if (!std::isfinite(normal_norm) ||
-        normal_norm < 1e-12)
+        normal_norm < 1.0e-12)
     {
         return false;
     }
 
     normal /=
         normal_norm;
-
-    // ============================================================
-    // 4. Plane-quality validation
-    // ============================================================
 
     for (const int index :
          neighbor_indices)
@@ -213,16 +203,8 @@ bool LidarRegistration::PrepareTarget(
         return false;
     }
 
-    // ============================================================
-    // 1. Store target cloud
-    // ============================================================
-
     prepared_target.cloud =
         target;
-
-    // ============================================================
-    // 2. Build KDTree directly on the original LIDAR_POINT cloud.
-    // ============================================================
 
     prepared_target.kdtree =
         std::make_shared<
@@ -230,10 +212,6 @@ bool LidarRegistration::PrepareTarget(
 
     prepared_target.kdtree->setInputCloud(
         target);
-
-    // ============================================================
-    // 3. Prepare one plane-cache entry for every target point.
-    // ============================================================
 
     prepared_target.planes.resize(
         target->size());
@@ -342,6 +320,47 @@ bool LidarRegistration::Align(
     result.T_target_source =
         initial_guess;
 
+    result.robust_kernel_enabled =
+        config_.enable_huber_loss;
+
+    result.robust_kernel_delta =
+        config_.huber_delta;
+
+    result.hessian_scale_normalization_enabled =
+        config_.enable_sensor_centered_perturbation &&
+        config_.enable_hessian_scale_normalization;
+
+    if (result.hessian_scale_normalization_enabled &&
+        (!std::isfinite(config_.hessian_scale_min_range) ||
+         !std::isfinite(config_.hessian_scale_max_range) ||
+         config_.hessian_scale_min_range <= 0.0 ||
+         config_.hessian_scale_max_range <
+             config_.hessian_scale_min_range))
+    {
+        std::cerr
+            << "LidarRegistration::Align(): "
+            << "invalid V2B Hessian scale range. min="
+            << config_.hessian_scale_min_range
+            << " max="
+            << config_.hessian_scale_max_range
+            << std::endl;
+
+        return false;
+    }
+
+    if (config_.enable_huber_loss &&
+        (!std::isfinite(config_.huber_delta) ||
+         config_.huber_delta <= 0.0))
+    {
+        std::cerr
+            << "LidarRegistration::Align(): "
+            << "Huber delta must be finite and > 0. delta="
+            << config_.huber_delta
+            << std::endl;
+
+        return false;
+    }
+
     if (!source ||
         source->empty())
     {
@@ -357,7 +376,8 @@ bool LidarRegistration::Align(
         !target.cloud ||
         target.cloud->empty() ||
         !target.kdtree ||
-        target.planes.size() != target.cloud->size())
+        target.planes.size() !=
+            target.cloud->size())
     {
         std::cerr
             << "LidarRegistration::Align(): "
@@ -382,10 +402,6 @@ bool LidarRegistration::Align(
 
     pcl::KdTreeFLANN<LIDAR_POINT> &kdtree =
         *target.kdtree;
-
-    // ============================================================
-    // 1. Initial pose
-    // ============================================================
 
     Eigen::Isometry3d T_target_source =
         initial_guess;
@@ -421,16 +437,39 @@ bool LidarRegistration::Align(
         double squared_error_sum =
             0.0;
 
+        double robust_weighted_squared_error_sum =
+            0.0;
+
+        double robust_weight_sum =
+            0.0;
+
+        double minimum_robust_weight =
+            1.0;
+
         std::size_t valid_correspondences =
             0;
+
+        std::size_t downweighted_correspondences =
+            0;
+
+        const Eigen::Vector3d sensor_origin_target =
+            T_target_source.translation();
+
+        const bool use_hessian_scale_normalization =
+            config_.enable_sensor_centered_perturbation &&
+            config_.enable_hessian_scale_normalization;
+
+        std::vector<double> correspondence_ranges;
+
+        if (use_hessian_scale_normalization)
+        {
+            correspondence_ranges.reserve(
+                source->size());
+        }
 
         for (const LIDAR_POINT &source_point :
              source->points)
         {
-            // =================================================
-            // 2.1 Transform source point
-            // =================================================
-
             const Eigen::Vector3d p_source(
                 static_cast<double>(source_point.x),
                 static_cast<double>(source_point.y),
@@ -454,10 +493,6 @@ bool LidarRegistration::Align(
                 static_cast<float>(
                     p_target.z());
 
-            // =================================================
-            // 2.2 Find nearby target points
-            // =================================================
-
             const int found =
                 kdtree.nearestKSearch(
                     query_point,
@@ -469,10 +504,6 @@ bool LidarRegistration::Align(
             {
                 continue;
             }
-
-            // =================================================
-            // 2.3 Select the nearest valid precomputed plane
-            // =================================================
 
             int plane_index =
                 -1;
@@ -530,19 +561,6 @@ bool LidarRegistration::Align(
                 target_planes[static_cast<std::size_t>(
                     plane_index)];
 
-            // =================================================
-            // 2.4 Point-to-plane residual + Jacobian
-            //
-            // r = n^T (p' - q)
-            //
-            // Left perturbation:
-            // T <- Exp(dx) * T
-            //
-            // dx = [delta_rotation, delta_translation]
-            //
-            // J = [(p' x n)^T, n^T]
-            // =================================================
-
             const double residual =
                 plane.normal.dot(
                     p_target -
@@ -556,22 +574,90 @@ bool LidarRegistration::Align(
 
             Eigen::Matrix<double, 1, 6> J;
 
-            J.block<1, 3>(0, 0) =
-                p_target.cross(
-                            plane.normal)
-                    .transpose();
+            if (config_.enable_sensor_centered_perturbation)
+            {
+                const Eigen::Vector3d lever_arm_target =
+                    p_target -
+                    sensor_origin_target;
+
+                J.block<1, 3>(0, 0) =
+                    lever_arm_target.cross(
+                                        plane.normal)
+                        .transpose();
+
+                if (use_hessian_scale_normalization)
+                {
+                    const double lever_arm_range =
+                        lever_arm_target.norm();
+
+                    if (std::isfinite(lever_arm_range) &&
+                        lever_arm_range >
+                            1.0e-9)
+                    {
+                        correspondence_ranges.push_back(
+                            lever_arm_range);
+                    }
+                }
+            }
+            else
+            {
+                J.block<1, 3>(0, 0) =
+                    p_target.cross(
+                                plane.normal)
+                        .transpose();
+            }
 
             J.block<1, 3>(0, 3) =
                 plane.normal.transpose();
 
+            double robust_weight =
+                1.0;
+
+            const double absolute_residual =
+                std::abs(
+                    residual);
+
+            if (config_.enable_huber_loss &&
+                absolute_residual >
+                    config_.huber_delta)
+            {
+                robust_weight =
+                    config_.huber_delta /
+                    absolute_residual;
+
+                ++downweighted_correspondences;
+            }
+
+            minimum_robust_weight =
+                std::min(
+                    minimum_robust_weight,
+                    robust_weight);
+
+            // ====================================================
+            // REAL ICP accumulation
+            // ====================================================
+
             H.noalias() +=
-                J.transpose() * J;
+                robust_weight *
+                J.transpose() *
+                J;
 
             b.noalias() +=
-                J.transpose() * residual;
+                robust_weight *
+                J.transpose() *
+                residual;
 
             squared_error_sum +=
-                residual * residual;
+                residual *
+                residual;
+
+            robust_weighted_squared_error_sum +=
+                robust_weight *
+                residual *
+                residual;
+
+            robust_weight_sum +=
+                robust_weight;
 
             ++valid_correspondences;
         }
@@ -601,26 +687,232 @@ bool LidarRegistration::Align(
             result.correspondences =
                 valid_correspondences;
 
+            result.robust_downweighted_correspondences =
+                downweighted_correspondences;
+
+            result.robust_downweighted_ratio =
+                valid_correspondences > 0
+                    ? static_cast<double>(
+                          downweighted_correspondences) /
+                          static_cast<double>(
+                              valid_correspondences)
+                    : 0.0;
+
+            result.robust_effective_weight_sum =
+                robust_weight_sum;
+
+            result.robust_min_weight =
+                minimum_robust_weight;
+
+            if (robust_weight_sum >
+                1.0e-12)
+            {
+                result.robust_rmse =
+                    std::sqrt(
+                        robust_weighted_squared_error_sum /
+                        robust_weight_sum);
+            }
+
             result.T_target_source =
                 T_target_source;
 
             return false;
         }
 
+        const double rmse =
+            std::sqrt(
+                squared_error_sum /
+                static_cast<double>(
+                    valid_correspondences));
+
+        const double robust_rmse =
+            robust_weight_sum >
+                    1.0e-12
+                ? std::sqrt(
+                      robust_weighted_squared_error_sum /
+                      robust_weight_sum)
+                : std::numeric_limits<double>::infinity();
+
+        const double downweighted_ratio =
+            static_cast<double>(
+                downweighted_correspondences) /
+            static_cast<double>(
+                valid_correspondences);
+
+        result.robust_downweighted_correspondences =
+            downweighted_correspondences;
+
+        result.robust_downweighted_ratio =
+            downweighted_ratio;
+
+        result.robust_effective_weight_sum =
+            robust_weight_sum;
+
+        result.robust_min_weight =
+            minimum_robust_weight;
+
+        result.robust_rmse =
+            robust_rmse;
+
         // ====================================================
-        // 2.6 Degeneracy diagnostics from Hessian H
-        //
-        // H = sum(J^T J) is symmetric positive semi-definite in theory.
-        // Small eigenvalues mean that some 6-DOF motion directions are
-        // weakly constrained by the current point-to-plane geometry.
-        //
-        // IMPORTANT: for now this block only detects and reports
-        // degeneracy. It does NOT modify dx or reject the registration.
+        // 2.6 Degeneracy V2B scale normalization
         // ====================================================
+
+        double median_range =
+            1.0;
+
+        double characteristic_length =
+            1.0;
+
+        Eigen::Matrix<double, 6, 6> parameter_unscale =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        if (use_hessian_scale_normalization)
+        {
+            if (correspondence_ranges.empty())
+            {
+                std::cerr
+                    << "LidarRegistration::Align(): "
+                    << "V2B has no valid sensor-centered ranges."
+                    << std::endl;
+
+                return false;
+            }
+
+            const std::size_t range_count =
+                correspondence_ranges.size();
+
+            std::vector<double>::iterator middle =
+                correspondence_ranges.begin() +
+                static_cast<std::ptrdiff_t>(
+                    range_count / 2);
+
+            std::nth_element(
+                correspondence_ranges.begin(),
+                middle,
+                correspondence_ranges.end());
+
+            median_range =
+                *middle;
+
+            if ((range_count % 2U) ==
+                0U)
+            {
+                const std::vector<double>::iterator
+                    lower_middle =
+                        std::max_element(
+                            correspondence_ranges.begin(),
+                            middle);
+
+                if (lower_middle !=
+                    middle)
+                {
+                    median_range =
+                        0.5 *
+                        (median_range +
+                         *lower_middle);
+                }
+            }
+
+            if (!std::isfinite(median_range) ||
+                median_range <=
+                    0.0)
+            {
+                std::cerr
+                    << "LidarRegistration::Align(): "
+                    << "invalid V2B median range="
+                    << median_range
+                    << std::endl;
+
+                return false;
+            }
+
+            characteristic_length =
+                std::clamp(
+                    median_range,
+                    config_.hessian_scale_min_range,
+                    config_.hessian_scale_max_range);
+
+            const double inverse_length =
+                1.0 /
+                characteristic_length;
+
+            parameter_unscale(0, 0) =
+                inverse_length;
+
+            parameter_unscale(1, 1) =
+                inverse_length;
+
+            parameter_unscale(2, 2) =
+                inverse_length;
+        }
+
+        const Eigen::Matrix<double, 6, 6> H_analysis =
+            parameter_unscale.transpose() *
+            H *
+            parameter_unscale;
+
+        const Eigen::Matrix<double, 6, 1> b_analysis =
+            parameter_unscale.transpose() *
+            b;
+
+        // ====================================================
+        // Degeneracy V2D result diagnostics        // ====================================================
+        // Existing V2B result diagnostics
+        // ====================================================
+
+        result.hessian_scale_normalization_enabled =
+            use_hessian_scale_normalization;
+
+        result.hessian_scale_range_count =
+            correspondence_ranges.size();
+
+        result.hessian_median_range =
+            median_range;
+
+        result.hessian_characteristic_length =
+            characteristic_length;
+
+        double raw_condition_number =
+            std::numeric_limits<double>::infinity();
+
+        if (use_hessian_scale_normalization)
+        {
+            Eigen::SelfAdjointEigenSolver<
+                Eigen::Matrix<double, 6, 6>>
+                raw_hessian_eigen_solver(
+                    H);
+
+            if (raw_hessian_eigen_solver.info() ==
+                Eigen::Success)
+            {
+                const Eigen::Matrix<double, 6, 1>
+                    raw_eigenvalues =
+                        raw_hessian_eigen_solver.eigenvalues();
+
+                const double raw_lambda_min =
+                    raw_eigenvalues(0);
+
+                const double raw_lambda_max =
+                    raw_eigenvalues(5);
+
+                if (std::isfinite(raw_lambda_min) &&
+                    std::isfinite(raw_lambda_max) &&
+                    raw_lambda_min >
+                        config_
+                            .degeneracy_absolute_eigenvalue_threshold)
+                {
+                    raw_condition_number =
+                        raw_lambda_max /
+                        raw_lambda_min;
+                }
+            }
+        }
 
         Eigen::SelfAdjointEigenSolver<
             Eigen::Matrix<double, 6, 6>>
-            hessian_eigen_solver(H);
+            hessian_eigen_solver(
+                H_analysis);
 
         if (hessian_eigen_solver.info() !=
             Eigen::Success)
@@ -633,26 +925,13 @@ bool LidarRegistration::Align(
             return false;
         }
 
-        const Eigen::Matrix<double, 6, 1> hessian_eigenvalues =
-            hessian_eigen_solver.eigenvalues();
+        const Eigen::Matrix<double, 6, 1>
+            hessian_eigenvalues =
+                hessian_eigen_solver.eigenvalues();
 
-        // ====================================================
-        // Eigenvectors of H.
-        //
-        // H = V * Lambda * V^T
-        //
-        // Each column of V represents one motion direction
-        // in the 6-DOF perturbation space:
-        //
-        //      dx = [rotation, translation]
-        //
-        // Eigenvalues and eigenvectors have the same order.
-        // Eigen's SelfAdjointEigenSolver returns eigenvalues
-        // from small to large.
-        // ====================================================
-
-        const Eigen::Matrix<double, 6, 6> hessian_eigenvectors =
-            hessian_eigen_solver.eigenvectors();
+        const Eigen::Matrix<double, 6, 6>
+            hessian_eigenvectors =
+                hessian_eigen_solver.eigenvectors();
 
         const double lambda_min =
             hessian_eigenvalues(0);
@@ -660,17 +939,62 @@ bool LidarRegistration::Align(
         const double lambda_max =
             hessian_eigenvalues(5);
 
-        Eigen::Matrix<double, 6, 1> relative_eigenvalues =
-            Eigen::Matrix<double, 6, 1>::Zero();
+        Eigen::Matrix<double, 6, 1>
+            relative_eigenvalues =
+                Eigen::Matrix<double, 6, 1>::Zero();
 
-        int degenerate_directions = 0;
+        // ====================================================
+        // Degeneracy V2D thresholds
+        //
+        // The calibrated thresholds apply ONLY to the realtime
+        // SENSOR_CENTERED_NORMALIZED frontend:
+        //
+        //     relative < 0.01
+        //         -> DEGENERATE
+        //         -> suppress this eigen-direction.
+        //
+        //     0.01 <= relative < 0.02
+        //         -> WEAK
+        //         -> diagnostic only; keep the LiDAR correction.
+        //
+        //     relative >= 0.02
+        //         -> OBSERVABLE.
+        //
+        // Backend refinement intentionally remains in the legacy
+        // experiment mode, so it keeps the old configured threshold.
+        // ====================================================
+
+        constexpr double v2d_hard_relative_threshold =
+            0.01;
+
+        constexpr double v2d_weak_relative_threshold =
+            0.02;
+
+        const double hard_relative_threshold =
+            use_hessian_scale_normalization
+                ? v2d_hard_relative_threshold
+                : config_
+                      .degeneracy_relative_eigenvalue_threshold;
+
+        const double weak_relative_threshold =
+            use_hessian_scale_normalization
+                ? v2d_weak_relative_threshold
+                : hard_relative_threshold;
+
+        int degenerate_directions =
+            0;
+
+        int weak_directions =
+            0;
 
         if (std::isfinite(lambda_max) &&
             lambda_max >
-                config_.degeneracy_absolute_eigenvalue_threshold)
+                config_
+                    .degeneracy_absolute_eigenvalue_threshold)
         {
             relative_eigenvalues =
-                hessian_eigenvalues / lambda_max;
+                hessian_eigenvalues /
+                lambda_max;
 
             for (int i = 0;
                  i < 6;
@@ -682,25 +1006,63 @@ bool LidarRegistration::Align(
                 const double relative_lambda =
                     relative_eigenvalues(i);
 
-                if (!std::isfinite(lambda) ||
+                const bool strong_degenerate =
+                    !std::isfinite(lambda) ||
                     lambda <=
-                        config_.degeneracy_absolute_eigenvalue_threshold ||
+                        config_
+                            .degeneracy_absolute_eigenvalue_threshold ||
                     relative_lambda <
-                        config_.degeneracy_relative_eigenvalue_threshold)
+                        hard_relative_threshold;
+
+                if (strong_degenerate)
                 {
                     ++degenerate_directions;
+                    continue;
+                }
+
+                const bool weak_observability =
+                    use_hessian_scale_normalization &&
+                    relative_lambda <
+                        weak_relative_threshold;
+
+                if (weak_observability)
+                {
+                    ++weak_directions;
+
+                    std::cout
+                        << "WEAK_DIRECTION_V2D"
+                        << " | index="
+                        << i
+                        << " | eigenvalue="
+                        << lambda
+                        << " | relative="
+                        << relative_lambda
+                        << " | hard_threshold="
+                        << hard_relative_threshold
+                        << " | weak_threshold="
+                        << weak_relative_threshold
+                        << " | action=KEEP"
+                        << " | eigenvector=["
+                        << hessian_eigenvectors
+                               .col(i)
+                               .transpose()
+                        << "]"
+                        << std::endl;
                 }
             }
         }
         else
         {
-            // If even the largest eigenvalue is almost zero, the entire
-            // Hessian carries essentially no usable geometric information.
-            degenerate_directions = 6;
+            degenerate_directions =
+                6;
+
+            weak_directions =
+                0;
         }
 
         const bool degenerate =
-            degenerate_directions > 0;
+            degenerate_directions >
+            0;
 
         double condition_number =
             std::numeric_limits<double>::infinity();
@@ -708,10 +1070,12 @@ bool LidarRegistration::Align(
         if (std::isfinite(lambda_min) &&
             std::isfinite(lambda_max) &&
             lambda_min >
-                config_.degeneracy_absolute_eigenvalue_threshold)
+                config_
+                    .degeneracy_absolute_eigenvalue_threshold)
         {
             condition_number =
-                lambda_max / lambda_min;
+                lambda_max /
+                lambda_min;
         }
 
         result.degenerate =
@@ -729,102 +1093,188 @@ bool LidarRegistration::Align(
         result.hessian_relative_eigenvalues =
             relative_eigenvalues;
 
+        // ================================================================
+        // Build relative covariance shape for G2O Information Matrix V1.
+        //
+        // H_analysis = V * Lambda * V^T
+        //
+        // relative_lambda_i = lambda_i / lambda_max
+        //
+        // C_relative =
+        //     V * diag(1 / relative_lambda_i) * V^T
+        //
+        // Order:
+        //     [rx ry rz tx ty tz]
+        //
+        // Frame:
+        //     target / World frame
+        // ================================================================
+        result.hessian_relative_covariance_valid =
+            false;
+
+        result.hessian_relative_covariance =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        if (use_hessian_scale_normalization &&
+            std::isfinite(lambda_max) &&
+            lambda_max >
+                config_.degeneracy_absolute_eigenvalue_threshold &&
+            hessian_eigenvectors.allFinite() &&
+            relative_eigenvalues.allFinite())
+        {
+            constexpr double minimum_relative_information =
+                0.01;
+
+            Eigen::Matrix<double, 6, 6> relative_covariance =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+            bool covariance_valid = true;
+
+            for (int i = 0;
+                 i < 6;
+                 ++i)
+            {
+                double relative_information =
+                    relative_eigenvalues(i);
+
+                if (!std::isfinite(relative_information))
+                {
+                    covariance_valid = false;
+                    break;
+                }
+
+                relative_information =
+                    std::clamp(
+                        relative_information,
+                        minimum_relative_information,
+                        1.0);
+
+                const Eigen::Matrix<double, 6, 1>
+                    eigen_direction =
+                        hessian_eigenvectors.col(i);
+
+                relative_covariance.noalias() +=
+                    (1.0 / relative_information) *
+                    eigen_direction *
+                    eigen_direction.transpose();
+            }
+
+            if (covariance_valid &&
+                relative_covariance.allFinite())
+            {
+                bool diagonal_valid = true;
+
+                for (int i = 0;
+                     i < 6;
+                     ++i)
+                {
+                    if (!std::isfinite(
+                            relative_covariance(i, i)) ||
+                        relative_covariance(i, i) <= 0.0)
+                    {
+                        diagonal_valid = false;
+                        break;
+                    }
+                }
+
+                if (diagonal_valid)
+                {
+                    result.hessian_relative_covariance =
+                        relative_covariance;
+
+                    result.hessian_relative_covariance_valid =
+                        true;
+                }
+            }
+        }
+
+        Eigen::Matrix<double, 6, 1>
+            hessian_eigenvalues_per_weight =
+                Eigen::Matrix<double, 6, 1>::Zero();
+
+        if (std::isfinite(robust_weight_sum) &&
+            robust_weight_sum >
+                1.0e-12)
+        {
+            hessian_eigenvalues_per_weight =
+                hessian_eigenvalues /
+                robust_weight_sum;
+        }
+
         std::cout
             << "Hessian diagnostics"
+            << " | mode="
+            << (use_hessian_scale_normalization
+                    ? "SENSOR_CENTERED_NORMALIZED_V2D"
+                    : (config_.enable_sensor_centered_perturbation
+                           ? "SENSOR_CENTERED_V2A"
+                           : "LEGACY_WORLD_ORIGIN"))
+            << " | sensor_origin=["
+            << sensor_origin_target.transpose()
+            << "]"
+            << " | corr="
+            << valid_correspondences
+            << " | weight_sum="
+            << robust_weight_sum
+            << " | range_count="
+            << correspondence_ranges.size()
+            << " | median_range="
+            << median_range
+            << " | scale_L="
+            << characteristic_length
+            << " | raw_condition="
+            << raw_condition_number
             << " | eigenvalues=["
             << hessian_eigenvalues.transpose()
+            << "]"
+            << " | eigen_per_weight=["
+            << hessian_eigenvalues_per_weight.transpose()
             << "]"
             << " | relative=["
             << relative_eigenvalues.transpose()
             << "]"
             << " | condition="
             << condition_number
+            << " | hard_threshold="
+            << hard_relative_threshold
+            << " | weak_threshold="
+            << weak_relative_threshold
             << " | degenerate="
-            << (degenerate ? "true" : "false")
-            << " | weak_directions="
+            << (degenerate
+                    ? "true"
+                    : "false")
+            << " | degenerate_directions="
             << degenerate_directions
+            << " | weak_directions="
+            << weak_directions
             << std::endl;
 
         // ====================================================
-        // 2.7 Solve H dx = -b with degeneracy handling
-        //
-        // Normal case:
-        // ----------------------------------------------------
-        //
-        //      H * dx = -b
-        //
-        // Solve directly using LDLT.
-        //
-        // Degenerate case:
-        // ----------------------------------------------------
-        //
-        // Since:
-        //
-        //      H = V * Lambda * V^T
-        //
-        // define:
-        //
-        //      dx = V * alpha
-        //
-        // Then:
-        //
-        //      Lambda * alpha = -V^T * b
-        //
-        // For a well-constrained direction:
-        //
-        //      alpha_i = -(v_i^T * b) / lambda_i
-        //
-        // For a weak / degenerate direction:
-        //
-        //      alpha_i = 0
-        //
-        // IMPORTANT:
-        //
-        // Setting alpha_i = 0 does NOT mean that the robot pose
-        // becomes zero in that direction.
-        //
-        // It only means:
-        //
-        //      ICP does not add a correction along that
-        //      weakly observable direction.
-        //
-        // Therefore that direction remains close to the
-        // current prediction / initial guess.
+        // 2.7 Solve in H_analysis coordinates
         // ====================================================
 
         Eigen::Matrix<double, 6, 1> dx =
             Eigen::Matrix<double, 6, 1>::Zero();
 
-        // ====================================================
-        // 2.7.1 Normal case
-        //
-        // Keep the old solver completely unchanged when the
-        // geometry is not degenerate.
-        // ====================================================
+        Eigen::Matrix<double, 6, 1> delta_analysis =
+            Eigen::Matrix<double, 6, 1>::Zero();
 
         if (!degenerate)
         {
+            delta_analysis =
+                H_analysis
+                    .ldlt()
+                    .solve(
+                        -b_analysis);
+
             dx =
-                H.ldlt().solve(
-                    -b);
+                parameter_unscale *
+                delta_analysis;
         }
-
-        // ====================================================
-        // 2.7.2 Degenerate case
-        //
-        // Do NOT directly invert the weak eigenvalues.
-        //
-        // Instead solve only in the observable subspace.
-        // ====================================================
-
         else
         {
-            // ------------------------------------------------
-            // If all six directions are weak, there is no
-            // meaningful LiDAR correction available.
-            // ------------------------------------------------
-
-            if (degenerate_directions >= 6)
+            if (degenerate_directions >=
+                6)
             {
                 std::cerr
                     << "LidarRegistration::Align(): "
@@ -849,30 +1299,18 @@ bool LidarRegistration::Align(
                 return false;
             }
 
-            // ------------------------------------------------
-            // Project gradient into Hessian eigenvector space.
-            //
-            //      gradient_eigen = V^T * b
-            //
-            // Each component now corresponds to one Hessian
-            // eigen-direction.
-            // ------------------------------------------------
+            const Eigen::Matrix<double, 6, 1>
+                gradient_eigen =
+                    hessian_eigenvectors.transpose() *
+                    b_analysis;
 
-            const Eigen::Matrix<double, 6, 1> gradient_eigen =
-                hessian_eigenvectors.transpose() *
-                b;
+            Eigen::Matrix<double, 6, 1>
+                delta_eigen_before_suppression =
+                    Eigen::Matrix<double, 6, 1>::Zero();
 
-            // ------------------------------------------------
-            // Solution in eigenvector space.
-            //
-            // alpha_i:
-            //
-            //      how much correction we want to apply along
-            //      eigen-direction v_i.
-            // ------------------------------------------------
-
-            Eigen::Matrix<double, 6, 1> delta_eigen =
-                Eigen::Matrix<double, 6, 1>::Zero();
+            Eigen::Matrix<double, 6, 1>
+                delta_eigen =
+                    Eigen::Matrix<double, 6, 1>::Zero();
 
             int usable_directions =
                 0;
@@ -887,78 +1325,64 @@ bool LidarRegistration::Align(
                 const double relative_lambda =
                     relative_eigenvalues(i);
 
-                // --------------------------------------------
-                // Use exactly the SAME criterion that we used
-                // above for degeneracy detection.
-                // --------------------------------------------
+                const bool valid_lambda =
+                    std::isfinite(lambda) &&
+                    lambda >
+                        config_
+                            .degeneracy_absolute_eigenvalue_threshold;
 
-                const bool weak_direction =
-                    !std::isfinite(lambda) ||
-                    lambda <=
-                        config_.degeneracy_absolute_eigenvalue_threshold ||
-                    relative_lambda <
-                        config_.degeneracy_relative_eigenvalue_threshold;
-
-                // ----------------------------------------------------
-                // Print only the weak Hessian direction.
-                // ----------------------------------------------------
-
-                if (weak_direction)
+                if (valid_lambda)
                 {
-                    std::cout
-                        << "Weak Hessian direction"
-                        << " | index=" << i
-                        << " | eigenvalue=" << lambda
-                        << " | relative=" << relative_lambda
-                        << " | eigenvector=["
-                        << hessian_eigenvectors.col(i).transpose()
-                        << "]"
-                        << std::endl;
+                    delta_eigen_before_suppression(i) =
+                        -gradient_eigen(i) /
+                        lambda;
                 }
-                // --------------------------------------------
-                // Weak direction:
-                //
-                // Do NOT trust LiDAR correction.
-                //
-                // Keep:
-                //
-                //      delta_eigen(i) = 0
-                //
-                // Therefore this direction stays at the
-                // predicted pose instead of being moved by an
-                // unstable LiDAR solution.
-                // --------------------------------------------
 
-                if (weak_direction)
+                const bool strong_degenerate =
+                    !valid_lambda ||
+                    relative_lambda <
+                        hard_relative_threshold;
+
+                if (strong_degenerate)
                 {
                     delta_eigen(i) =
                         0.0;
 
+                    std::cout
+                        << (use_hessian_scale_normalization
+                                ? "DEGENERATE_DIRECTION_V2D"
+                                : "Weak Hessian direction")
+                        << " | index="
+                        << i
+                        << " | eigenvalue="
+                        << lambda
+                        << " | relative="
+                        << relative_lambda
+                        << " | threshold="
+                        << hard_relative_threshold
+                        << " | action=SUPPRESS"
+                        << " | space="
+                        << (use_hessian_scale_normalization
+                                ? "NORMALIZED_EQUIVALENT_METERS"
+                                : "PHYSICAL_RAD_M")
+                        << " | eigenvector=["
+                        << hessian_eigenvectors
+                               .col(i)
+                               .transpose()
+                        << "]"
+                        << std::endl;
+
                     continue;
                 }
 
-                // --------------------------------------------
-                // Observable direction:
-                //
-                //      alpha_i
-                //
-                //          =
-                //
-                //      -(v_i^T b) / lambda_i
-                // --------------------------------------------
-
                 delta_eigen(i) =
-                    -gradient_eigen(i) /
-                    lambda;
+                    delta_eigen_before_suppression(i);
 
                 ++usable_directions;
             }
 
-            // ------------------------------------------------
-            // Safety check.
-            // ------------------------------------------------
-
-            if (usable_directions <= 0)
+            if (usable_directions <=
+                0)
             {
                 std::cerr
                     << "LidarRegistration::Align(): "
@@ -968,32 +1392,75 @@ bool LidarRegistration::Align(
                 return false;
             }
 
-            // ------------------------------------------------
-            // Transform solution from Hessian eigenvector space
-            // back into the original 6-DOF perturbation space.
-            //
-            //      dx = V * alpha
-            // ------------------------------------------------
+            const Eigen::Matrix<double, 6, 1>
+                delta_analysis_before_suppression =
+                    hessian_eigenvectors *
+                    delta_eigen_before_suppression;
 
-            dx =
+            const Eigen::Matrix<double, 6, 1>
+                dx_before_suppression =
+                    parameter_unscale *
+                    delta_analysis_before_suppression;
+
+            delta_analysis =
                 hessian_eigenvectors *
                 delta_eigen;
 
-            std::cout
-                << "Degeneracy handling"
-                << " | suppressed="
-                << degenerate_directions
-                << " | usable="
-                << usable_directions
-                << " | eigen_step=["
-                << delta_eigen.transpose()
-                << "]"
-                << std::endl;
-        }
+            dx =
+                parameter_unscale *
+                delta_analysis;
 
-        // ====================================================
-        // 2.7.3 Final numerical check
-        // ====================================================
+            if (use_hessian_scale_normalization)
+            {
+                std::cout
+                    << "DEGENERACY_EVENT_V2D"
+                    << " | hard_threshold="
+                    << hard_relative_threshold
+                    << " | weak_threshold="
+                    << weak_relative_threshold
+                    << " | degenerate_directions="
+                    << degenerate_directions
+                    << " | weak_directions="
+                    << weak_directions
+                    << " | usable="
+                    << usable_directions
+                    << " | corr="
+                    << valid_correspondences
+                    << " | weight_sum="
+                    << robust_weight_sum
+                    << " | condition="
+                    << condition_number
+                    << " | relative=["
+                    << relative_eigenvalues.transpose()
+                    << "]"
+                    << " | eigen_step_before=["
+                    << delta_eigen_before_suppression.transpose()
+                    << "]"
+                    << " | eigen_step_after=["
+                    << delta_eigen.transpose()
+                    << "]"
+                    << " | dx_before=["
+                    << dx_before_suppression.transpose()
+                    << "]"
+                    << " | dx_after=["
+                    << dx.transpose()
+                    << "]"
+                    << std::endl;
+            }
+            else
+            {
+                std::cout
+                    << "Degeneracy handling"
+                    << " | suppressed="
+                    << degenerate_directions
+                    << " | usable="
+                    << usable_directions
+                    << " | eigen_step=["
+                    << delta_eigen.transpose()
+                    << "]"
+                    << std::endl;
+            }
+        }
 
         if (!dx.allFinite())
         {
@@ -1005,46 +1472,82 @@ bool LidarRegistration::Align(
             return false;
         }
 
-        // ====================================================
-        // 2.8 Left pose update
-        // ====================================================
-
         const Eigen::Vector3d delta_rotation =
             dx.head<3>();
 
         const Eigen::Vector3d delta_translation =
             dx.tail<3>();
 
-        Eigen::Isometry3d delta_T =
-            Eigen::Isometry3d::Identity();
-
-        delta_T.linear() =
+        const Eigen::Matrix3d delta_R =
             Sophus::SO3d::exp(
                 delta_rotation)
                 .matrix();
 
-        delta_T.translation() =
-            delta_translation;
+        if (config_.enable_sensor_centered_perturbation)
+        {
+            T_target_source.linear() =
+                delta_R *
+                T_target_source.rotation();
 
-        T_target_source =
-            delta_T *
-            T_target_source;
+            T_target_source.translation() +=
+                delta_translation;
+        }
+        else
+        {
+            Eigen::Isometry3d delta_T =
+                Eigen::Isometry3d::Identity();
 
-        // ====================================================
-        // 2.9 Diagnostics
-        // ====================================================
+            delta_T.linear() =
+                delta_R;
 
-        const double rmse =
-            std::sqrt(
-                squared_error_sum /
-                static_cast<double>(
-                    valid_correspondences));
+            delta_T.translation() =
+                delta_translation;
+
+            T_target_source =
+                delta_T *
+                T_target_source;
+        }
 
         const double dR =
             delta_rotation.norm();
 
         const double dT =
             delta_translation.norm();
+
+        std::cout
+            << "ROBUST_ICP"
+            << " | iteration="
+            << iteration
+            << " | enabled="
+            << (config_.enable_huber_loss
+                    ? "true"
+                    : "false")
+            << " | delta="
+            << config_.huber_delta
+            << " m"
+            << " | corr="
+            << valid_correspondences
+            << " | downweighted="
+            << downweighted_correspondences
+            << " | downweighted_ratio="
+            << downweighted_ratio
+            << " | weight_sum="
+            << robust_weight_sum
+            << " | min_weight="
+            << minimum_robust_weight
+            << " | raw_rmse="
+            << rmse
+            << " | robust_rmse="
+            << robust_rmse
+            << " | hessian_scale="
+            << (use_hessian_scale_normalization
+                    ? "ON"
+                    : "OFF")
+            << " | median_range="
+            << median_range
+            << " | scale_L="
+            << characteristic_length
+            << std::endl;
 
         std::cout
             << "Registration iteration "
@@ -1077,14 +1580,12 @@ bool LidarRegistration::Align(
         result.T_target_source =
             T_target_source;
 
-        // ====================================================
-        // 2.10 Convergence
-        // ====================================================
-
         if (dR <
-                config_.rotation_convergence_threshold &&
+                config_
+                    .rotation_convergence_threshold &&
             dT <
-                config_.translation_convergence_threshold)
+                config_
+                    .translation_convergence_threshold)
         {
             result.converged =
                 true;

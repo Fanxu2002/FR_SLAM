@@ -9,7 +9,6 @@
 
 #include "fr_slam/fr_point_types.hpp"
 
-
 // ============================================================================
 // A SLAM keyframe.
 //
@@ -47,4 +46,18 @@ struct Keyframe
     // Keyframe point cloud in LiDAR coordinates.
     pcl::PointCloud<LIDAR_POINT>::Ptr cloud =
         pcl::make_shared<pcl::PointCloud<LIDAR_POINT>>();
+
+    // ========================================================================
+    // Dynamic odometry information from frontend V2B Hessian.
+    //
+    // Order:
+    //     [tx ty tz rx ry rz]
+    //
+    // Frame:
+    //     current Keyframe LiDAR frame
+    // ========================================================================
+    bool has_odom_information = false;
+
+    Eigen::Matrix<double, 6, 6> odom_information =
+        Eigen::Matrix<double, 6, 6>::Identity();
 };

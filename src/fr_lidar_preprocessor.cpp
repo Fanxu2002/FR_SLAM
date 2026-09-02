@@ -1,4 +1,5 @@
 #include "fr_slam/fr_lidar_preprocessor.hpp"
+#include "fr_slam/fr_ground_icp_input_bridge.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -7,6 +8,48 @@
 #include <Eigen/Core>
 
 #include <pcl/PointIndices.h>
+
+namespace
+{
+    using PreprocessorClock = std::chrono::steady_clock;
+
+    thread_local PreprocessorTiming g_last_preprocessor_timing;
+
+    double ElapsedMilliseconds(
+        const PreprocessorClock::time_point &begin,
+        const PreprocessorClock::time_point &end)
+    {
+        return std::chrono::duration<double, std::milli>(
+                   end - begin)
+            .count();
+    }
+
+    void ResetPreprocessorTiming()
+    {
+        g_last_preprocessor_timing =
+            PreprocessorTiming();
+    }
+}
+
+// ============================================================================
+// Runtime switches used by the ROS node.
+// ============================================================================
+
+void PreProcessor::SetOutlierFiltersEnabled(
+    bool enable_sor,
+    bool enable_ror)
+{
+    config_.enable_SOR =
+        enable_sor;
+
+    config_.enable_ROR =
+        enable_ror;
+}
+
+const PreprocessorTiming &PreProcessor::GetLastTiming() const
+{
+    return g_last_preprocessor_timing;
+}
 
 // ============================================================================
 // Set LiDAR-IMU extrinsic used by the internal LidarDeskewer
@@ -19,40 +62,13 @@ void PreProcessor::SetDeskewExtrinsic(
     const Eigen::Quaterniond &Q_IL,
     const Eigen::Vector3d &P_IL)
 {
-        deskewer_.SetExtrinsic(
-            Q_IL,
-            P_IL);
-}
-
-void PreProcessor::SetOutlierFiltersEnabled(
-    bool enable_sor,
-    bool enable_ror)
-{
-        process_enable_sor_ =
-            enable_sor;
-
-        process_enable_ror_ =
-            enable_ror;
-}
-
-const PreprocessorTiming &PreProcessor::GetLastTiming() const
-{
-        return last_timing_;
+    deskewer_.SetExtrinsic(
+        Q_IL,
+        P_IL);
 }
 
 // ============================================================================
 // Deskew one LiDAR frame
-//
-// PreProcessor owns the LidarDeskewer, but the actual deskew algorithm remains
-// inside LidarDeskewer.
-//
-// This keeps the responsibility clear:
-//
-// PreProcessor:
-//     controls the preprocessing pipeline
-//
-// LidarDeskewer:
-//     performs motion compensation mathematics
 // ============================================================================
 
 bool PreProcessor::Deskew(
@@ -61,24 +77,31 @@ bool PreProcessor::Deskew(
     LIDAR_FRAME &output_frame,
     bool use_translation)
 {
-        return deskewer_.Deskew(
-            lidar_frame,
-            imu_poses,
-            output_frame,
-            use_translation);
+    return deskewer_.Deskew(
+        lidar_frame,
+        imu_poses,
+        output_frame,
+        use_translation);
 }
 
 // ============================================================================
 // Complete LiDAR preprocessing pipeline
 //
+// IMPORTANT:
+// Keep the currently validated registration order:
+//
 // Raw LiDAR
 //     -> Deskew
-//     -> Remove NaN / Range / ROI / CropBox
+//     -> Basic (NaN / Range / ROI / CropBox)
 //     -> VoxelGrid
 //     -> optional SOR
 //     -> optional ROR
 //
-// The returned frame is ready for registration.
+// Ground ICP V1.1 branches immediately after Basic:
+//
+// Basic dense cloud -------------------------------> Ground bridge
+//       |
+//       +-> Voxel -> SOR -> ROR -> sparse ICP cloud
 // ============================================================================
 
 LIDAR_FRAME PreProcessor::Process(
@@ -86,202 +109,182 @@ LIDAR_FRAME PreProcessor::Process(
     const std::vector<IMU_POSE> &imu_poses,
     bool use_translation)
 {
-        using Clock = std::chrono::steady_clock;
+    ResetPreprocessorTiming();
 
-        last_timing_ =
-            PreprocessorTiming();
+    // Never allow an older Basic cloud to survive a failed frame.
+    fr_slam::ClearGroundIcpDenseInput();
 
-        if (lidar_frame.cloud)
-        {
-                last_timing_.input_points =
-                    lidar_frame.cloud->size();
-        }
+    // ============================================================
+    // 1. Deskew
+    // ============================================================
 
-        const Clock::time_point total_start =
-            Clock::now();
+    LIDAR_FRAME deskewed_frame;
 
-        // ============================================================
-        // 1. Deskew
-        // ============================================================
-        const Clock::time_point deskew_start =
-            Clock::now();
+    const PreprocessorClock::time_point deskew_begin =
+        PreprocessorClock::now();
 
-        LIDAR_FRAME deskewed_frame;
+    const bool deskew_ok =
+        Deskew(
+            lidar_frame,
+            imu_poses,
+            deskewed_frame,
+            use_translation);
 
-        if (!Deskew(
-                lidar_frame,
-                imu_poses,
-                deskewed_frame,
-                use_translation))
-        {
-                std::cerr
-                    << "PreProcessor::Process(): deskew failed."
-                    << std::endl;
+    const PreprocessorClock::time_point deskew_end =
+        PreprocessorClock::now();
 
-                return LIDAR_FRAME();
-        }
+    g_last_preprocessor_timing.deskew_ms =
+        ElapsedMilliseconds(
+            deskew_begin,
+            deskew_end);
 
-        const Clock::time_point deskew_end =
-            Clock::now();
+    if (!deskew_ok)
+    {
+        std::cerr
+            << "PreProcessor::Process(): deskew failed."
+            << std::endl;
 
-        last_timing_.deskew_ms =
-            std::chrono::duration<double, std::milli>(
-                deskew_end - deskew_start)
-                .count();
+        return LIDAR_FRAME();
+    }
 
-        // ============================================================
-        // 2. Basic preprocessing
-        // ============================================================
-        const Clock::time_point basic_start =
-            Clock::now();
+    // ============================================================
+    // 2. Basic preprocessing
+    //
+    // preprocess() publishes the Basic dense cloud to the one-shot
+    // Ground ICP bridge before the registration branch is downsampled.
+    // ============================================================
 
-        LIDAR_FRAME clean_frame =
-            preprocess(
-                deskewed_frame);
+    const PreprocessorClock::time_point basic_begin =
+        PreprocessorClock::now();
 
-        const Clock::time_point basic_end =
-            Clock::now();
+    LIDAR_FRAME clean_frame =
+        preprocess(
+            deskewed_frame);
 
-        last_timing_.basic_ms =
-            std::chrono::duration<double, std::milli>(
-                basic_end - basic_start)
-                .count();
+    const PreprocessorClock::time_point basic_end =
+        PreprocessorClock::now();
 
-        if (!clean_frame.cloud ||
-            clean_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after preprocess."
-                    << std::endl;
+    g_last_preprocessor_timing.basic_ms =
+        ElapsedMilliseconds(
+            basic_begin,
+            basic_end);
 
-                return LIDAR_FRAME();
-        }
+    if (!clean_frame.cloud ||
+        clean_frame.cloud->empty())
+    {
+        fr_slam::ClearGroundIcpDenseInput();
 
-        last_timing_.after_basic_points =
-            clean_frame.cloud->size();
+        std::cerr
+            << "PreProcessor::Process(): "
+            << "cloud is empty after Basic preprocessing."
+            << std::endl;
 
-        // ============================================================
-        // 3. Voxel FIRST.
-        //
-        // The old pipeline performed SOR/ROR on roughly 8k-10k points and
-        // only then reduced the cloud to ~2k points. For real-time operation
-        // we reduce the cloud before any optional neighborhood outlier filter.
-        // ============================================================
-        const Clock::time_point voxel_start =
-            Clock::now();
+        return LIDAR_FRAME();
+    }
 
-        LIDAR_FRAME voxel_frame =
-            VoxelGrid(
-                clean_frame);
+    g_last_preprocessor_timing.after_basic_points =
+        clean_frame.cloud->size();
 
-        const Clock::time_point voxel_end =
-            Clock::now();
+    // ============================================================
+    // 3. Registration VoxelGrid
+    // ============================================================
 
-        last_timing_.voxel_ms =
-            std::chrono::duration<double, std::milli>(
-                voxel_end - voxel_start)
-                .count();
+    const PreprocessorClock::time_point voxel_begin =
+        PreprocessorClock::now();
 
-        if (!voxel_frame.cloud ||
-            voxel_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after VoxelGrid."
-                    << std::endl;
+    LIDAR_FRAME voxel_frame =
+        VoxelGrid(
+            clean_frame);
 
-                return LIDAR_FRAME();
-        }
+    const PreprocessorClock::time_point voxel_end =
+        PreprocessorClock::now();
 
-        last_timing_.after_voxel_points =
-            voxel_frame.cloud->size();
+    g_last_preprocessor_timing.voxel_ms =
+        ElapsedMilliseconds(
+            voxel_begin,
+            voxel_end);
 
-        // ============================================================
-        // 4. Optional SOR on the downsampled cloud.
-        // ============================================================
-        LIDAR_FRAME sor_frame =
-            voxel_frame;
+    if (!voxel_frame.cloud ||
+        voxel_frame.cloud->empty())
+    {
+        fr_slam::ClearGroundIcpDenseInput();
 
-        if (process_enable_sor_)
-        {
-                const Clock::time_point sor_start =
-                    Clock::now();
+        std::cerr
+            << "PreProcessor::Process(): "
+            << "cloud is empty after VoxelGrid."
+            << std::endl;
 
-                sor_frame =
-                    SOR(
-                        voxel_frame);
+        return LIDAR_FRAME();
+    }
 
-                const Clock::time_point sor_end =
-                    Clock::now();
+    g_last_preprocessor_timing.after_voxel_points =
+        voxel_frame.cloud->size();
 
-                last_timing_.sor_ms =
-                    std::chrono::duration<double, std::milli>(
-                        sor_end - sor_start)
-                        .count();
-        }
+    // ============================================================
+    // 4. Statistical outlier removal
+    // ============================================================
 
-        if (!sor_frame.cloud ||
-            sor_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after SOR."
-                    << std::endl;
+    const PreprocessorClock::time_point sor_begin =
+        PreprocessorClock::now();
 
-                return LIDAR_FRAME();
-        }
+    LIDAR_FRAME sor_frame =
+        SOR(
+            voxel_frame);
 
-        last_timing_.after_sor_points =
-            sor_frame.cloud->size();
+    const PreprocessorClock::time_point sor_end =
+        PreprocessorClock::now();
 
-        // ============================================================
-        // 5. Optional ROR on the downsampled cloud.
-        // ============================================================
-        LIDAR_FRAME ror_frame =
-            sor_frame;
+    g_last_preprocessor_timing.sor_ms =
+        ElapsedMilliseconds(
+            sor_begin,
+            sor_end);
 
-        if (process_enable_ror_)
-        {
-                const Clock::time_point ror_start =
-                    Clock::now();
+    if (!sor_frame.cloud ||
+        sor_frame.cloud->empty())
+    {
+        fr_slam::ClearGroundIcpDenseInput();
 
-                ror_frame =
-                    ROR(
-                        sor_frame);
+        std::cerr
+            << "PreProcessor::Process(): "
+            << "cloud is empty after SOR."
+            << std::endl;
 
-                const Clock::time_point ror_end =
-                    Clock::now();
+        return LIDAR_FRAME();
+    }
 
-                last_timing_.ror_ms =
-                    std::chrono::duration<double, std::milli>(
-                        ror_end - ror_start)
-                        .count();
-        }
+    // ============================================================
+    // 5. Radius outlier removal
+    // ============================================================
 
-        if (!ror_frame.cloud ||
-            ror_frame.cloud->empty())
-        {
-                std::cerr
-                    << "PreProcessor::Process(): "
-                    << "cloud is empty after ROR."
-                    << std::endl;
+    const PreprocessorClock::time_point ror_begin =
+        PreprocessorClock::now();
 
-                return LIDAR_FRAME();
-        }
+    LIDAR_FRAME ror_frame =
+        ROR(
+            sor_frame);
 
-        last_timing_.after_ror_points =
-            ror_frame.cloud->size();
+    const PreprocessorClock::time_point ror_end =
+        PreprocessorClock::now();
 
-        const Clock::time_point total_end =
-            Clock::now();
+    g_last_preprocessor_timing.ror_ms =
+        ElapsedMilliseconds(
+            ror_begin,
+            ror_end);
 
-        last_timing_.total_ms =
-            std::chrono::duration<double, std::milli>(
-                total_end - total_start)
-                .count();
+    if (!ror_frame.cloud ||
+        ror_frame.cloud->empty())
+    {
+        fr_slam::ClearGroundIcpDenseInput();
 
-        return ror_frame;
+        std::cerr
+            << "PreProcessor::Process(): "
+            << "cloud is empty after ROR."
+            << std::endl;
+
+        return LIDAR_FRAME();
+    }
+
+    return ror_frame;
 }
 
 // ============================================================================
@@ -291,215 +294,237 @@ LIDAR_FRAME PreProcessor::Process(
 LIDAR_FRAME PreProcessor::preprocess(
     const LIDAR_FRAME &lidar_frame)
 {
-        pcl::PointCloud<LIDAR_POINT>::Ptr original_pointcloud;
-        pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud;
+    pcl::PointCloud<LIDAR_POINT>::Ptr original_pointcloud;
+    pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud;
 
-        final_pointcloud =
+    final_pointcloud =
+        pcl::make_shared<
+            pcl::PointCloud<LIDAR_POINT>>();
+
+    if (!lidar_frame.cloud)
+    {
+        std::cerr
+            << "Input point cloud is nullptr!"
+            << std::endl;
+
+        return LIDAR_FRAME();
+    }
+
+    if (lidar_frame.cloud->empty())
+    {
+        std::cerr
+            << "Input point cloud is empty!"
+            << std::endl;
+
+        return LIDAR_FRAME();
+    }
+
+    original_pointcloud =
+        lidar_frame.cloud;
+
+    // ============================================================
+    // 1. Remove NaN
+    // ============================================================
+
+    pcl::Indices valid_indices;
+
+    pcl::removeNaNFromPointCloud<LIDAR_POINT>(
+        *original_pointcloud,
+        *final_pointcloud,
+        valid_indices);
+
+    std::cout
+        << "There are "
+        << original_pointcloud->size()
+        << " points in the original cloud;\n"
+        << std::endl;
+
+    std::cout
+        << "After removing NaN value, there are "
+        << final_pointcloud->size()
+        << " points in the cloud;\n"
+        << std::endl;
+
+    // ============================================================
+    // 2. Range filter
+    // ============================================================
+
+    if (config_.enable_ROI)
+    {
+        pcl::PointCloud<LIDAR_POINT>::Ptr range_cloud =
             pcl::make_shared<
                 pcl::PointCloud<LIDAR_POINT>>();
 
-        if (!lidar_frame.cloud)
-        {
-                std::cerr
-                    << "Input point cloud is nullptr!"
-                    << std::endl;
+        range_cloud->reserve(
+            final_pointcloud->size());
 
-                return LIDAR_FRAME();
+        const double min_range_square =
+            config_.range_min *
+            config_.range_min;
+
+        const double max_range_square =
+            config_.range_max *
+            config_.range_max;
+
+        for (const LIDAR_POINT &point :
+             final_pointcloud->points)
+        {
+            const double range_square =
+                static_cast<double>(point.x) *
+                    static_cast<double>(point.x) +
+                static_cast<double>(point.y) *
+                    static_cast<double>(point.y) +
+                static_cast<double>(point.z) *
+                    static_cast<double>(point.z);
+
+            if (range_square >= min_range_square &&
+                range_square <= max_range_square)
+            {
+                range_cloud->push_back(
+                    point);
+            }
         }
 
-        if (lidar_frame.cloud->empty())
-        {
-                std::cerr
-                    << "Input point cloud is empty!"
-                    << std::endl;
+        range_cloud->width =
+            static_cast<std::uint32_t>(
+                range_cloud->size());
 
-                return LIDAR_FRAME();
-        }
+        range_cloud->height =
+            1;
 
-        original_pointcloud =
-            lidar_frame.cloud;
+        range_cloud->is_dense =
+            true;
 
-        // ============================================================
-        // 1. Remove NaN
-        // ============================================================
+        final_pointcloud =
+            range_cloud;
+    }
 
-        pcl::Indices valid_indices;
+    // ============================================================
+    // 3. PassThrough ROI
+    // ============================================================
 
-        pcl::removeNaNFromPointCloud<LIDAR_POINT>(
-            *original_pointcloud,
-            *final_pointcloud,
-            valid_indices);
+    if (config_.enable_passthrough)
+    {
+        pcl::PassThrough<LIDAR_POINT>::Ptr passthrough =
+            pcl::make_shared<
+                pcl::PassThrough<LIDAR_POINT>>();
 
+        passthrough->setInputCloud(
+            final_pointcloud);
 
-        // ============================================================
-        // 2. Range filter:
-        //
-        // range_min^2 <= x^2 + y^2 + z^2 <= range_max^2
-        // ============================================================
+        passthrough->setFilterFieldName(
+            "x");
 
-        if (config_.enable_ROI)
-        {
-                pcl::PointCloud<LIDAR_POINT>::Ptr range_cloud =
-                    pcl::make_shared<
-                        pcl::PointCloud<LIDAR_POINT>>();
+        passthrough->setFilterLimits(
+            config_.ROI_min_x,
+            config_.ROI_max_x);
 
-                range_cloud->reserve(
-                    final_pointcloud->size());
+        passthrough->filter(
+            *final_pointcloud);
 
-                const double min_range_square =
-                    config_.range_min *
-                    config_.range_min;
+        passthrough->setInputCloud(
+            final_pointcloud);
 
-                const double max_range_square =
-                    config_.range_max *
-                    config_.range_max;
+        passthrough->setFilterFieldName(
+            "y");
 
-                for (const LIDAR_POINT &point :
-                     final_pointcloud->points)
-                {
-                        const double range_square =
-                            static_cast<double>(point.x) *
-                                static_cast<double>(point.x) +
-                            static_cast<double>(point.y) *
-                                static_cast<double>(point.y) +
-                            static_cast<double>(point.z) *
-                                static_cast<double>(point.z);
+        passthrough->setFilterLimits(
+            config_.ROI_min_y,
+            config_.ROI_max_y);
 
-                        if (range_square >= min_range_square &&
-                            range_square <= max_range_square)
-                        {
-                                range_cloud->push_back(
-                                    point);
-                        }
-                }
+        passthrough->filter(
+            *final_pointcloud);
 
-                range_cloud->width =
-                    static_cast<std::uint32_t>(
-                        range_cloud->size());
+        passthrough->setInputCloud(
+            final_pointcloud);
 
-                range_cloud->height =
-                    1;
+        passthrough->setFilterFieldName(
+            "z");
 
-                range_cloud->is_dense =
-                    true;
+        passthrough->setFilterLimits(
+            config_.ROI_min_z,
+            config_.ROI_max_z);
 
-                final_pointcloud =
-                    range_cloud;
-        }
+        passthrough->filter(
+            *final_pointcloud);
+    }
 
-        // ============================================================
-        // 3. PassThrough ROI
-        // ============================================================
+    // ============================================================
+    // 4. CropBox
+    // ============================================================
 
-        if (config_.enable_passthrough)
-        {
-                pcl::PassThrough<LIDAR_POINT>::Ptr passthrough =
-                    pcl::make_shared<
-                        pcl::PassThrough<LIDAR_POINT>>();
+    if (config_.enable_cropbox)
+    {
+        pcl::CropBox<LIDAR_POINT>::Ptr cropbox =
+            pcl::make_shared<
+                pcl::CropBox<LIDAR_POINT>>();
 
-                passthrough->setInputCloud(
-                    final_pointcloud);
+        const Eigen::Vector4f max_range(
+            config_.cropbox_max_x,
+            config_.cropbox_max_y,
+            config_.cropbox_max_z,
+            1.0f);
 
-                passthrough->setFilterFieldName(
-                    "x");
+        const Eigen::Vector4f min_range(
+            config_.cropbox_min_x,
+            config_.cropbox_min_y,
+            config_.cropbox_min_z,
+            1.0f);
 
-                passthrough->setFilterLimits(
-                    config_.ROI_min_x,
-                    config_.ROI_max_x);
+        cropbox->setInputCloud(
+            final_pointcloud);
 
-                passthrough->filter(
-                    *final_pointcloud);
+        cropbox->setMax(
+            max_range);
 
-                passthrough->setInputCloud(
-                    final_pointcloud);
+        cropbox->setMin(
+            min_range);
 
-                passthrough->setFilterFieldName(
-                    "y");
+        cropbox->setNegative(
+            true);
 
-                passthrough->setFilterLimits(
-                    config_.ROI_min_y,
-                    config_.ROI_max_y);
+        cropbox->filter(
+            *final_pointcloud);
 
-                passthrough->filter(
-                    *final_pointcloud);
+        std::cout
+            << "There are "
+            << final_pointcloud->size()
+            << " points after cropbox filtering!\n"
+            << std::endl;
+    }
 
-                passthrough->setInputCloud(
-                    final_pointcloud);
+    // ============================================================
+    // 5. Build Basic output frame
+    // ============================================================
 
-                passthrough->setFilterFieldName(
-                    "z");
+    LIDAR_FRAME output_frame;
 
-                passthrough->setFilterLimits(
-                    config_.ROI_min_z,
-                    config_.ROI_max_z);
+    output_frame.frame_id =
+        lidar_frame.frame_id;
 
-                passthrough->filter(
-                    *final_pointcloud);
-        }
+    output_frame.cloud =
+        final_pointcloud;
 
-        // ============================================================
-        // 4. CropBox
-        //
-        // Usually used to remove points on the vehicle / sensor body.
-        // ============================================================
+    output_frame.has_point_time =
+        lidar_frame.has_point_time;
 
-        if (config_.enable_cropbox)
-        {
-                pcl::CropBox<LIDAR_POINT>::Ptr cropbox =
-                    pcl::make_shared<
-                        pcl::CropBox<LIDAR_POINT>>();
+    output_frame.scan_start_time =
+        lidar_frame.scan_start_time;
 
-                const Eigen::Vector4f max_range(
-                    config_.cropbox_max_x,
-                    config_.cropbox_max_y,
-                    config_.cropbox_max_z,
-                    1.0f);
+    output_frame.scan_duration =
+        lidar_frame.scan_duration;
 
-                const Eigen::Vector4f min_range(
-                    config_.cropbox_min_x,
-                    config_.cropbox_min_y,
-                    config_.cropbox_min_z,
-                    1.0f);
+    // ============================================================
+    // 6. Ground ICP V1.1 dense branch handoff
+    //
+    // This pointer is published BEFORE the registration Voxel/SOR/ROR
+    // stages. Ground V4 later performs its own 0.15 m analysis voxel.
+    // ============================================================
 
-                cropbox->setInputCloud(
-                    final_pointcloud);
+    fr_slam::PublishGroundIcpDenseInput(
+        output_frame.cloud);
 
-                cropbox->setMax(
-                    max_range);
-
-                cropbox->setMin(
-                    min_range);
-
-                cropbox->setNegative(
-                    true);
-
-                cropbox->filter(
-                    *final_pointcloud);
-
-        }
-
-        // ============================================================
-        // 5. Build output frame
-        // ============================================================
-
-        LIDAR_FRAME output_frame;
-
-        output_frame.frame_id =
-            lidar_frame.frame_id;
-
-        output_frame.cloud =
-            final_pointcloud;
-
-        output_frame.has_point_time =
-            lidar_frame.has_point_time;
-
-        output_frame.scan_start_time =
-            lidar_frame.scan_start_time;
-
-        output_frame.scan_duration =
-            lidar_frame.scan_duration;
-
-        return output_frame;
+    return output_frame;
 }
 
 // ============================================================================
@@ -509,72 +534,72 @@ LIDAR_FRAME PreProcessor::preprocess(
 LIDAR_FRAME PreProcessor::VoxelGrid(
     const LIDAR_FRAME &lidar_frame) const
 {
-        if (!config_.enable_voxel)
-        {
-                return lidar_frame;
-        }
+    if (!config_.enable_voxel)
+    {
+        return lidar_frame;
+    }
 
-        if (!lidar_frame.cloud)
-        {
-                std::cerr
-                    << "Input point cloud is nullptr!"
-                    << std::endl;
+    if (!lidar_frame.cloud)
+    {
+        std::cerr
+            << "Input point cloud is nullptr!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        if (lidar_frame.cloud->empty())
-        {
-                std::cerr
-                    << "Input point cloud is empty!"
-                    << std::endl;
+    if (lidar_frame.cloud->empty())
+    {
+        std::cerr
+            << "Input point cloud is empty!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
-            pcl::make_shared<
-                pcl::PointCloud<LIDAR_POINT>>();
+    pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
+        pcl::make_shared<
+            pcl::PointCloud<LIDAR_POINT>>();
 
-        pcl::VoxelGrid<LIDAR_POINT>::Ptr voxel_grid =
-            pcl::make_shared<
-                pcl::VoxelGrid<LIDAR_POINT>>();
+    pcl::VoxelGrid<LIDAR_POINT>::Ptr voxel_grid =
+        pcl::make_shared<
+            pcl::VoxelGrid<LIDAR_POINT>>();
 
-        voxel_grid->setInputCloud(
-            lidar_frame.cloud);
+    voxel_grid->setInputCloud(
+        lidar_frame.cloud);
 
-        voxel_grid->setDownsampleAllData(
-            false);
+    voxel_grid->setDownsampleAllData(
+        false);
 
-        voxel_grid->setLeafSize(
-            config_.voxel_leaf_size,
-            config_.voxel_leaf_size,
-            config_.voxel_leaf_size);
+    voxel_grid->setLeafSize(
+        config_.voxel_leaf_size,
+        config_.voxel_leaf_size,
+        config_.voxel_leaf_size);
 
-        voxel_grid->setMinimumPointsNumberPerVoxel(
-            config_.voxel_min_points);
+    voxel_grid->setMinimumPointsNumberPerVoxel(
+        config_.voxel_min_points);
 
-        voxel_grid->filter(
-            *final_pointcloud);
+    voxel_grid->filter(
+        *final_pointcloud);
 
-        LIDAR_FRAME output_frame;
+    LIDAR_FRAME output_frame;
 
-        output_frame.frame_id =
-            lidar_frame.frame_id;
+    output_frame.frame_id =
+        lidar_frame.frame_id;
 
-        output_frame.cloud =
-            final_pointcloud;
+    output_frame.cloud =
+        final_pointcloud;
 
-        output_frame.has_point_time =
-            lidar_frame.has_point_time;
+    output_frame.has_point_time =
+        lidar_frame.has_point_time;
 
-        output_frame.scan_start_time =
-            lidar_frame.scan_start_time;
+    output_frame.scan_start_time =
+        lidar_frame.scan_start_time;
 
-        output_frame.scan_duration =
-            lidar_frame.scan_duration;
+    output_frame.scan_duration =
+        lidar_frame.scan_duration;
 
-        return output_frame;
+    return output_frame;
 }
 
 // ============================================================================
@@ -584,68 +609,73 @@ LIDAR_FRAME PreProcessor::VoxelGrid(
 LIDAR_FRAME PreProcessor::SOR(
     const LIDAR_FRAME &lidar_frame) const
 {
-        if (!config_.enable_SOR)
-        {
-                return lidar_frame;
-        }
+    if (!config_.enable_SOR)
+    {
+        return lidar_frame;
+    }
 
-        if (!lidar_frame.cloud)
-        {
-                std::cerr
-                    << "Input point cloud is nullptr!"
-                    << std::endl;
+    if (!lidar_frame.cloud)
+    {
+        std::cerr
+            << "Input point cloud is nullptr!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        if (lidar_frame.cloud->empty())
-        {
-                std::cerr
-                    << "Input point cloud is empty!"
-                    << std::endl;
+    if (lidar_frame.cloud->empty())
+    {
+        std::cerr
+            << "Input point cloud is empty!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
-            pcl::make_shared<
-                pcl::PointCloud<LIDAR_POINT>>();
+    pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
+        pcl::make_shared<
+            pcl::PointCloud<LIDAR_POINT>>();
 
-        pcl::StatisticalOutlierRemoval<LIDAR_POINT>::Ptr sor =
-            pcl::make_shared<
-                pcl::StatisticalOutlierRemoval<LIDAR_POINT>>();
+    pcl::StatisticalOutlierRemoval<LIDAR_POINT>::Ptr sor =
+        pcl::make_shared<
+            pcl::StatisticalOutlierRemoval<LIDAR_POINT>>();
 
-        sor->setInputCloud(
-            lidar_frame.cloud);
+    sor->setInputCloud(
+        lidar_frame.cloud);
 
-        sor->setMeanK(
-            config_.sor_mean_k);
+    sor->setMeanK(
+        config_.sor_mean_k);
 
-        sor->setStddevMulThresh(
-            config_.sor_stddev_mul_thresh);
+    sor->setStddevMulThresh(
+        config_.sor_stddev_mul_thresh);
 
-        sor->filter(
-            *final_pointcloud);
+    sor->filter(
+        *final_pointcloud);
 
+    std::cout
+        << "There are "
+        << final_pointcloud->size()
+        << " points after SOR filtering!\n"
+        << std::endl;
 
-        LIDAR_FRAME output_frame;
+    LIDAR_FRAME output_frame;
 
-        output_frame.frame_id =
-            lidar_frame.frame_id;
+    output_frame.frame_id =
+        lidar_frame.frame_id;
 
-        output_frame.cloud =
-            final_pointcloud;
+    output_frame.cloud =
+        final_pointcloud;
 
-        output_frame.has_point_time =
-            lidar_frame.has_point_time;
+    output_frame.has_point_time =
+        lidar_frame.has_point_time;
 
-        output_frame.scan_start_time =
-            lidar_frame.scan_start_time;
+    output_frame.scan_start_time =
+        lidar_frame.scan_start_time;
 
-        output_frame.scan_duration =
-            lidar_frame.scan_duration;
+    output_frame.scan_duration =
+        lidar_frame.scan_duration;
 
-        return output_frame;
+    return output_frame;
 }
 
 // ============================================================================
@@ -655,69 +685,74 @@ LIDAR_FRAME PreProcessor::SOR(
 LIDAR_FRAME PreProcessor::ROR(
     const LIDAR_FRAME &lidar_frame) const
 {
-        if (!config_.enable_ROR)
-        {
-                return lidar_frame;
-        }
+    if (!config_.enable_ROR)
+    {
+        return lidar_frame;
+    }
 
-        if (!lidar_frame.cloud)
-        {
-                std::cerr
-                    << "Input point cloud is nullptr!"
-                    << std::endl;
+    if (!lidar_frame.cloud)
+    {
+        std::cerr
+            << "Input point cloud is nullptr!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        if (lidar_frame.cloud->empty())
-        {
-                std::cerr
-                    << "Input point cloud is empty!"
-                    << std::endl;
+    if (lidar_frame.cloud->empty())
+    {
+        std::cerr
+            << "Input point cloud is empty!"
+            << std::endl;
 
-                return LIDAR_FRAME();
-        }
+        return LIDAR_FRAME();
+    }
 
-        pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
-            pcl::make_shared<
-                pcl::PointCloud<LIDAR_POINT>>();
+    pcl::PointCloud<LIDAR_POINT>::Ptr final_pointcloud =
+        pcl::make_shared<
+            pcl::PointCloud<LIDAR_POINT>>();
 
-        pcl::RadiusOutlierRemoval<LIDAR_POINT>::Ptr ror =
-            pcl::make_shared<
-                pcl::RadiusOutlierRemoval<LIDAR_POINT>>();
+    pcl::RadiusOutlierRemoval<LIDAR_POINT>::Ptr ror =
+        pcl::make_shared<
+            pcl::RadiusOutlierRemoval<LIDAR_POINT>>();
 
-        ror->setInputCloud(
-            lidar_frame.cloud);
+    ror->setInputCloud(
+        lidar_frame.cloud);
 
-        ror->setRadiusSearch(
-            config_.ror_RadiusSearch);
+    ror->setRadiusSearch(
+        config_.ror_RadiusSearch);
 
-        ror->setMinNeighborsInRadius(
-            config_.ror_MinNeighborsInRadius);
+    ror->setMinNeighborsInRadius(
+        config_.ror_MinNeighborsInRadius);
 
-        ror->setNegative(
-            false);
+    ror->setNegative(
+        false);
 
-        ror->filter(
-            *final_pointcloud);
+    ror->filter(
+        *final_pointcloud);
 
+    std::cout
+        << "There are "
+        << final_pointcloud->size()
+        << " points after ROR filtering!\n"
+        << std::endl;
 
-        LIDAR_FRAME output_frame;
+    LIDAR_FRAME output_frame;
 
-        output_frame.frame_id =
-            lidar_frame.frame_id;
+    output_frame.frame_id =
+        lidar_frame.frame_id;
 
-        output_frame.cloud =
-            final_pointcloud;
+    output_frame.cloud =
+        final_pointcloud;
 
-        output_frame.has_point_time =
-            lidar_frame.has_point_time;
+    output_frame.has_point_time =
+        lidar_frame.has_point_time;
 
-        output_frame.scan_start_time =
-            lidar_frame.scan_start_time;
+    output_frame.scan_start_time =
+        lidar_frame.scan_start_time;
 
-        output_frame.scan_duration =
-            lidar_frame.scan_duration;
+    output_frame.scan_duration =
+        lidar_frame.scan_duration;
 
-        return output_frame;
+    return output_frame;
 }

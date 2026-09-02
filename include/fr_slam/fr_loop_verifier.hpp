@@ -4,23 +4,46 @@
 
 #include <cstddef>
 #include <limits>
+#include <memory>
 
 #include <Eigen/Geometry>
 
 #include <pcl/point_cloud.h>
 
 // ============================================================================
-// LoopVerifier V1
+// LoopVerifier V2 - cached preprocessing / cached historical target KD-tree
 //
 // Purpose:
 //
 //     Scan Context answers:
 //
-//         "Which old Submap looks similar?"
+//         "Which old place looks similar?"
 //
 //     LoopVerifier answers:
 //
 //         "Can the two actual point clouds be geometrically aligned?"
+//
+// V2 PERFORMANCE CHANGE:
+//
+//     The geometry / acceptance logic is intentionally unchanged.
+//
+//     The expensive reusable work is cached:
+//
+//         current Keyframe cloud
+//             -> PointXYZ conversion + VoxelGrid       (once per current KF)
+//
+//         historical frozen Submap cloud
+//             -> PointXYZ conversion + VoxelGrid
+//             -> target KD-tree                         (once per cached Submap)
+//
+//     The same prepared target KD-tree is reused by:
+//
+//         - PCL ICP nearest-neighbour search
+//         - explicit overlap / RMSE evaluation
+//         - repeated initial guesses for the same candidate
+//
+//     This is especially useful in FR_SLAM because the caller currently tests
+//     CANDIDATE_POSE / +SC yaw / -SC yaw as separate Verify() calls.
 //
 // IMPORTANT:
 //     This class only verifies geometry and returns a relative transform.
@@ -31,25 +54,6 @@
 //     T_AB maps coordinates from B -> A:
 //
 //         p_A = T_AB * p_B
-//
-// For loop verification:
-//
-//     source = current Submap cloud_S
-//     target = historical candidate Submap cloud_S
-//
-// therefore the returned transform is:
-//
-//     T_target_source
-//       =
-//     T_Shistorical_Scurrent
-//
-// which is exactly the measurement direction needed later by:
-//
-//     AddLoopEdge(
-//         historical_id,
-//         current_id,
-//         T_Shistorical_Scurrent,
-//         information);
 // ============================================================================
 
 struct LoopVerifierConfig
@@ -59,44 +63,41 @@ struct LoopVerifierConfig
     double voxel_leaf_size = 0.50;
 
     // Coarse point-to-point ICP.
-    //
-    // This is intentionally wider than the final verification inlier gate.
-    // Its job is to enter the correct basin of attraction.
     std::size_t max_iterations = 50;
     double max_correspondence_distance = 5.0;
     double transformation_epsilon = 1.0e-6;
     double euclidean_fitness_epsilon = 1.0e-5;
 
     // Final geometric quality measurement after ICP.
-    //
-    // A transformed source point is considered an inlier when its nearest
-    // target point lies within this distance.
     double verification_inlier_distance = 1.0;
 
-    // V1 acceptance thresholds.
-    //
-    // These are deliberately starting values, not final tuned parameters.
-    // We will tune them from the real loop-verification log.
+    // Acceptance thresholds.
     double max_rmse = 0.65;
     std::size_t min_inliers = 300;
     double min_overlap_ratio = 0.15;
 
-    // Final sanity gate on how far ICP is allowed to move away from the
-    // selected initial hypothesis.
-    //
-    // This is NOT intended to force the loop measurement to stay close to the
-    // raw odometry graph forever. The verifier already tests three different
-    // hypotheses (graph / +SC yaw / -SC yaw). These limits only reject ICP
-    // solutions that require an implausibly large correction from the winning
-    // hypothesis, which is a common symptom of convergence to a wrong repeated
-    // structure.
-    //
-    // V1 values are deliberately loose and should be tuned from real logs.
+    // Final sanity gate on how far ICP may move from the selected hypothesis.
     double max_correction_translation = 15.0;
     double max_correction_rotation_deg = 45.0;
 
     // Reject extremely small clouds before doing ICP.
     std::size_t min_cloud_points = 300;
+
+    // Cheap initial-guess pre-score.  Before running full ICP, the current
+    // downsampled source is transformed by the hypothesis and evaluated against
+    // the cached historical target KD-tree.  This performs nearest-neighbour
+    // queries only; it does not iterate ICP.
+    //
+    // A generous distance keeps this stage conservative.  The overlap threshold
+    // is intentionally much lower than the final 0.15 geometry gate so only
+    // clearly implausible hypotheses are pruned.
+    double prescore_inlier_distance = 2.0;
+    double prescore_min_overlap_ratio = 0.03;
+
+    // Maximum number of prepared historical Submap targets retained by the
+    // verifier. Finished Submap clouds are immutable, so reusing them is safe.
+    // The cache is FIFO-bounded to avoid unbounded memory growth.
+    std::size_t max_cached_targets = 64;
 };
 
 enum class LoopVerifierHypothesis
@@ -106,41 +107,44 @@ enum class LoopVerifierHypothesis
     ScanContextNegativeYaw = 2
 };
 
+struct LoopVerifierInitialGuessScore
+{
+    bool valid = false;
+    std::size_t inliers = 0;
+    double overlap_ratio = 0.0;
+    double rmse =
+        std::numeric_limits<double>::infinity();
+};
+
 struct LoopVerificationResult
 {
     bool success = false;
     bool converged = false;
     bool accepted = false;
 
-    // Final current-Submap -> historical-Submap transform.
     Eigen::Isometry3d T_target_source =
         Eigen::Isometry3d::Identity();
 
-    // Initial transform used by the winning hypothesis.
     Eigen::Isometry3d initial_guess =
         Eigen::Isometry3d::Identity();
 
     LoopVerifierHypothesis hypothesis =
         LoopVerifierHypothesis::GraphPose;
 
-    // PCL ICP's own fitness diagnostic.
     double fitness_score =
         std::numeric_limits<double>::infinity();
 
-    // Our explicit final nearest-neighbour verification metrics.
     std::size_t inliers = 0;
     double overlap_ratio = 0.0;
     double rmse =
         std::numeric_limits<double>::infinity();
 
-    // How much ICP corrected the chosen initial guess.
     double correction_translation =
         std::numeric_limits<double>::infinity();
 
     double correction_rotation_deg =
         std::numeric_limits<double>::infinity();
 
-    // Number of points after verifier voxel filtering.
     std::size_t source_points = 0;
     std::size_t target_points = 0;
 };
@@ -152,32 +156,29 @@ public:
         const LoopVerifierConfig &config =
             LoopVerifierConfig());
 
+    ~LoopVerifier();
+
+    LoopVerifier(const LoopVerifier &) = delete;
+    LoopVerifier &operator=(const LoopVerifier &) = delete;
+
     // ------------------------------------------------------------------------
-    // Verify one Scan Context candidate.
+    // Cheaply score ONE externally-generated initial guess.
     //
-    // source_current:
-    //     current finished Submap cloud, in S_current.
+    // This reuses the same cached downsampled source / target KD-tree as Verify()
+    // but does NOT run ICP.  It is intended to rank CANDIDATE_POSE / +SC / -SC
+    // before spending time on full 50-iteration ICP.
+    // ------------------------------------------------------------------------
+    bool ScoreInitialGuess(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+        const Eigen::Isometry3d &initial_guess,
+        LoopVerifierInitialGuessScore &score) const;
+
+    // ------------------------------------------------------------------------
+    // Verify one candidate.
     //
-    // target_historical:
-    //     historical finished Submap cloud, in S_historical.
-    //
-    // graph_initial_guess:
-    //
-    //     T_Shistorical_Scurrent_guess
-    //       =
-    //     T_WS_historical^{-1} * T_WS_current
-    //
-    // scan_context_yaw_shift_deg:
-    //     coarse yaw displacement reported by Scan Context.
-    //
-    // V1 tests THREE initial-rotation hypotheses:
-    //
-    //     1. graph relative pose
-    //     2. +ScanContext yaw
-    //     3. -ScanContext yaw
-    //
-    // Testing both signs is intentional because we have not yet calibrated the
-    // Scan Context shift sign against the project's T_AB convention.
+    // The public API is intentionally unchanged from V1 so the existing loop
+    // decision / temporal / PoseGraph code does not need to change.
     // ------------------------------------------------------------------------
     bool Verify(
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
@@ -186,11 +187,19 @@ public:
         double scan_context_yaw_shift_deg,
         LoopVerificationResult &result) const;
 
+    // Clear prepared source/target data. Call this together with SLAM Reset().
+    void ClearCache();
+
+    std::size_t CachedTargetCount() const;
+
     const LoopVerifierConfig &GetConfig() const;
 
     static const char *HypothesisName(
         LoopVerifierHypothesis hypothesis);
 
 private:
+    struct Cache;
+
     LoopVerifierConfig config_;
+    mutable std::unique_ptr<Cache> cache_;
 };

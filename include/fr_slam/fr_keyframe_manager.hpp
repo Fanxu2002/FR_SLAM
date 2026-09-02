@@ -11,7 +11,6 @@
 #include "fr_slam/fr_keyframe.hpp"
 #include "fr_slam/fr_point_types.hpp"
 
-
 // ============================================================================
 // Historical keyframe manager.
 //
@@ -38,7 +37,8 @@ public:
     bool AddKeyframe(
         double timestamp,
         const Eigen::Isometry3d &T_WL,
-        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar);
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+        const Eigen::Matrix<double, 6, 6> *odom_information = nullptr);
 
     // Number of ALL historical keyframes.
     std::size_t Size() const;

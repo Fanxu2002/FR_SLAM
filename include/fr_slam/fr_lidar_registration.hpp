@@ -15,6 +15,7 @@
 
 // ============================================================================
 // Prepared target frame for point-to-plane registration.
+// Compatible with Robust V1 + Degeneracy V2A/V2B.
 //
 // The whole registration pipeline uses LIDAR_POINT directly:
 // - cloud   : original target cloud
