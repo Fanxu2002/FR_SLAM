@@ -1,0 +1,94 @@
+fr_slam:
+  ros__parameters:
+    # ============================================================
+    # Hesai XT32 + Fixposition POI IMU
+    # ============================================================
+    lidar_type: "hesai"
+    lidar_topic: "/lidar_points"
+    imu_topic: "/fixposition/poiimu"
+
+    # Verified from existing bags:
+    #   /lidar_points       sensor_msgs/msg/PointCloud2
+    #   /fixposition/poiimu sensor_msgs/msg/Imu
+
+    # ============================================================
+    # Frames
+    # ============================================================
+    world_frame: "world"
+    odom_frame: "odom"
+
+    # ============================================================
+    # Realtime / synchronization
+    # ============================================================
+    max_lidar_queue_size: 3
+    imu_qos_depth: 1000
+    imu_initialization_sample_count: 200
+    imu_history_duration: 0.5
+
+    # ============================================================
+    # LocalMap
+    # ============================================================
+    local_map_max_frames: 10
+    local_map_voxel_leaf_size: 0.30
+
+    # ============================================================
+    # LiDAR preprocessing
+    # ============================================================
+    # Start with the same conservative front-end settings as Livox.
+    # The XT32 ROI and self-body box can be tuned after the first live run.
+    preprocessor_enable_range_filter: true
+    preprocessor_range_min: 1.0
+    preprocessor_range_max: 30.0
+
+    preprocessor_enable_passthrough: true
+    preprocessor_roi_min_x: -30.0
+    preprocessor_roi_max_x: 30.0
+    preprocessor_roi_min_y: -15.0
+    preprocessor_roi_max_y: 15.0
+    preprocessor_roi_min_z: -2.0
+    preprocessor_roi_max_z: 10.0
+
+    preprocessor_enable_cropbox: true
+    preprocessor_cropbox_min_x: -0.15
+    preprocessor_cropbox_max_x: 0.15
+    preprocessor_cropbox_min_y: -0.15
+    preprocessor_cropbox_max_y: 0.15
+    preprocessor_cropbox_min_z: -0.15
+    preprocessor_cropbox_max_z: 0.15
+
+    preprocessor_enable_voxel: true
+    preprocessor_voxel_leaf_size: 0.30
+    preprocessor_voxel_min_points: 1
+
+    preprocessor_sor_mode: "off"
+    preprocessor_sor_adaptive_max_points: 6000
+    preprocessor_sor_mean_k: 50
+    preprocessor_sor_stddev_mul_thresh: 1.0
+
+    preprocessor_enable_ror: true
+    preprocessor_ror_radius: 0.30
+    preprocessor_ror_min_neighbors: 1
+
+    # ============================================================
+    # Mode defaults
+    # ============================================================
+    # Both launch files override these values to enforce their own mode.
+    enable_lidar_imu_rotation_pair_export: false
+    calibration_use_imu_initial_guess: true
+    lidar_imu_rotation_pairs_path: "lidar_imu_rotation_pairs.csv"
+
+    # ============================================================
+    # LiDAR -> Fixposition IMU extrinsic fallback
+    # ============================================================
+    # Never reuse the Livox calibration here.  Normal Hesai launch will only
+    # load results stored below output/calibration/hesai/.
+    imu_extrinsic_q_il_x: 0.0
+    imu_extrinsic_q_il_y: 0.0
+    imu_extrinsic_q_il_z: 0.0
+    imu_extrinsic_q_il_w: 1.0
+
+    imu_extrinsic_p_il_x: 0.0
+    imu_extrinsic_p_il_y: 0.0
+    imu_extrinsic_p_il_z: 0.0
+    # fr_slam_hesai.yaml
+    imu_acceleration_scale: 1.0
