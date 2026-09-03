@@ -333,6 +333,13 @@ private:
         imu_history_duration_ =
             0.5;
 
+    // Conversion applied to sensor_msgs/Imu::linear_acceleration.
+    // Livox dataset: g -> m/s^2, scale=9.80665.
+    // Fixposition: already m/s^2, scale=1.0.
+    double
+        imu_acceleration_scale_ =
+            9.80665;
+
     // ============================================================
     // IMU orientation associated with the LAST ACCEPTED LiDAR pose.
     //
@@ -3868,6 +3875,28 @@ public:
                 "imu_topic",
                 "/livox/imu");
 
+        imu_acceleration_scale_ =
+            this->declare_parameter<double>(
+                "imu_acceleration_scale",
+                9.80665);
+
+        if (!std::isfinite(
+                imu_acceleration_scale_) ||
+            imu_acceleration_scale_ <= 0.0)
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Invalid imu_acceleration_scale=%.9f. "
+                "The value must be finite and positive.",
+                imu_acceleration_scale_);
+
+            throw std::runtime_error(
+                "Invalid imu_acceleration_scale");
+        }
+
+        imu_adapter_.setAccelerationScale(
+            imu_acceleration_scale_);
+
         world_frame_ =
             this->declare_parameter<std::string>(
                 "world_frame",
@@ -4259,6 +4288,82 @@ public:
         // Current test uses Identity. Replace with calibrated
         // extrinsic later.
         // ========================================================
+        const double q_il_x =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_x",
+                0.0);
+
+        const double q_il_y =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_y",
+                0.0);
+
+        const double q_il_z =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_z",
+                0.0);
+
+        const double q_il_w =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_w",
+                1.0);
+
+        const double p_il_x =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_x",
+                0.0);
+
+        const double p_il_y =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_y",
+                0.0);
+
+        const double p_il_z =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_z",
+                0.0);
+
+        Q_IL_ =
+            Eigen::Quaterniond(
+                q_il_w,
+                q_il_x,
+                q_il_y,
+                q_il_z);
+
+        if (!Q_IL_.coeffs().allFinite() ||
+            Q_IL_.norm() <= 1.0e-12)
+        {
+            throw std::runtime_error(
+                "Invalid LiDAR-IMU rotation extrinsic.");
+        }
+
+        Q_IL_.normalize();
+
+        P_IL_ =
+            Eigen::Vector3d(
+                p_il_x,
+                p_il_y,
+                p_il_z);
+
+        if (!P_IL_.allFinite())
+        {
+            throw std::runtime_error(
+                "Invalid LiDAR-IMU translation extrinsic.");
+        }
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LiDAR->IMU extrinsic loaded | "
+            "q_IL=[%.8f %.8f %.8f %.8f] | "
+            "p_IL=[%.4f %.4f %.4f]",
+            Q_IL_.x(),
+            Q_IL_.y(),
+            Q_IL_.z(),
+            Q_IL_.w(),
+            P_IL_.x(),
+            P_IL_.y(),
+            P_IL_.z());
+
         preprocessor_.SetDeskewExtrinsic(
             Q_IL_,
             P_IL_);
@@ -4592,6 +4697,11 @@ public:
             "IMU init samples: %zu | history=%.3f s",
             initialization_sample_count_,
             imu_history_duration_);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "IMU acceleration scale: %.8f | output_unit=m/s^2",
+            imu_adapter_.accelerationScale());
 
         RCLCPP_INFO(
             this->get_logger(),

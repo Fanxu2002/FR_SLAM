@@ -175,6 +175,29 @@ target_compile_definitions(fr_slam_node PRIVATE PCL_NO_PRECOMPILE)
 
 
 # ============================================
+#   OFFLINE LIDAR-IMU ROTATION CALIBRATION
+# ============================================
+#
+# This is a normal C++ executable installed in the ROS 2 package so it can be
+# launched with `ros2 run`.  It does not create an rclcpp::Node and does not
+# subscribe to topics.  It reads the synchronized CSV exported by fr_slam_node.
+# ============================================
+
+add_executable(lidar_imu_rotation_calibration)
+
+target_sources(
+    lidar_imu_rotation_calibration
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/lidar_imu_rotation_calibration.cpp
+)
+
+target_link_libraries(
+    lidar_imu_rotation_calibration
+    Eigen3::Eigen
+)
+
+
+# ============================================
 #        GROUND V4.0 VALIDATION NODE
 # ============================================
 #
@@ -199,7 +222,7 @@ add_executable(ground_segmentation_debug)
 target_sources(
     ground_segmentation_debug
     PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/app/ground_segmentation_debug.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/ground_segmentation_debug.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/fr_mid360s_adapter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_segmenter.cpp
 )
@@ -246,6 +269,7 @@ install(
 install(
   TARGETS
           fr_slam_node
+          lidar_imu_rotation_calibration
           ground_segmentation_debug
   RUNTIME DESTINATION lib/${PROJECT_NAME})
 
