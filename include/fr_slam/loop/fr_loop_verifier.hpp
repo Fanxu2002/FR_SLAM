@@ -11,7 +11,7 @@
 #include <pcl/point_cloud.h>
 
 // ============================================================================
-// LoopVerifier V2 - cached preprocessing / cached historical target KD-tree
+// LoopVerifier V4 - Point-to-Plane V2 + degeneracy-aware solve + loop-ground
 //
 // Purpose:
 //
@@ -23,9 +23,18 @@
 //
 //         "Can the two actual point clouds be geometrically aligned?"
 //
-// V2 PERFORMANCE CHANGE:
+// V4 SOLVER CHANGE:
 //
-//     The geometry / acceptance logic is intentionally unchanged.
+//     The pose solver is Loop Point-to-Plane V2:
+//       1) point-to-plane + Huber,
+//       2) median-range rotation/translation scale normalization,
+//       3) Hessian eigen-analysis and weak-direction suppression,
+//       4) optional weak-direction seed prior for trusted reverse hypotheses,
+//       5) an extra ground-like point-to-plane block projected to
+//          [roll, pitch, z] only.
+//
+//     Prescore, final overlap/RMSE measurement, correction gates, graph gates
+//     and PGO remain unchanged.
 //
 //     The expensive reusable work is cached:
 //
@@ -38,8 +47,8 @@
 //
 //     The same prepared target KD-tree is reused by:
 //
-//         - PCL ICP nearest-neighbour search
-//         - explicit overlap / RMSE evaluation
+//         - Point-to-Plane nearest-neighbour / local-plane search
+//         - explicit final overlap / RMSE evaluation
 //         - repeated initial guesses for the same candidate
 //
 //     This is especially useful in FR_SLAM because the caller currently tests
@@ -62,13 +71,49 @@ struct LoopVerifierConfig
     // coarser verifier cloud keeps candidate checking inexpensive.
     double voxel_leaf_size = 0.50;
 
-    // Coarse point-to-point ICP.
+    // Loop Point-to-Plane V2 solver.
+    // max_correspondence_distance is the per-iteration neighbour-search radius;
+    // it is NOT a global pose-displacement limit.
     std::size_t max_iterations = 50;
     double max_correspondence_distance = 5.0;
     double transformation_epsilon = 1.0e-6;
     double euclidean_fitness_epsilon = 1.0e-5;
 
-    // Final geometric quality measurement after ICP.
+    // General point-to-plane robust geometry.
+    double point_to_plane_max_residual = 1.00;
+    double point_to_plane_huber_delta = 0.10;
+
+    // Degeneracy analysis is performed in the normalized coordinates
+    //
+    //   [L*rx, L*ry, L*rz, tx, ty, tz]
+    //
+    // where L is the median correspondence range.
+    bool enable_degeneracy_suppression = true;
+    double degeneracy_hard_relative_threshold = 0.01;
+    double degeneracy_weak_relative_threshold = 0.03;
+
+    // Trusted reverse hypotheses may use the supplied initial pose as a SOFT
+    // prior, but ONLY inside geometry-weak eigen-directions.  The caller
+    // explicitly opts in per Verify() call.
+    bool enable_weak_direction_seed_prior = true;
+    double weak_direction_prior_target_relative = 0.05;
+    double weak_direction_prior_gain = 1.0;
+
+    // Loop-local ground-like information.  The current Keyframe does not store
+    // the frontend GroundSegmentationResult, so V2 infers ground-like
+    // correspondences from locally fitted target planes.  Only planes whose
+    // normals are close to target-frame +/-Z and whose source points lie below
+    // the LiDAR origin are eligible.  Their Jacobian is projected to
+    // [roll, pitch, z] exactly like frontend Ground V1.3.
+    bool enable_ground_constraint = true;
+    double ground_weight = 4.0;
+    double ground_normal_max_tilt_deg = 25.0;
+    double ground_min_below_sensor_m = 0.30;
+    double ground_max_residual = 0.25;
+    double ground_huber_delta = 0.10;
+    std::size_t min_ground_correspondences = 30;
+
+    // Final geometric quality measurement after Point-to-Plane solve.
     double verification_inlier_distance = 1.0;
 
     // Acceptance thresholds.
@@ -76,12 +121,32 @@ struct LoopVerifierConfig
     std::size_t min_inliers = 300;
     double min_overlap_ratio = 0.15;
 
-    // Final sanity gate on how far ICP may move from the selected hypothesis.
+    // Final sanity gate on how far the solver may move from the selected hypothesis.
     double max_correction_translation = 15.0;
     double max_correction_rotation_deg = 45.0;
 
-    // Reject extremely small clouds before doing ICP.
+    // Reject extremely small clouds before doing normal geometry verification.
     std::size_t min_cloud_points = 300;
+
+    // V2.1 trusted reverse-sequence gate.
+    //
+    // A confirmed reverse sequence is already protected by:
+    //   - 3+ RAW-SC observations,
+    //   - 2+ real reverse historical progress events,
+    //   - opposite frontend heading,
+    //   - compact K-1/K/K+1 target,
+    //   - weak-direction seed prior,
+    //   - graph consistency.
+    //
+    // In that narrow case, do not require the current 0.5 m voxelized source
+    // to contain 300 points or 300 final inliers. Reverse traversal has much
+    // lower single-frame field-of-view overlap by construction.
+    std::size_t trusted_reverse_min_cloud_points = 150;
+    std::size_t trusted_reverse_min_inliers = 100;
+    double trusted_reverse_min_overlap_ratio = 0.35;
+    double trusted_reverse_max_rmse = 0.50;
+    double trusted_reverse_max_correction_translation = 1.50;
+    double trusted_reverse_max_correction_rotation_deg = 15.0;
 
     // Cheap initial-guess pre-score.  Before running full ICP, the current
     // downsampled source is transformed by the hypothesis and evaluated against
@@ -166,7 +231,7 @@ public:
     //
     // This reuses the same cached downsampled source / target KD-tree as Verify()
     // but does NOT run ICP.  It is intended to rank CANDIDATE_POSE / +SC / -SC
-    // before spending time on full 50-iteration ICP.
+    // before spending time on the full Point-to-Plane solve.
     // ------------------------------------------------------------------------
     bool ScoreInitialGuess(
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
@@ -174,17 +239,49 @@ public:
         const Eigen::Isometry3d &initial_guess,
         LoopVerifierInitialGuessScore &score) const;
 
+    // V2.1: relaxed source-size prescore is available ONLY to a confirmed
+    // CANDIDATE_REVERSE_SEQUENCE. Target size and all other hypotheses keep
+    // the normal thresholds.
+    bool ScoreInitialGuess(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+        const Eigen::Isometry3d &initial_guess,
+        bool enable_trusted_reverse_sequence_gate,
+        LoopVerifierInitialGuessScore &score) const;
+
     // ------------------------------------------------------------------------
-    // Verify one candidate.
-    //
-    // The public API is intentionally unchanged from V1 so the existing loop
-    // decision / temporal / PoseGraph code does not need to change.
+    // Verify one candidate using the geometry-only policy.
+    // Existing callers remain source-compatible.
     // ------------------------------------------------------------------------
     bool Verify(
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
         const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
         const Eigen::Isometry3d &graph_initial_guess,
         double scan_context_yaw_shift_deg,
+        LoopVerificationResult &result) const;
+
+    // ------------------------------------------------------------------------
+    // Verify one candidate and optionally enable the V2 weak-direction
+    // initial-pose prior.  Use true only for a trusted reverse-traversal seed
+    // such as CANDIDATE_REVERSE_FRONTEND / CANDIDATE_REVERSE_SEQUENCE.
+    // ------------------------------------------------------------------------
+    bool Verify(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+        const Eigen::Isometry3d &graph_initial_guess,
+        double scan_context_yaw_shift_deg,
+        bool enable_trusted_seed_prior,
+        LoopVerificationResult &result) const;
+
+    // V2.1: the second flag enables the relaxed single-frame support gate ONLY
+    // for a temporally confirmed CANDIDATE_REVERSE_SEQUENCE.
+    bool Verify(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+        const Eigen::Isometry3d &graph_initial_guess,
+        double scan_context_yaw_shift_deg,
+        bool enable_trusted_seed_prior,
+        bool enable_trusted_reverse_sequence_gate,
         LoopVerificationResult &result) const;
 
     // Clear prepared source/target data. Call this together with SLAM Reset().

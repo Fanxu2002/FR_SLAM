@@ -22,7 +22,7 @@ LoopDetector::LoopDetector(
     if (!std::isfinite(config_.max_scan_context_distance) ||
         config_.max_scan_context_distance <= 0.0)
     {
-        config_.max_scan_context_distance = 0.30;
+        config_.max_scan_context_distance = 0.40;
     }
 
     if (!std::isfinite(config_.max_candidate_distance) ||
@@ -102,11 +102,26 @@ std::size_t LoopDetector::DescriptorCount() const
     return database_.size();
 }
 
+const LoopDetectorConfig &
+LoopDetector::GetConfig() const
+{
+    return config_;
+}
+
 std::vector<LoopCandidate>
 LoopDetector::Detect(
-    std::size_t current_keyframe_id) const
+    std::size_t current_keyframe_id,
+    LoopDetectionDiagnostics *diagnostics) const
 {
     std::vector<LoopCandidate> candidates;
+
+    if (diagnostics != nullptr)
+    {
+        *diagnostics = LoopDetectionDiagnostics();
+        diagnostics->database_entries = database_.size();
+        diagnostics->max_scan_context_distance =
+            config_.max_scan_context_distance;
+    }
 
     const DescriptorEntry *current =
         FindDescriptor(current_keyframe_id);
@@ -149,16 +164,25 @@ LoopDetector::Detect(
             continue;
         }
 
+        if (diagnostics != nullptr)
+        {
+            ++diagnostics->separation_eligible;
+        }
+
         const ScanContextMatch match =
             scan_context_.Compare(
                 history.descriptor,
                 current->descriptor);
 
         if (!match.valid ||
-            !std::isfinite(match.distance) ||
-            match.distance > config_.max_scan_context_distance)
+            !std::isfinite(match.distance))
         {
             continue;
+        }
+
+        if (diagnostics != nullptr)
+        {
+            ++diagnostics->valid_scan_context_matches;
         }
 
         double pose_distance =
@@ -172,6 +196,40 @@ LoopDetector::Detect(
                     .norm();
         }
 
+        LoopCandidate candidate;
+        candidate.current_id = current_keyframe_id;
+        candidate.candidate_id = history.keyframe_id;
+        candidate.distance = pose_distance;
+        candidate.time_separation_sec = time_separation;
+        candidate.scan_context_distance = match.distance;
+        candidate.scan_context_similarity = match.similarity;
+        candidate.scan_context_raw_cosine_similarity =
+            match.raw_cosine_similarity;
+        candidate.scan_context_sector_coverage_ratio =
+            match.sector_coverage_ratio;
+        candidate.scan_context_cell_coverage_ratio =
+            match.cell_coverage_ratio;
+        candidate.scan_context_compared_sectors =
+            match.compared_sectors;
+        candidate.sector_shift = match.sector_shift;
+        candidate.yaw_shift_deg = match.yaw_shift_deg;
+
+        if (diagnostics != nullptr &&
+            (!diagnostics->has_best_scan_context_match ||
+             candidate.scan_context_distance <
+                 diagnostics->best_scan_context_match
+                     .scan_context_distance))
+        {
+            diagnostics->has_best_scan_context_match = true;
+            diagnostics->best_scan_context_match = candidate;
+        }
+
+        if (match.distance >
+            config_.max_scan_context_distance)
+        {
+            continue;
+        }
+
         if (config_.use_pose_distance_gate)
         {
             if (!std::isfinite(pose_distance) ||
@@ -180,16 +238,6 @@ LoopDetector::Detect(
                 continue;
             }
         }
-
-        LoopCandidate candidate;
-        candidate.current_id = current_keyframe_id;
-        candidate.candidate_id = history.keyframe_id;
-        candidate.distance = pose_distance;
-        candidate.time_separation_sec = time_separation;
-        candidate.scan_context_distance = match.distance;
-        candidate.scan_context_similarity = match.similarity;
-        candidate.sector_shift = match.sector_shift;
-        candidate.yaw_shift_deg = match.yaw_shift_deg;
 
         candidates.push_back(candidate);
     }
@@ -213,6 +261,12 @@ LoopDetector::Detect(
     if (candidates.size() > config_.max_candidates)
     {
         candidates.resize(config_.max_candidates);
+    }
+
+    if (diagnostics != nullptr)
+    {
+        diagnostics->accepted_candidates =
+            candidates.size();
     }
 
     return candidates;

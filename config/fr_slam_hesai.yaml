@@ -25,11 +25,34 @@ fr_slam:
     imu_initialization_sample_count: 200
     imu_history_duration: 0.5
 
+    # A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
+    # Only waits/lag at or above this threshold are emitted as WARN.
+    imu_wait_warning_threshold_ms: 20.0
+
     # ============================================================
     # LocalMap
     # ============================================================
     local_map_max_frames: 10
     local_map_voxel_leaf_size: 0.30
+
+    # ============================================================
+    # Scan Context V3 / loop candidate retrieval
+    # ============================================================
+    # These values are now read by fr_slam_node.cpp and passed explicitly
+    # into LoopDetectorConfig.  They are no longer dead YAML entries.
+    scan_context_num_rings: 20
+    scan_context_num_sectors: 60
+    scan_context_min_radius: 1.0
+    scan_context_max_radius: 30.0
+    scan_context_min_valid_points: 100
+    scan_context_min_occupied_sectors: 6
+    scan_context_min_occupied_cells: 12
+    scan_context_min_sector_coverage_ratio: 0.20
+    scan_context_coverage_penalty_weight: 0.50
+    scan_context_occupied_height_epsilon: 0.001
+
+    # distance = 1 - coverage-adjusted similarity
+    loop_max_scan_context_distance: 0.30
 
     # ============================================================
     # LiDAR preprocessing

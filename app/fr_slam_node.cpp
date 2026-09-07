@@ -6,6 +6,8 @@
 #include "fr_slam/common/fr_point_types.hpp"
 #include "fr_slam/frontend/fr_lidar_frontend.hpp"
 #include "fr_slam/mapping/fr_keyframe.hpp"
+#include "fr_slam/loop/fr_loop_retrieval_debug.hpp"
+#include "fr_slam/loop/fr_loop_decision_debug.hpp"
 
 #include "fr_slam/sensor/fr_lidar_adapter.hpp"
 #include "fr_slam/sensor/fr_mid360s_adapter.hpp"
@@ -192,6 +194,42 @@ private:
     rclcpp::Publisher<
         sensor_msgs::msg::PointCloud2>::SharedPtr
         refinement_current_after_pub_;
+
+    // Hierarchical 3m Region-SC retrieval diagnostics.
+    //
+    // These are the EXACT point clouds used by the V21 Region Scan Context
+    // retrieval stage, transformed back into the raw frontend odom frame:
+    //
+    //   /loop_retrieval_current_window
+    //       current KF + previous KFs along approximately 3m of trajectory.
+    //
+    //   /loop_retrieval_historical_window
+    //       best individual historical 3m Region window from the top-ranked
+    //       candidate Submap.  An empty cloud clears a stale old candidate.
+    //
+    // They diagnose CANDIDATE RECALL.  The existing /loop_icp_* topics below
+    // remain useful because they diagnose the later GEOMETRY verification.
+    rclcpp::Publisher<
+        sensor_msgs::msg::PointCloud2>::SharedPtr
+        loop_retrieval_current_window_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::PointCloud2>::SharedPtr
+        loop_retrieval_historical_window_pub_;
+
+    // Latest loop ICP diagnostic. All three clouds are already in
+    // backend/world coordinates and are visualization-only.
+    rclcpp::Publisher<
+        sensor_msgs::msg::PointCloud2>::SharedPtr
+        loop_icp_historical_target_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::PointCloud2>::SharedPtr
+        loop_icp_initial_aligned_pub_;
+
+    rclcpp::Publisher<
+        sensor_msgs::msg::PointCloud2>::SharedPtr
+        loop_icp_final_aligned_pub_;
 
     rclcpp::Publisher<
         visualization_msgs::msg::MarkerArray>::SharedPtr
@@ -386,6 +424,34 @@ private:
             Eigen::Vector3d::Zero();
 
     // ============================================================
+    // Offline LiDAR-IMU rotation calibration pair export.
+    //
+    // Each row stores LiDAR and IMU relative rotations over the
+    // SAME interval between two ACCEPTED LiDAR poses.
+    // ============================================================
+    bool
+        enable_lidar_imu_rotation_pair_export_ =
+            false;
+
+    bool
+        calibration_use_imu_initial_guess_ =
+            false;
+
+    std::string
+        lidar_imu_rotation_pairs_path_;
+
+    std::ofstream
+        lidar_imu_rotation_pairs_stream_;
+
+    std::size_t
+        exported_rotation_pair_count_ =
+            0;
+
+    double
+        last_accepted_lidar_timestamp_ =
+            std::numeric_limits<double>::quiet_NaN();
+
+    // ============================================================
     // LiDAR queue + worker thread
     //
     // LiDAR callback:
@@ -470,6 +536,13 @@ private:
     double
         max_imu_lag_ms_ = 0.0;
 
+    // Normal asynchronous arrival can make a LiDAR scan wait a few
+    // milliseconds for the final IMU sample.  That is expected and should
+    // not be reported as a warning.  Only waits/lag beyond this threshold
+    // are promoted to FR_SYNC IMU_WAIT warnings.
+    double
+        imu_wait_warning_threshold_ms_ = 20.0;
+
     // IMU messages are small and high-rate.  Keep a deeper DDS history so a
     // short executor / rosbag scheduling jitter does not overwrite the few
     // samples needed to cover the oldest LiDAR scan.
@@ -542,6 +615,18 @@ private:
     // LiDAR frame after a loop closure.
     std::size_t
         last_published_global_map_revision_ =
+            0;
+
+    // Independent from GlobalMapRevision because Region retrieval is updated
+    // by the asynchronous loop backend and does not modify the global map.
+    std::size_t
+        last_published_loop_retrieval_debug_revision_ =
+            0;
+
+    // Independent from GlobalMapRevision because rejected loop hypotheses do
+    // not modify the map but must still be publishable for diagnosis.
+    std::size_t
+        last_published_loop_icp_debug_revision_ =
             0;
 
     // Used only for concise diagnostics when a new backend correction arrives.
@@ -1185,6 +1270,146 @@ private:
             required_end_time);
 
         return ImuBuildStatus::SUCCESS;
+    }
+
+    // ============================================================
+    // Export one synchronized LiDAR/IMU relative-rotation pair.
+    //
+    // At call time:
+    //   T_WL_ / last_accepted_Q_WI_ / last_accepted_lidar_timestamp_
+    // still represent the PREVIOUS accepted LiDAR frame, while
+    // T_WL_current / current_Q_WI represent the CURRENT accepted frame.
+    // ============================================================
+    bool AppendLidarImuRotationPair(
+        const double current_lidar_timestamp,
+        const Eigen::Isometry3d &T_WL_current,
+        const Eigen::Quaterniond &current_Q_WI)
+    {
+        if (!enable_lidar_imu_rotation_pair_export_)
+        {
+            return false;
+        }
+
+        if (!lidar_imu_rotation_pairs_stream_.is_open() ||
+            !has_last_accepted_imu_orientation_ ||
+            !std::isfinite(last_accepted_lidar_timestamp_) ||
+            !std::isfinite(current_lidar_timestamp))
+        {
+            return false;
+        }
+
+        if (!T_WL_.matrix().allFinite() ||
+            !T_WL_current.matrix().allFinite() ||
+            !last_accepted_Q_WI_.coeffs().allFinite() ||
+            last_accepted_Q_WI_.norm() <= 1.0e-12 ||
+            !current_Q_WI.coeffs().allFinite() ||
+            current_Q_WI.norm() <= 1.0e-12)
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "FR_CALIB skip pair: invalid LiDAR/IMU pose state.");
+
+            return false;
+        }
+
+        // Current LiDAR -> previous accepted LiDAR.
+        const Eigen::Matrix3d delta_R_lidar =
+            T_WL_.rotation().transpose() *
+            T_WL_current.rotation();
+
+        Eigen::Quaterniond previous_Q_WI =
+            last_accepted_Q_WI_;
+
+        Eigen::Quaterniond current_Q_WI_normalized =
+            current_Q_WI;
+
+        previous_Q_WI.normalize();
+        current_Q_WI_normalized.normalize();
+
+        // Current IMU -> previous accepted IMU over the SAME interval.
+        Eigen::Quaterniond delta_Q_imu =
+            previous_Q_WI.conjugate() *
+            current_Q_WI_normalized;
+
+        Eigen::Quaterniond delta_Q_lidar(
+            delta_R_lidar);
+
+        delta_Q_lidar.normalize();
+        delta_Q_imu.normalize();
+
+        // q and -q represent the same rotation. Keep one canonical sign.
+        if (delta_Q_lidar.w() < 0.0)
+        {
+            delta_Q_lidar.coeffs() *= -1.0;
+        }
+
+        if (delta_Q_imu.w() < 0.0)
+        {
+            delta_Q_imu.coeffs() *= -1.0;
+        }
+
+        lidar_imu_rotation_pairs_stream_
+            << std::setprecision(17)
+            << last_accepted_lidar_timestamp_ << ","
+            << current_lidar_timestamp << ","
+            << delta_Q_lidar.x() << ","
+            << delta_Q_lidar.y() << ","
+            << delta_Q_lidar.z() << ","
+            << delta_Q_lidar.w() << ","
+            << delta_Q_imu.x() << ","
+            << delta_Q_imu.y() << ","
+            << delta_Q_imu.z() << ","
+            << delta_Q_imu.w() << "\n";
+
+        // Flush every accepted pair so Ctrl+C still leaves a usable CSV.
+        lidar_imu_rotation_pairs_stream_.flush();
+
+        if (!lidar_imu_rotation_pairs_stream_.good())
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "FR_CALIB failed while writing rotation pairs: %s",
+                lidar_imu_rotation_pairs_path_.c_str());
+
+            enable_lidar_imu_rotation_pair_export_ =
+                false;
+
+            return false;
+        }
+
+        ++exported_rotation_pair_count_;
+
+        if (exported_rotation_pair_count_ == 1 ||
+            exported_rotation_pair_count_ % 50 == 0)
+        {
+            const double lidar_angle_deg =
+                std::abs(
+                    Eigen::AngleAxisd(
+                        delta_Q_lidar)
+                        .angle()) *
+                180.0 /
+                3.14159265358979323846;
+
+            const double imu_angle_deg =
+                std::abs(
+                    Eigen::AngleAxisd(
+                        delta_Q_imu)
+                        .angle()) *
+                180.0 /
+                3.14159265358979323846;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FR_CALIB pair=%zu interval=[%.9f, %.9f] "
+                "angle_lidar=%.3f deg angle_imu=%.3f deg",
+                exported_rotation_pair_count_,
+                last_accepted_lidar_timestamp_,
+                current_lidar_timestamp,
+                lidar_angle_deg,
+                imu_angle_deg);
+        }
+
+        return true;
     }
 
     // ============================================================
@@ -2120,7 +2345,80 @@ private:
 
         marker_array.markers.push_back(
             node_marker);
+        // ============================================================
+        // 1.5 Keyframe text labels
+        //
+        // Show sparse Keyframe IDs so RViz screenshots can be inspected
+        // against loop logs.
+        // ============================================================
+        const std::size_t keyframe_label_stride = 3;
+        const double keyframe_label_z_offset = 0.25;
 
+        for (const PoseGraphNode &node :
+             graph.GetNodes())
+        {
+            if (keyframe_label_stride > 1 &&
+                (node.id % keyframe_label_stride) != 0)
+            {
+                continue;
+            }
+
+            visualization_msgs::msg::Marker
+                text_marker;
+
+            text_marker.header.frame_id =
+                world_frame_;
+
+            text_marker.header.stamp =
+                stamp;
+
+            text_marker.ns =
+                "pose_graph_keyframe_labels";
+
+            text_marker.id =
+                static_cast<int>(node.id);
+
+            text_marker.type =
+                visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+
+            text_marker.action =
+                visualization_msgs::msg::Marker::ADD;
+
+            text_marker.pose.position.x =
+                node.T_WK.translation().x();
+
+            text_marker.pose.position.y =
+                node.T_WK.translation().y();
+
+            text_marker.pose.position.z =
+                node.T_WK.translation().z() +
+                keyframe_label_z_offset;
+
+            text_marker.pose.orientation.w =
+                1.0;
+
+            // TEXT_VIEW_FACING uses scale.z as text height.
+            text_marker.scale.z =
+                0.22;
+
+            text_marker.color.r =
+                1.0f;
+
+            text_marker.color.g =
+                1.0f;
+
+            text_marker.color.b =
+                1.0f;
+
+            text_marker.color.a =
+                1.0f;
+
+            text_marker.text =
+                std::to_string(node.id);
+
+            marker_array.markers.push_back(
+                text_marker);
+        }
         // ============================================================
         // 2. Odometry edges
         // ============================================================
@@ -2206,6 +2504,78 @@ private:
             1.0f;
 
         // ============================================================
+        // 3.5 Verified-but-not-inserted loop observations (V22.8)
+        //
+        // IMPORTANT semantic distinction:
+        //   RED    = an actual PoseGraph loop factor; strict cycle gate.
+        //   YELLOW = verified loop-track evidence.  It is either omitted only
+        //            by graph spacing, or it passed the V22.8 relaxed TRACK
+        //            cycle gate but is deliberately forbidden from PGO.
+        //   ORANGE = a locally plausible observation that is still pending
+        //            new-cluster support or failed even the relaxed cycle gate.
+        //
+        // These yellow/orange lines are visualization-only.  They never enter
+        // g2o and therefore do not change optimization weights.
+        // ============================================================
+        visualization_msgs::msg::Marker
+            track_only_edge_marker;
+
+        track_only_edge_marker.header.frame_id =
+            world_frame_;
+        track_only_edge_marker.header.stamp =
+            stamp;
+        track_only_edge_marker.ns =
+            "loop_cycle_verified_spacing_edges";
+        track_only_edge_marker.id =
+            3;
+        track_only_edge_marker.type =
+            visualization_msgs::msg::Marker::LINE_LIST;
+        track_only_edge_marker.action =
+            visualization_msgs::msg::Marker::ADD;
+        track_only_edge_marker.pose.orientation.w =
+            1.0;
+        // V22.8: keep verified track evidence visible without allowing dense
+        // spacing/relaxed-cycle observations to dominate the graph view.
+        track_only_edge_marker.scale.x =
+            0.045;
+        track_only_edge_marker.color.r =
+            1.0f;
+        track_only_edge_marker.color.g =
+            1.0f;
+        track_only_edge_marker.color.b =
+            0.0f;
+        track_only_edge_marker.color.a =
+            0.72f;
+
+        visualization_msgs::msg::Marker
+            pending_loop_edge_marker;
+
+        pending_loop_edge_marker.header.frame_id =
+            world_frame_;
+        pending_loop_edge_marker.header.stamp =
+            stamp;
+        pending_loop_edge_marker.ns =
+            "loop_pending_or_cycle_edges";
+        pending_loop_edge_marker.id =
+            4;
+        pending_loop_edge_marker.type =
+            visualization_msgs::msg::Marker::LINE_LIST;
+        pending_loop_edge_marker.action =
+            visualization_msgs::msg::Marker::ADD;
+        pending_loop_edge_marker.pose.orientation.w =
+            1.0;
+        pending_loop_edge_marker.scale.x =
+            0.050;
+        pending_loop_edge_marker.color.r =
+            1.0f;
+        pending_loop_edge_marker.color.g =
+            0.50f;
+        pending_loop_edge_marker.color.b =
+            0.0f;
+        pending_loop_edge_marker.color.a =
+            0.75f;
+
+        // ============================================================
         // 4. Read edges
         // ============================================================
         for (const PoseGraphEdge &edge :
@@ -2274,6 +2644,71 @@ private:
 
         marker_array.markers.push_back(
             loop_edge_marker);
+
+        // ============================================================
+        // 4.5 Read V22.8 loop-decision debug evidence.
+        // ============================================================
+        const fr_slam_debug::LoopDecisionDebugSnapshot
+            loop_decision_debug =
+                fr_slam_debug::GetLoopDecisionDebugSnapshot();
+
+        for (const fr_slam_debug::LoopDecisionDebugEdge &debug_edge :
+             loop_decision_debug.edges)
+        {
+            const PoseGraphNode *historical_node =
+                graph.GetNode(
+                    debug_edge.historical_keyframe_id);
+
+            const PoseGraphNode *current_node =
+                graph.GetNode(
+                    debug_edge.current_keyframe_id);
+
+            if (historical_node == nullptr ||
+                current_node == nullptr)
+            {
+                continue;
+            }
+
+            geometry_msgs::msg::Point historical_point;
+            historical_point.x =
+                historical_node->T_WK.translation().x();
+            historical_point.y =
+                historical_node->T_WK.translation().y();
+            historical_point.z =
+                historical_node->T_WK.translation().z();
+
+            geometry_msgs::msg::Point current_point;
+            current_point.x =
+                current_node->T_WK.translation().x();
+            current_point.y =
+                current_node->T_WK.translation().y();
+            current_point.z =
+                current_node->T_WK.translation().z();
+
+            if (debug_edge.kind ==
+                    fr_slam_debug::LoopDecisionDebugKind::TRACK_ONLY_SPACING ||
+                debug_edge.kind ==
+                    fr_slam_debug::LoopDecisionDebugKind::TRACK_ONLY_CYCLE_RELAXED)
+            {
+                track_only_edge_marker.points.push_back(
+                    historical_point);
+                track_only_edge_marker.points.push_back(
+                    current_point);
+            }
+            else
+            {
+                pending_loop_edge_marker.points.push_back(
+                    historical_point);
+                pending_loop_edge_marker.points.push_back(
+                    current_point);
+            }
+        }
+
+        marker_array.markers.push_back(
+            track_only_edge_marker);
+
+        marker_array.markers.push_back(
+            pending_loop_edge_marker);
 
         // ============================================================
         // 5. Optimized Keyframe orientation arrows
@@ -2592,6 +3027,227 @@ private:
     }
 
     // ============================================================
+    // Publish the latest V21 hierarchical 3m retrieval diagnostic.
+    //
+    // Topics:
+    //   /loop_retrieval_current_window
+    //       Exact Current Retrieval Window used to build Region SC.
+    //
+    //   /loop_retrieval_historical_window
+    //       Exact best historical Retrieval Window from the top-ranked
+    //       candidate Submap.
+    //
+    // Frame:
+    //       odom
+    //
+    // This is intentionally BEFORE ICP.  It lets RViz answer the recall
+    // question directly: did the 3m Region-SC stage actually retrieve the
+    // correct historical area?
+    // ============================================================
+    void PublishLoopRetrievalDebug(
+        const builtin_interfaces::msg::Time &stamp)
+    {
+        if (!loop_retrieval_current_window_pub_ ||
+            !loop_retrieval_historical_window_pub_)
+        {
+            return;
+        }
+
+        const fr_slam_debug::LoopRetrievalDebugSnapshot snapshot =
+            fr_slam_debug::GetLoopRetrievalDebugSnapshot();
+
+        if (snapshot.revision == 0 ||
+            snapshot.revision ==
+                last_published_loop_retrieval_debug_revision_)
+        {
+            return;
+        }
+
+        const auto publish_odom_cloud =
+            [this, &stamp](
+                const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud,
+                const rclcpp::Publisher<
+                    sensor_msgs::msg::PointCloud2>::SharedPtr &publisher)
+        {
+            sensor_msgs::msg::PointCloud2 msg;
+
+            if (cloud &&
+                !cloud->empty())
+            {
+                pcl::toROSMsg(
+                    *cloud,
+                    msg);
+            }
+            else
+            {
+                // Publish an empty typed cloud so RViz clears a stale
+                // historical candidate when the current retrieval produced no
+                // valid historical Region.
+                pcl::PointCloud<LIDAR_POINT> empty_cloud;
+
+                pcl::toROSMsg(
+                    empty_cloud,
+                    msg);
+            }
+
+            msg.header.stamp =
+                stamp;
+
+            msg.header.frame_id =
+                odom_frame_;
+
+            publisher->publish(
+                msg);
+        };
+
+        publish_odom_cloud(
+            snapshot.current_window_odom,
+            loop_retrieval_current_window_pub_);
+
+        publish_odom_cloud(
+            snapshot.historical_window_odom,
+            loop_retrieval_historical_window_pub_);
+
+        last_published_loop_retrieval_debug_revision_ =
+            snapshot.revision;
+
+        const char *direction_name =
+            snapshot.historical_direction < 0
+                ? "BACKWARD_3M"
+                : (snapshot.historical_direction > 0
+                       ? "FORWARD_3M"
+                       : "NONE");
+
+        const bool historical_available =
+            snapshot.historical_window_odom &&
+            !snapshot.historical_window_odom->empty();
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Loop Retrieval RViz debug published | "
+            "revision=%zu current_kf=%zu current_kfs=%zu current_arc=%.3f m | "
+            "historical=%s hist_anchor=%zu hist_submap=%zu hist_kfs=%zu "
+            "hist_arc=%.3f m direction=%s submap_rank=%zu "
+            "region_sc_distance=%.6f region_sc_similarity=%.6f | "
+            "points=[current:%zu historical:%zu]",
+            snapshot.revision,
+            snapshot.current_keyframe_id,
+            snapshot.current_keyframe_ids.size(),
+            snapshot.current_arc_length_m,
+            historical_available ? "YES" : "NO",
+            snapshot.historical_anchor_keyframe_id,
+            snapshot.historical_submap_id,
+            snapshot.historical_keyframe_ids.size(),
+            snapshot.historical_arc_length_m,
+            direction_name,
+            snapshot.submap_rank,
+            snapshot.region_sc_distance,
+            snapshot.region_sc_similarity,
+            snapshot.current_window_odom
+                ? snapshot.current_window_odom->size()
+                : 0,
+            snapshot.historical_window_odom
+                ? snapshot.historical_window_odom->size()
+                : 0);
+    }
+
+    // ============================================================
+    // Publish the latest loop ICP diagnostic.
+    //
+    // Topics:
+    //   /loop_icp_historical_target : historical target in world
+    //   /loop_icp_initial_aligned   : current KF at ICP initial guess
+    //   /loop_icp_final_aligned     : current KF at ICP final result
+    //
+    // This uses its own revision counter because a rejected ICP hypothesis
+    // never increments GlobalMapRevision().
+    // ============================================================
+    void PublishLoopIcpDebug(
+        const builtin_interfaces::msg::Time &stamp)
+    {
+        if (!scan_to_local_map_ ||
+            !loop_icp_historical_target_pub_ ||
+            !loop_icp_initial_aligned_pub_ ||
+            !loop_icp_final_aligned_pub_)
+        {
+            return;
+        }
+
+        const RegistrationScan2LocalMap::LoopIcpDebugSnapshot snapshot =
+            scan_to_local_map_->GetLoopIcpDebugSnapshot();
+
+        if (snapshot.revision == 0 ||
+            snapshot.revision ==
+                last_published_loop_icp_debug_revision_)
+        {
+            return;
+        }
+
+        if (!snapshot.historical_target_world ||
+            !snapshot.initial_aligned_world ||
+            !snapshot.final_aligned_world ||
+            snapshot.historical_target_world->empty() ||
+            snapshot.initial_aligned_world->empty() ||
+            snapshot.final_aligned_world->empty())
+        {
+            return;
+        }
+
+        const auto publish_world_cloud =
+            [this, &stamp](
+                const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud,
+                const rclcpp::Publisher<
+                    sensor_msgs::msg::PointCloud2>::SharedPtr &publisher)
+        {
+            sensor_msgs::msg::PointCloud2 msg;
+
+            pcl::toROSMsg(
+                *cloud,
+                msg);
+
+            msg.header.stamp =
+                stamp;
+
+            msg.header.frame_id =
+                world_frame_;
+
+            publisher->publish(
+                msg);
+        };
+
+        publish_world_cloud(
+            snapshot.historical_target_world,
+            loop_icp_historical_target_pub_);
+
+        publish_world_cloud(
+            snapshot.initial_aligned_world,
+            loop_icp_initial_aligned_pub_);
+
+        publish_world_cloud(
+            snapshot.final_aligned_world,
+            loop_icp_final_aligned_pub_);
+
+        last_published_loop_icp_debug_revision_ =
+            snapshot.revision;
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Loop ICP RViz debug published | "
+            "revision=%zu current_kf=%zu historical_kf=%zu "
+            "initial_guess=%s icp_dt=%.6f m icp_dR=%.6f deg "
+            "points=[hist:%zu initial:%zu final:%zu]",
+            snapshot.revision,
+            snapshot.current_keyframe_id,
+            snapshot.historical_keyframe_id,
+            snapshot.initial_guess_name.c_str(),
+            snapshot.correction_translation,
+            snapshot.correction_rotation_deg,
+            snapshot.historical_target_world->size(),
+            snapshot.initial_aligned_world->size(),
+            snapshot.final_aligned_world->size());
+    }
+
+    // ============================================================
     // Publish raw / optimized global Keyframe maps.
     //
     // RegistrationScan2LocalMap increments GlobalMapRevision() whenever the
@@ -2888,9 +3544,21 @@ private:
         const Eigen::Quaterniond *imu_rotation_ptr =
             nullptr;
 
-        if (BuildImuRelativeLidarRotation(
-                state_at_scan_start.Q_WI,
-                imu_relative_rotation))
+        if (enable_lidar_imu_rotation_pair_export_ &&
+            !calibration_use_imu_initial_guess_)
+        {
+            // During extrinsic calibration Q_IL is precisely the unknown.
+            // Do not feed an uncalibrated IMU->LiDAR rotation back into ICP.
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "FR_CALIB IMU rotation initial guess DISABLED | "
+                "LiDAR frontend uses its own motion prediction.");
+        }
+        else if (BuildImuRelativeLidarRotation(
+                     state_at_scan_start.Q_WI,
+                     imu_relative_rotation))
         {
             imu_rotation_ptr =
                 &imu_relative_rotation;
@@ -3016,7 +3684,16 @@ private:
         }
 
         // ========================================================
-        // 5. Accept current global LiDAR pose.
+        // 5. Export calibration pair BEFORE overwriting the previous
+        // accepted LiDAR / IMU states.
+        // ========================================================
+        AppendLidarImuRotationPair(
+            raw_frame.scan_start_time,
+            T_WL_current,
+            state_at_scan_start.Q_WI);
+
+        // ========================================================
+        // 6. Accept current global LiDAR pose.
         // ========================================================
         T_WL_ =
             T_WL_current;
@@ -3045,6 +3722,9 @@ private:
             has_last_accepted_imu_orientation_ =
                 false;
         }
+
+        last_accepted_lidar_timestamp_ =
+            raw_frame.scan_start_time;
 
         const Eigen::Vector3d position =
             T_WL_.translation();
@@ -3097,6 +3777,12 @@ private:
             pending.stamp);
 
         PublishGlobalMapSnapshots(
+            pending.stamp);
+
+        PublishLoopRetrievalDebug(
+            pending.stamp);
+
+        PublishLoopIcpDebug(
             pending.stamp);
 
         const std::chrono::steady_clock::time_point publish_end =
@@ -3290,19 +3976,31 @@ private:
                 const std::size_t queue_size =
                     lidar_queue_.size();
 
-                RCLCPP_WARN_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    250,
-                    "FR_SYNC IMU_WAIT | "
-                    "scan_start=%.9f required_end=%.9f latest_imu=%.9f "
-                    "imu_lag_ms=%.3f wait_ms=%.3f queue=%zu",
-                    pending.frame.scan_start_time,
-                    required_end_time,
-                    latest_imu,
-                    imu_lag_ms,
-                    wait_ms,
-                    queue_size);
+                const bool prolonged_imu_wait =
+                    wait_ms >=
+                        imu_wait_warning_threshold_ms_ ||
+                    (std::isfinite(imu_lag_ms) &&
+                     imu_lag_ms >=
+                         imu_wait_warning_threshold_ms_);
+
+                if (prolonged_imu_wait)
+                {
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "FR_SYNC IMU_WAIT | "
+                        "scan_start=%.9f required_end=%.9f latest_imu=%.9f "
+                        "imu_lag_ms=%.3f wait_ms=%.3f queue=%zu "
+                        "warning_threshold_ms=%.3f",
+                        pending.frame.scan_start_time,
+                        required_end_time,
+                        latest_imu,
+                        imu_lag_ms,
+                        wait_ms,
+                        queue_size,
+                        imu_wait_warning_threshold_ms_);
+                }
 
                 // Event-driven wait.  The short timeout is only for
                 // diagnostics / shutdown; it is no longer a 5 ms busy poll.
@@ -3944,6 +4642,121 @@ public:
         LocalMapConfig
             local_map_config;
 
+        // ========================================================
+        // Scan Context V3 / LoopDetector configuration from YAML.
+        //
+        // Before this change RegistrationScan2LocalMap was constructed
+        // without an explicit LoopDetectorConfig, so all Scan Context
+        // settings silently stayed at C++ defaults even if a sensor YAML
+        // contained different values.
+        //
+        // Keep the safety architecture unchanged:
+        //   Scan Context -> geometry verification -> temporal consistency
+        //   -> first-loop 2-edge batch -> PoseGraph.
+        // ========================================================
+        LoopDetectorConfig
+            loop_detector_config;
+
+        const int configured_scan_context_num_rings =
+            this->declare_parameter<int>(
+                "scan_context_num_rings",
+                20);
+
+        const int configured_scan_context_num_sectors =
+            this->declare_parameter<int>(
+                "scan_context_num_sectors",
+                60);
+
+        loop_detector_config.scan_context.num_rings =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_scan_context_num_rings));
+
+        loop_detector_config.scan_context.num_sectors =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_scan_context_num_sectors));
+
+        loop_detector_config.scan_context.min_radius =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "scan_context_min_radius",
+                    1.0));
+
+        loop_detector_config.scan_context.max_radius =
+            std::max(
+                loop_detector_config.scan_context.min_radius + 0.1,
+                this->declare_parameter<double>(
+                    "scan_context_max_radius",
+                    30.0));
+
+        const int configured_scan_context_min_valid_points =
+            this->declare_parameter<int>(
+                "scan_context_min_valid_points",
+                100);
+
+        loop_detector_config.scan_context.min_valid_points =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_scan_context_min_valid_points));
+
+        const int configured_scan_context_min_occupied_sectors =
+            this->declare_parameter<int>(
+                "scan_context_min_occupied_sectors",
+                6);
+
+        loop_detector_config.scan_context.min_occupied_sectors =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_scan_context_min_occupied_sectors));
+
+        const int configured_scan_context_min_occupied_cells =
+            this->declare_parameter<int>(
+                "scan_context_min_occupied_cells",
+                12);
+
+        loop_detector_config.scan_context.min_occupied_cells =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_scan_context_min_occupied_cells));
+
+        loop_detector_config.scan_context.min_sector_coverage_ratio =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "scan_context_min_sector_coverage_ratio",
+                    0.20),
+                0.0,
+                1.0);
+
+        loop_detector_config.scan_context.coverage_penalty_weight =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "scan_context_coverage_penalty_weight",
+                    0.50),
+                0.0,
+                1.0);
+
+        loop_detector_config.scan_context.occupied_height_epsilon =
+            std::max(
+                1.0e-9,
+                this->declare_parameter<double>(
+                    "scan_context_occupied_height_epsilon",
+                    1.0e-3));
+
+        loop_detector_config.max_scan_context_distance =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "loop_max_scan_context_distance",
+                    0.30),
+                0.0,
+                1.0);
+
         const int configured_local_map_max_frames =
             this->declare_parameter<int>(
                 "local_map_max_frames",
@@ -3970,7 +4783,8 @@ public:
             std::make_unique<
                 RegistrationScan2LocalMap>(
                 registration_config,
-                local_map_config);
+                local_map_config,
+                loop_detector_config);
 
         // ========================================================
         // 2.1 SLAM output export configuration.
@@ -3998,6 +4812,77 @@ public:
             this->declare_parameter<std::string>(
                 "save_root_directory",
                 default_save_root_directory);
+
+        // ========================================================
+        // LiDAR-IMU rotation calibration pair export.
+        // lidar_imu_calibration.launch.py overrides these in calibration mode.
+        // ========================================================
+        enable_lidar_imu_rotation_pair_export_ =
+            this->declare_parameter<bool>(
+                "enable_lidar_imu_rotation_pair_export",
+                false);
+
+        calibration_use_imu_initial_guess_ =
+            this->declare_parameter<bool>(
+                "calibration_use_imu_initial_guess",
+                false);
+
+        const std::string default_rotation_pairs_path =
+            (default_output_directory /
+             "lidar_imu_rotation_pairs.csv")
+                .string();
+
+        lidar_imu_rotation_pairs_path_ =
+            this->declare_parameter<std::string>(
+                "lidar_imu_rotation_pairs_path",
+                default_rotation_pairs_path);
+
+        if (enable_lidar_imu_rotation_pair_export_)
+        {
+            const std::filesystem::path rotation_pairs_path(
+                lidar_imu_rotation_pairs_path_);
+
+            const std::filesystem::path parent_path =
+                rotation_pairs_path.parent_path();
+
+            if (!parent_path.empty())
+            {
+                std::filesystem::create_directories(
+                    parent_path);
+            }
+
+            lidar_imu_rotation_pairs_stream_.open(
+                rotation_pairs_path,
+                std::ios::out |
+                    std::ios::trunc);
+
+            if (!lidar_imu_rotation_pairs_stream_.is_open())
+            {
+                RCLCPP_FATAL(
+                    this->get_logger(),
+                    "Cannot open LiDAR-IMU rotation-pair CSV: %s",
+                    lidar_imu_rotation_pairs_path_.c_str());
+
+                throw std::runtime_error(
+                    "Cannot open LiDAR-IMU rotation-pair CSV.");
+            }
+
+            lidar_imu_rotation_pairs_stream_
+                << "start_timestamp,end_timestamp,"
+                << "lidar_qx,lidar_qy,lidar_qz,lidar_qw,"
+                << "imu_qx,imu_qy,imu_qz,imu_qw\n";
+
+            lidar_imu_rotation_pairs_stream_.flush();
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FR_CALIB rotation-pair export ENABLED | "
+                "use_imu_initial_guess=%s | path=%s",
+                calibration_use_imu_initial_guess_
+                    ? "true"
+                    : "false",
+                lidar_imu_rotation_pairs_path_.c_str());
+        }
 
         save_maps_service_ =
             this->create_service<std_srvs::srv::Trigger>(
@@ -4051,6 +4936,13 @@ public:
                 this->declare_parameter<double>(
                     "imu_history_duration",
                     0.50));
+
+        imu_wait_warning_threshold_ms_ =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "imu_wait_warning_threshold_ms",
+                    20.0));
 
         // ========================================================
         // 3.1 LiDAR preprocessing parameters from YAML.
@@ -4519,6 +5411,36 @@ public:
                 "/refinement_current_after",
                 global_map_qos);
 
+        loop_retrieval_current_window_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/loop_retrieval_current_window",
+                global_map_qos);
+
+        loop_retrieval_historical_window_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/loop_retrieval_historical_window",
+                global_map_qos);
+
+        loop_icp_historical_target_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/loop_icp_historical_target",
+                global_map_qos);
+
+        loop_icp_initial_aligned_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/loop_icp_initial_aligned",
+                global_map_qos);
+
+        loop_icp_final_aligned_pub_ =
+            this->create_publisher<
+                sensor_msgs::msg::PointCloud2>(
+                "/loop_icp_final_aligned",
+                global_map_qos);
+
         pose_graph_marker_pub_ =
             this->create_publisher<
                 visualization_msgs::msg::MarkerArray>(
@@ -4672,6 +5594,10 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
+            "LoopViz V22.8: red=PGO strict-cycle factor, yellow=verified track (spacing/relaxed-cycle), orange=pending/hard-cycle-reject");
+
+        RCLCPP_INFO(
+            this->get_logger(),
             "RefDbg H : /refinement_historical_target");
 
         RCLCPP_INFO(
@@ -4681,6 +5607,26 @@ public:
         RCLCPP_INFO(
             this->get_logger(),
             "RefDbg A : /refinement_current_after");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RetrDbg C: /loop_retrieval_current_window");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "RetrDbg H: /loop_retrieval_historical_window");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LoopDbg H: /loop_icp_historical_target");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LoopDbg I: /loop_icp_initial_aligned");
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LoopDbg F: /loop_icp_final_aligned");
 
         RCLCPP_INFO(
             this->get_logger(),
@@ -4736,6 +5682,22 @@ public:
         if (processing_thread_.joinable())
         {
             processing_thread_.join();
+        }
+
+        if (lidar_imu_rotation_pairs_stream_.is_open())
+        {
+            lidar_imu_rotation_pairs_stream_.flush();
+            lidar_imu_rotation_pairs_stream_.close();
+        }
+
+        if (enable_lidar_imu_rotation_pair_export_ ||
+            exported_rotation_pair_count_ > 0)
+        {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FR_CALIB SUMMARY | exported_pairs=%zu path=%s",
+                exported_rotation_pair_count_,
+                lidar_imu_rotation_pairs_path_.c_str());
         }
 
         RCLCPP_INFO(

@@ -10,7 +10,7 @@
 #include <pcl/point_cloud.h>
 
 // ============================================================================
-// Scan Context V1
+// Scan Context V3
 //
 // Purpose:
 //
@@ -48,12 +48,35 @@ struct ScanContextConfig
 
     // Maximum radial range represented by the descriptor.
     //
-    // For the current MID-360 based pipeline, 80 m is a safe first value.
-    // We can tune this from real data later.
-    double max_radius = 80.0;
+    // Keep this consistent with the preprocessing range.  The current Livox
+    // and Hesai profiles both retain points up to 30 m.  Using 80 m here made
+    // most rings empty and was one cause of sparse one-column matches.
+    double max_radius = 30.0;
 
     // Minimum number of valid points required to accept a descriptor.
     std::size_t min_valid_points = 100;
+
+    // A descriptor made from only a handful of angular/radial bins is not
+    // discriminative, even if it contains many duplicate points.
+    std::size_t min_occupied_sectors = 6;
+    std::size_t min_occupied_cells = 12;
+
+    // Minimum Jaccard-style angular coverage:
+    //
+    //     common occupied sectors / union occupied sectors
+    //
+    // A comparison must explain a meaningful fraction of the occupied
+    // angular support in BOTH descriptors.  This prevents the old failure
+    // mode where only a few coincident sparse columns produced
+    // similarity == 1.0.
+    double min_sector_coverage_ratio = 0.20;
+
+    // Penalize unmatched occupied sectors/cells after the raw cosine score.
+    // Coverage is measured with true intersection-over-union (IoU/Jaccard)
+    // ratios for both sectors and cells.
+    //
+    // 0 disables the penalty; 1 applies the full missing-coverage penalty.
+    double coverage_penalty_weight = 0.50;
 
     // Empty Scan Context cells are exactly 0.
     //
@@ -69,8 +92,12 @@ struct ScanContextConfig
     //
     // and:
     //
-    //     occupied cell whose original z was <= 0.
-    double occupied_height_epsilon = 1.0;
+    //     occupied cell whose shifted relative height is exactly 0.
+    //
+    // Keep this value very small.  A large offset (for example 1.0 m)
+    // behaves like a common DC component and makes cosine similarity depend
+    // too strongly on occupancy while weakening the actual height pattern.
+    double occupied_height_epsilon = 1.0e-3;
 };
 
 struct ScanContextDescriptor
@@ -78,6 +105,9 @@ struct ScanContextDescriptor
     Eigen::MatrixXf matrix;
 
     std::size_t valid_points = 0;
+
+    std::size_t occupied_sectors = 0;
+    std::size_t occupied_cells = 0;
 
     bool valid = false;
 };
@@ -92,11 +122,26 @@ struct ScanContextMatch
     double distance =
         std::numeric_limits<double>::infinity();
 
-    // Mean cosine similarity of valid sector-column pairs.
+    // Coverage-adjusted similarity used by candidate ranking/gating.
     //
     // Larger is better. Usually lies in [0, 1] for our non-negative
     // descriptors.
     double similarity = 0.0;
+
+    // Mean cosine similarity before the occupancy-coverage penalty.
+    double raw_cosine_similarity = 0.0;
+
+    // Jaccard / IoU angular coverage:
+    //
+    //     common occupied sectors / union occupied sectors
+    double sector_coverage_ratio = 0.0;
+
+    // Jaccard / IoU cell coverage:
+    //
+    //     common occupied cells / union occupied cells
+    double cell_coverage_ratio = 0.0;
+
+    std::size_t compared_sectors = 0;
 
     // Number of sector columns by which the QUERY descriptor is indexed
     // relative to the REFERENCE descriptor during the best match.

@@ -6,6 +6,7 @@
 #include <deque>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -54,7 +55,9 @@ class RegistrationScan2LocalMap
 public:
     RegistrationScan2LocalMap(
         const LidarRegistrationConfig &registration_config,
-        const LocalMapConfig &local_map_config);
+        const LocalMapConfig &local_map_config,
+        const LoopDetectorConfig &loop_detector_config =
+            LoopDetectorConfig());
 
     ~RegistrationScan2LocalMap();
 
@@ -86,6 +89,43 @@ public:
     };
 
     BackendMapSnapshot GetBackendMapSnapshot() const;
+
+    // ------------------------------------------------------------------------
+    // Latest loop-ICP RViz diagnostic.
+    //
+    // All three clouds are already expressed in the same PoseGraph/world
+    // frame so the ROS wrapper can publish them directly:
+    //
+    //   historical_target_world : ICP target geometry
+    //   initial_aligned_world    : current KF cloud transformed by the
+    //                              supplied ICP initial guess
+    //   final_aligned_world      : same current KF cloud transformed by the
+    //                              final LoopVerifier ICP result
+    //
+    // This snapshot is visualization-only. It is updated for reverse-loop
+    // hypotheses even when the hypothesis is later rejected by ICP/graph
+    // gates, which is exactly what is needed to diagnose longitudinal sliding.
+    // ------------------------------------------------------------------------
+    struct LoopIcpDebugSnapshot
+    {
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr historical_target_world;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr initial_aligned_world;
+        pcl::PointCloud<LIDAR_POINT>::ConstPtr final_aligned_world;
+
+        std::size_t revision = 0;
+        std::size_t current_keyframe_id = 0;
+        std::size_t historical_keyframe_id = 0;
+
+        std::string initial_guess_name;
+
+        double correction_translation =
+            std::numeric_limits<double>::quiet_NaN();
+
+        double correction_rotation_deg =
+            std::numeric_limits<double>::quiet_NaN();
+    };
+
+    LoopIcpDebugSnapshot GetLoopIcpDebugSnapshot() const;
 
     // ------------------------------------------------------------------------
     // Backend global-map snapshots.
@@ -258,6 +298,20 @@ private:
     FindBestFinishedSubmapForKeyframe(
         std::size_t keyframe_id) const;
 
+    // V19: build a candidate-KEYFRAME-centered historical LocalMap.
+    //
+    // Target coordinates are the candidate Keyframe frame K:
+    //
+    //     p_K = T_K_N * p_N
+    //     T_K_N = T_WK^-1 * T_WN
+    //
+    // This makes candidate K1/K2/K3 genuinely different geometry anchors even
+    // when all of them belong to the same finished Submap.
+    bool BuildCandidateCenteredHistoricalTarget(
+        std::size_t historical_keyframe_id,
+        pcl::PointCloud<LIDAR_POINT>::Ptr &target_K,
+        std::vector<std::size_t> *included_keyframe_ids = nullptr) const;
+
     // Every committed Keyframe immediately enters the backend graph.
     //
     //     KF_i -> Vertex i
@@ -272,8 +326,10 @@ private:
 
     // Called immediately after a new Keyframe is committed.
     //
-    // Candidate retrieval is Keyframe-based. Historical Submap is used only as
-    // a geometry target. The accepted loop is finally converted to:
+    // Candidate retrieval AND geometry verification are Keyframe-based.
+    // A small candidate-centered historical window is built around each
+    // historical KF; finished Submaps are used only for history/separation
+    // bookkeeping. The accepted loop is directly:
     //
     //     T_Khistorical_Kcurrent
     //
@@ -330,6 +386,13 @@ private:
 
         std::size_t support = 0;
 
+        // V17.1:
+        // Number of consecutive LOCAL_STRONG confirmations for the SAME
+        // historical anchor.  This is deliberately separate from generic
+        // temporal support so a large-drift false match cannot become mature
+        // merely by repeating the same historical KF several times.
+        std::size_t local_strong_support = 0;
+
         // Historical keyframe progression direction:
         //
         //   0  -> direction not locked yet
@@ -348,6 +411,36 @@ private:
         Eigen::Isometry3d T_loop_correction =
             Eigen::Isometry3d::Identity();
     };
+    struct ReverseLoopSeedTrack
+    {
+        bool valid = false;
+
+        std::size_t last_current_keyframe_id = 0;
+        std::size_t last_historical_keyframe_id = 0;
+
+        std::size_t support = 0;
+
+        // 真正观察到 historical KF 向反方向推进的次数。
+        // 只看到同一个 historical KF 重复出现，不算方向证据。
+        std::size_t reverse_progress_events = 0;
+    };
+
+    ReverseLoopSeedTrack reverse_loop_seed_track_;
+
+    std::size_t reverse_loop_seed_min_support_ = 3;
+    std::size_t reverse_loop_seed_min_progress_events_ = 2;
+
+    std::size_t reverse_loop_seed_max_current_gap_ = 2;
+    std::size_t reverse_loop_seed_max_historical_step_ = 4;
+
+    std::int64_t reverse_loop_seed_forward_jitter_ = 1;
+
+    // 这个模式只处理“前端认为位置已经比较接近”的反向重访。
+    // 不拿它处理几十米的大漂移。
+    double reverse_loop_seed_max_frontend_distance_ = 2.0;
+
+    // 比现在单帧 reverse hypothesis 更严格。
+    double reverse_loop_seed_min_yaw_deg_ = 150.0;
 
 private:
     // Frontend registration instance.
@@ -382,16 +475,34 @@ private:
     LoopDetector loop_detector_;
     LoopVerifier loop_verifier_;
 
-    std::size_t max_loop_candidates_to_verify_ = 3;
+    // V20 Simple Loop Baseline: 2-frame confirmation + 1 graph factor:
+    // verify up to five UNIQUE historical Submaps.  Scan Context yaw is tested
+    // together with its explicit 180-degree complementary mode.  A verified
+    // temporal loop track propagates its loop-implied world correction as an
+    // independent TRACK_PREDICTED continuation hypothesis; support==1 gets a
+    // short tentative grace window but still bypasses no safety gate.
+    // The old value of 3 was applied before Submap de-duplication, so three
+    // adjacent Scan Context Keyframes from one wrong historical region could
+    // consume the whole ICP budget while a true revisit at rank 4/5 was never
+    // verified.
+    std::size_t max_loop_candidates_to_verify_ = 5;
 
-    // Local-neighborhood exclusion after a candidate KF is associated with a
-    // historical Submap. Submaps are used only to decide whether the candidate
-    // is merely a nearby trajectory neighbor.
-    std::size_t min_loop_submap_separation_ = 5;
+    // Local-neighborhood exclusion is intentionally Keyframe-based and reuses
+    // LoopDetectorConfig::min_keyframe_id_separation.  Submaps remain geometry
+    // containers only; Submap IDs do not define loop temporal separation.
 
     OnlineLoopTrack online_loop_track_;
     std::size_t online_loop_min_support_ = 3;
+
+    // Mature active track: keep the original strict continuity window.
     std::size_t online_loop_max_current_keyframe_gap_ = 3;
+
+    // V15 tentative track: after one graph-consistent observation, allow a
+    // short Scan Context dropout before declaring the track stale.  This only
+    // controls candidate continuation; geometry/graph/temporal gates remain
+    // mandatory and no loop edge is submitted from this setting alone.
+    std::size_t online_loop_tentative_max_current_keyframe_gap_ = 5;
+
     std::size_t online_loop_max_current_submap_gap_ = 1;
     // Broad neighborhood gate kept from V6.
     std::size_t online_loop_max_historical_keyframe_gap_ = 15;
@@ -418,8 +529,210 @@ private:
 
     // Keyframe graph sanity gate. Compare the world pose of the current
     // Keyframe implied by the loop against its frontend T_WL estimate.
-    double max_loop_graph_correction_translation_ = 20.0;
-    double max_loop_graph_correction_rotation_deg_ = 45.0;
+    double max_loop_graph_correction_translation_ = 5.0;
+
+    // V20.2 strict graph correction gate.
+    //
+    // Unknown first-loop seeds are only allowed to disagree with the
+    // frontend pose by a few metres.
+    //
+    // A trusted temporal track may receive a slightly larger continuation
+    // cap, but must never reopen the old 20-25 m large-error corridor.
+    //
+    // As soon as ONE strict first-loop anchor has actually entered the pending
+    // batch AND that anchor has raw Scan Context provenance, the immediately
+    // following geometrically consistent observation may use the adaptive
+    // continuation cap.  This fixes the V19.5 dead-zone:
+    //
+    //     KF146->94  = 19.059 m  (strict raw-SC seed, PASS)
+    //     KF147->93  = 20.0366 m (only +3.66 cm over 20 m, but V19.5
+    //                              still used SEED_FIXED because support==1)
+    //
+    // Adaptive mode still requires corrected-space corridor support and local
+    // agreement with the previous loop-track prediction.  Therefore this is
+    // NOT a global 20 -> 25 m relaxation.
+    std::size_t online_loop_graph_followup_min_track_support_ = 1;
+    double online_loop_graph_followup_translation_cap_ = 5.0;
+
+    // The old 45 deg gate rejected geometrically verified revisits before
+    // they could accumulate temporal support.  Large corrections are still
+    // protected by sequence consistency and the first-loop batch checks.
+    double max_loop_graph_correction_rotation_deg_ = 100.0;
+
+    // V16: backend transaction hard guard.
+    //
+    // Even if g2o's gravity/shape guards pass, an accepted loop must not be
+    // allowed to move the already-built trajectory by an implausibly large
+    // amount in one optimization.  The graph node poses and newly staged loop
+    // edges are rolled back if either limit is exceeded.
+    //
+    // The known-good terminal loop from the current bag was about 1.08 m /
+    // 1.19 deg, while the false KF149..151 -> KF96 batch produced
+    // 18.89 m / 69.14 deg.  These conservative limits separate those cases
+    // while keeping room for meaningful drift correction.
+    double online_loop_pgo_max_translation_update_ = 5.0;
+    double online_loop_pgo_max_rotation_update_deg_ = 20.0;
+
+    // V17.1 LOCAL_STRONG repeated-anchor confirmation.
+    //
+    // Repeated observations of the exact same historical KF are allowed to
+    // increase first-loop temporal support ONLY inside this tight envelope.
+    // This separates:
+    //
+    //   true terminal revisit: ~1.5--2.6 m / ~1--4 deg
+    //   false middle revisit : ~19 m (despite good overlap/RMSE)
+    //
+    // Repeated observations still never create duplicate graph factors.
+    double online_loop_first_local_min_overlap_ = 0.90;
+    double online_loop_first_local_max_rmse_ = 0.45;
+    double online_loop_first_local_max_graph_translation_ = 3.0;
+    double online_loop_first_local_max_graph_rotation_deg_ = 10.0;
+
+    // V19.3 LOCAL_STRONG_CLUSTER.
+    //
+    // Neighboring historical representatives (e.g. KF20 and KF21) are treated
+    // as the same physical local loop cluster for temporal confirmation.
+    // They do NOT create duplicate graph factors.
+    std::size_t online_loop_first_local_cluster_radius_ = 2;
+
+    // V18 LARGE_DRIFT_CONSENSUS.
+    //
+    // A large graph correction is NOT automatically a false loop.  It may be
+    // the very drift that loop closure must remove.  Once the first verified
+    // large-drift anchor exists, actively probe a small historical-KF
+    // neighborhood instead of waiting for Scan Context to independently return
+    // a different anchor on the next frame.
+    //
+    // Example:
+    //     first anchor: current 149 -> history 96
+    //     next frames actively test history 95/97, then 94/98, ...
+    //
+    // All injected candidates still pass the SAME ICP / graph / temporal gates.
+    std::size_t online_loop_large_drift_neighborhood_radius_ = 4;
+
+    // V19.3 anti-self-confirmation policy.
+    //
+    // The first LARGE_DRIFT anchor MUST be independently seeded by raw Scan
+    // Context.  Follow-up anchors may come from TRACK/neighborhood injection
+    // only when their geometry is substantially stronger than the ordinary
+    // first-loop gate and their correction agrees tightly with the seed.
+    //
+    // This fixes both observed failure modes:
+    //   false V19.1 : 97->148,98->149,99->150
+    //                 follow-up overlap ~= 0.898 / 0.897 -> blocked
+    //   true V19.2  : 95->148,96->149,97->150
+    //                 follow-up overlap ~= 0.952 / 0.914 -> allowed
+    std::size_t online_loop_large_drift_raw_sc_support_radius_ = 2;
+    std::size_t online_loop_large_drift_min_raw_sc_members_ = 1;
+
+    double online_loop_large_drift_injected_min_overlap_ = 0.90;
+    double online_loop_large_drift_injected_max_rmse_ = 0.50;
+    double online_loop_large_drift_injected_max_consistency_translation_ = 1.20;
+    double online_loop_large_drift_injected_max_consistency_rotation_deg_ = 8.0;
+
+    // V19.4 drift-aware revisit corridor search.
+    //
+    // IMPORTANT:
+    // Do NOT search historical KFs around the RAW frontend world position.
+    // That would reject exactly the drift that loop closure is supposed to
+    // correct.
+    //
+    // Once one trusted large-drift seed exists, use its correction:
+    //
+    //     T_WL_pred = C_seed * T_WL_frontend
+    //
+    // and search historical KFs around this CORRECTED predicted pose.
+    // This creates a spatial candidate corridor on the old trajectory even
+    // when the raw current trajectory has drifted metres away in RViz.
+    bool online_loop_drift_aware_corridor_enabled_ = true;
+    double online_loop_drift_aware_corridor_radius_ = 4.0;
+    std::size_t online_loop_drift_aware_corridor_max_candidates_ = 8;
+
+    // An injected large-drift follow-up must either be supported by raw Scan
+    // Context OR lie inside the corrected-space revisit corridor.  Geometry
+    // and correction-consistency gates still apply afterwards.
+    double online_loop_drift_aware_corridor_accept_radius_ = 4.0;
+
+    // V19 candidate-centered geometry target.
+    //
+    // Each historical candidate KF owns a small local window [K-r, K+r].
+    // The clouds are transformed into the candidate KF frame before ICP.
+    // With ~0.5 m Keyframe spacing, radius=2 gives roughly a 2 m local support
+    // length while remaining specific enough to distinguish neighboring KFs.
+    std::size_t online_loop_candidate_target_half_window_ = 2;
+    std::size_t online_loop_candidate_target_min_keyframes_ = 2;
+    double online_loop_candidate_target_voxel_leaf_size_ = 0.25;
+
+    // During large-drift consensus only, allow several candidate KFs from the
+    // SAME historical Submap to be verified.  This is necessary because
+    // neighboring KFs such as 96/97/98 normally belong to one frozen Submap.
+    // Normal Scan Context discovery still verifies only one candidate per
+    // historical Submap.
+    std::size_t online_loop_large_drift_same_submap_verify_budget_ = 3;
+
+    // Additional full-ICP trials allowed only while building the first
+    // large-drift consensus.  The normal global candidate budget remains 5.
+    std::size_t online_loop_large_drift_extra_verify_budget_ = 6;
+
+    // A pending first-loop correction outside LOCAL_STRONG enters the
+    // large-drift consensus path.
+    double online_loop_large_drift_trigger_translation_ = 3.0;
+    double online_loop_large_drift_trigger_rotation_deg_ = 10.0;
+    // V20.2 large-drift physical plausibility guard.
+    //
+    // Compare the loop-implied translation correction against the raw frontend
+    // odometry arc length between historical KF and current KF.
+    //
+    // A genuine long-term loop may correct several metres after travelling a
+    // long distance.  A repetitive-scene false loop often asks to remove a very
+    // large fraction of the travelled path itself.
+    double online_loop_large_drift_min_arc_length_for_ratio_ = 10.0;
+    double online_loop_large_drift_max_correction_path_ratio_ = 0.35;
+
+    // V20.2 first-loop PGO trajectory-length guard.
+    //
+    // A first loop must not globally compress or stretch the raw trajectory by an
+    // implausibly large amount merely to satisfy one loop factor.
+    double online_loop_first_pgo_min_path_length_ratio_ = 0.93;
+    double online_loop_first_pgo_max_path_length_ratio_ = 1.07;
+
+    // V18 adaptive first-PGO transaction guard.
+    //
+    // LOCAL_STRONG still uses the conservative fixed 5 m / 20 deg limits.
+    // LARGE_DRIFT_MONOTONIC_SEQUENCE may legitimately require a larger update,
+    // but the allowed update must scale with the independently agreed loop
+    // correction and remains capped.
+    double online_loop_large_drift_pgo_translation_scale_ = 1.35;
+    double online_loop_large_drift_pgo_translation_margin_ = 1.0;
+    double online_loop_large_drift_pgo_translation_cap_ = 25.0;
+
+    double online_loop_large_drift_pgo_rotation_scale_ = 1.35;
+    double online_loop_large_drift_pgo_rotation_margin_deg_ = 5.0;
+    double online_loop_large_drift_pgo_rotation_cap_deg_ = 110.0;
+
+    // After optimization, the latest current KF must end close to the world pose
+    // implied by the consensus correction.  This checks the RESULT against the
+    // loop consensus rather than merely accepting a large numerical update.
+    double online_loop_large_drift_pgo_anchor_target_translation_error_ = 3.0;
+    double online_loop_large_drift_pgo_anchor_target_rotation_error_deg_ = 15.0;
+
+    // V19.1: large-drift PGO must be judged by LOCAL graph deformation, not
+    // by the maximum absolute yaw change of an arbitrary node.
+    //
+    // The 2026-09-03 V19 run produced:
+    //   max absolute node yaw update : 46.81 deg   (old guard rejected)
+    //   max adjacent odom deformation: 5.54 deg
+    //   max adjacent translation def.: 0.735 m
+    //   max staged-loop residual      : 0.652 m / 10.23 deg
+    //   anchor target error           : 0.444 m / 7.72 deg
+    //
+    // That is a smooth distributed correction, not a single catastrophic
+    // vertex jump.  These local limits are therefore the V19.1 safety test.
+    double online_loop_large_drift_max_local_odom_translation_deformation_ = 1.0;
+    double online_loop_large_drift_max_local_odom_rotation_deformation_deg_ = 7.0;
+
+    double online_loop_large_drift_max_loop_residual_translation_ = 1.0;
+    double online_loop_large_drift_max_loop_residual_rotation_deg_ = 12.0;
 
     // ------------------------------------------------------------------------
     // Multi-loop edge insertion state.
@@ -465,18 +778,24 @@ private:
     // The first anchor may be collected before this support is reached.
     // This threshold is checked only when deciding whether the whole first
     // loop batch is mature enough to be staged into PoseGraph / g2o.
-    std::size_t online_loop_first_edge_min_support_ = 4;
+    // V16.2: repeated observations of one historical KF may confirm temporal
+    // persistence, but they never create repeated graph factors.  Three
+    // graph-consistent observations are required before the first transaction.
+    std::size_t online_loop_first_edge_min_support_ = 2;
 
     // Strict geometry gate for the FIRST anchor only.
-    double online_loop_first_edge_min_overlap_ = 0.92;
-    double online_loop_first_edge_max_rmse_ = 0.35;
-    double online_loop_first_edge_max_icp_translation_ = 0.75;
-    double online_loop_first_edge_max_icp_rotation_deg_ = 3.0;
+    // Calibrated against the current online log: verified revisits are around
+    // 0.70--0.75 overlap and 0.50 m RMSE.  Safety comes from requiring a
+    // consistent multi-keyframe sequence, not from an unreachable 0.88 gate.
+    double online_loop_first_edge_min_overlap_ = 0.70;
+    double online_loop_first_edge_max_rmse_ = 0.58;
+    double online_loop_first_edge_max_icp_translation_ = 3.0;
+    double online_loop_first_edge_max_icp_rotation_deg_ = 35.0;
 
     // Follow-up members are mainly judged by whether they imply the same
     // world correction as the anchor.  Keep only a wider ICP safety gate here.
-    double online_loop_first_batch_followup_max_icp_translation_ = 1.0;
-    double online_loop_first_batch_followup_max_icp_rotation_deg_ = 15.0;
+    double online_loop_first_batch_followup_max_icp_translation_ = 3.5;
+    double online_loop_first_batch_followup_max_icp_rotation_deg_ = 35.0;
 
     struct PendingLoopConstraint
     {
@@ -509,6 +828,17 @@ private:
             std::numeric_limits<double>::infinity();
         double correction_rotation_deg =
             std::numeric_limits<double>::infinity();
+
+        // V19.2 provenance:
+        // true only when THIS current frame independently retrieved the same
+        // historical neighborhood through raw Scan Context.  Track-predicted
+        // and large-drift-neighborhood injected candidates are hypotheses, not
+        // independent evidence, and are not allowed to grow the first
+        // large-drift PoseGraph batch by themselves.
+        bool raw_scan_context_supported = false;
+        std::size_t raw_scan_context_support_kf =
+            std::numeric_limits<std::size_t>::max();
+        double raw_scan_context_support_similarity = 0.0;
     };
 
     std::vector<
@@ -516,21 +846,44 @@ private:
         Eigen::aligned_allocator<PendingLoopConstraint>>
         pending_first_loop_batch_;
 
-    // First optimization requires several independent anchors.  These gates
-    // are intentionally looser than later sparse-loop spacing because they are
-    // used only to collect a short, locally consistent loop sequence.
-    // Two independent loop anchors are sufficient for the first optimization.
-    // Candidate collection and batch commit are intentionally separate:
-    //   - an anchor can be stored at support=3,
-    //   - the batch is committed only when support>=4 and edges>=2.
+    // V17.1 dual-mode first-loop transaction.
+    //
+    // Mode A: LOCAL_STRONG_CLUSTER
+    //   - one UNIQUE graph edge is enough,
+    //   - historical representatives may jitter within +/-2 KF,
+    //   - 3 LOCAL_STRONG observations inside that cluster confirm the loop,
+    //   - the batch keeps ONE representative factor only.
+    //
+    // Mode B: LARGE_DRIFT_MONOTONIC_SEQUENCE
+    //   - requires 3 DISTINCT historical KFs,
+    //   - historical ids must progress monotonically,
+    //   - all three constraints must agree on the same loop correction,
+    //   - after the first large-drift anchor, V18 actively verifies nearby
+    //     historical KFs so Scan Context does not have to rediscover each one,
+    //   - first-PGO update limits scale with the agreed correction and the
+    //     optimized anchor must land near the consensus-implied target pose.
+    //
+    // Later loop edges keep the original fixed 5 m / 20 deg rollback guard.
     std::size_t online_loop_first_batch_min_edges_ = 2;
     std::size_t online_loop_first_batch_current_spacing_ = 1;
     std::size_t online_loop_first_batch_historical_spacing_ = 1;
 
-    // With only two edges in the first batch, require tighter agreement of the
-    // left-multiplicative world correction implied by both loop constraints.
-    double online_loop_first_batch_max_translation_error_ = 0.6;
-    double online_loop_first_batch_max_rotation_error_deg_ = 2.5;
+    // V20 baseline: two consecutive current KFs must confirm the same local
+    // historical neighborhood.  This is intentionally simpler than the old
+    // multi-stage direction state machine.
+    std::size_t online_loop_first_batch_max_historical_gap_ = 4;
+
+    // V19.6: the Keyframe-centered historical target uses +/-2 KFs.  The
+    // winning center id can therefore jitter by one KF without representing
+    // real trajectory reversal.  Do not establish/reverse batch direction from
+    // a single +/-1 center-id step.
+    std::size_t online_loop_first_batch_direction_jitter_tolerance_ = 1;
+
+    // V19.6: batch consistency is evaluated locally against the PREVIOUS
+    // verified loop-track prediction, not forever against the first anchor.
+    // Keep the numerical envelope unchanged.
+    double online_loop_first_batch_max_translation_error_ = 1.5;
+    double online_loop_first_batch_max_rotation_error_deg_ = 10.0;
 
     // Measurement of the last loop factor that was ACTUALLY inserted into
     // PoseGraph.  For the next sparse loop factor we compare two paths:
@@ -679,6 +1032,36 @@ private:
     pcl::PointCloud<LIDAR_POINT>::ConstPtr
         backend_refinement_current_after_snapshot_;
 
+    // Latest reverse-loop ICP visualization diagnostic.  These are kept
+    // separate from GlobalMapRevision because rejected loop hypotheses do not
+    // modify the map or PoseGraph, but still need to be visible in RViz.
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_loop_icp_historical_target_snapshot_;
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_loop_icp_initial_aligned_snapshot_;
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        backend_loop_icp_final_aligned_snapshot_;
+
+    std::size_t backend_loop_icp_debug_revision_snapshot_ = 0;
+    std::size_t backend_loop_icp_debug_current_kf_snapshot_ = 0;
+    std::size_t backend_loop_icp_debug_historical_kf_snapshot_ = 0;
+
+    std::string backend_loop_icp_debug_guess_name_snapshot_;
+
+    double backend_loop_icp_debug_correction_translation_snapshot_ =
+        -std::numeric_limits<double>::infinity();
+
+    double backend_loop_icp_debug_correction_rotation_snapshot_ =
+        std::numeric_limits<double>::quiet_NaN();
+
+    // Within one current KF prefer the confirmed reverse-sequence diagnostic
+    // over the generic reverse-frontend diagnostic. For equal priority keep
+    // the larger translation excursion because it exposes ICP sliding most
+    // clearly.
+    int backend_loop_icp_debug_priority_snapshot_ = 0;
+
     std::size_t backend_global_map_revision_snapshot_ = 0;
     std::size_t backend_refined_map_revision_snapshot_ = 0;
     std::size_t backend_refinement_debug_revision_snapshot_ = 0;
@@ -701,5 +1084,5 @@ private:
     bool initialized_ = false;
 
     double max_accepted_rmse_ = 0.15;
-    std::size_t min_accepted_correspondences_ = 1000;
+    std::size_t min_accepted_correspondences_ = 100;
 };

@@ -13,13 +13,13 @@
 #include <vector>
 
 #include <Eigen/Core>
+#include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
-#include <pcl/registration/icp.h>
 #include <pcl/search/kdtree.h>
 
 namespace
@@ -29,13 +29,21 @@ namespace
         3.14159265358979323846;
 
     // ============================================================================
-    // Loop Shadow Hessian Diagnostic V1
+    // Loop Point-to-Plane V2
     //
-    // IMPORTANT:
-    //   * PCL point-to-point ICP still computes the loop pose.
-    //   * The diagnostic below does NOT change ICP, loop acceptance, or PoseGraph.
-    //   * After ICP converges, we rebuild local point-to-plane geometry only to
-    //     estimate directional observability / coupling.
+    // V2 keeps V1's candidate generation, prescore and final gates unchanged,
+    // but makes the pose solver observability-aware:
+    //
+    //   E = E_point_to_plane
+    //     + E_ground(roll,pitch,z)
+    //     + E_seed_prior(geometry-weak directions only, trusted seeds only)
+    //
+    // Degeneracy analysis / suppression is performed in normalized coordinates
+    //
+    //   [L*rx, L*ry, L*rz, tx, ty, tz]
+    //
+    // with L = median correspondence range.  This prevents rad/m unit scaling
+    // from contaminating eigenvalue comparisons.
     // ============================================================================
     constexpr int kShadowPlaneKnn = 5;
     constexpr double kShadowMaxPlaneFitError = 0.15;
@@ -43,6 +51,9 @@ namespace
     constexpr double kShadowMaximumScaleRange = 50.0;
     constexpr double kShadowRelativeEigenvalueFloor = 0.01;
     constexpr std::size_t kShadowMinimumCorrespondences = 50;
+
+    constexpr double kLoopP2PlaneNumericalDampingRatio = 1.0e-6;
+    constexpr std::size_t kLoopP2PlaneMinimumCorrespondences = 50;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr
     ConvertToXYZ(
@@ -1080,12 +1091,13 @@ namespace
 
     void PrintLoopShadowHessianDiagnostic(
         const LoopShadowHessianDiagnostic &diagnostic,
-        bool p2p_accepted)
+        bool solver_accepted)
     {
         std::cout
             << "LOOP_SHADOW_HESSIAN_V1"
-            << " | p2p_accepted="
-            << (p2p_accepted ? "true" : "false")
+            << " | solver=POINT_TO_PLANE_V2_DEGENERACY_GROUND"
+            << " | solver_accepted="
+            << (solver_accepted ? "true" : "false")
             << " | valid="
             << (diagnostic.valid ? "true" : "false")
             << " | shadow_corr="
@@ -1122,8 +1134,980 @@ namespace
             << diagnostic.maximum_absolute_off_diagonal
             << " | max_tr_coupling="
             << diagnostic.maximum_translation_rotation_coupling
-            << " | action=DIAGNOSTIC_ONLY_EDGE_INFORMATION_BUILT_AT_COMMIT"
+            << " | action=FINAL_POSE_OBSERVABILITY_DIAGNOSTIC_ONLY"
             << std::endl;
+    }
+
+    struct LoopP2PlaneIterationDiagnostic
+    {
+        bool valid = false;
+        bool ground_active = false;
+        bool trusted_seed_prior = false;
+
+        std::size_t correspondences = 0;
+        std::size_t plane_fit_failures = 0;
+        std::size_t downweighted = 0;
+
+        std::size_t ground_correspondences = 0;
+        std::size_t ground_downweighted = 0;
+
+        std::size_t geometry_weak_directions = 0;
+        std::size_t prior_directions = 0;
+        std::size_t suppressed_directions = 0;
+
+        double raw_rmse =
+            std::numeric_limits<double>::infinity();
+
+        double robust_rmse =
+            std::numeric_limits<double>::infinity();
+
+        double median_range =
+            std::numeric_limits<double>::quiet_NaN();
+
+        double scale_L =
+            std::numeric_limits<double>::quiet_NaN();
+
+        double condition_number =
+            std::numeric_limits<double>::infinity();
+
+        double total_condition_number =
+            std::numeric_limits<double>::infinity();
+
+        Eigen::Matrix<double, 6, 1> eigenvalues =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        Eigen::Matrix<double, 6, 1> relative_eigenvalues =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        Eigen::Matrix<double, 6, 6> eigenvectors =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        Eigen::Matrix<double, 6, 6> parameter_unscale =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        // IMPORTANT: this vector lives in normalized coordinates:
+        // [L*rx, L*ry, L*rz, tx, ty, tz].
+        Eigen::Matrix<double, 6, 1> weakest_direction_normalized =
+            Eigen::Matrix<double, 6, 1>::Zero();
+
+        Eigen::Matrix<double, 6, 1> total_relative_eigenvalues =
+            Eigen::Matrix<double, 6, 1>::Zero();
+    };
+
+    Eigen::Vector3d RotationLogVector(
+        const Eigen::Matrix3d &rotation)
+    {
+        if (!rotation.allFinite())
+        {
+            return Eigen::Vector3d::Zero();
+        }
+
+        Eigen::AngleAxisd angle_axis(rotation);
+
+        const double angle =
+            angle_axis.angle();
+
+        const Eigen::Vector3d axis =
+            angle_axis.axis();
+
+        if (!std::isfinite(angle) ||
+            !axis.allFinite() ||
+            std::abs(angle) < 1.0e-12)
+        {
+            return Eigen::Vector3d::Zero();
+        }
+
+        return angle * axis;
+    }
+
+    bool AnalyzeLoopP2PlaneHessianV2(
+        const Eigen::Matrix<double, 6, 6> &H_geometry,
+        const std::vector<double> &correspondence_ranges,
+        const LoopVerifierConfig &config,
+        LoopP2PlaneIterationDiagnostic &diagnostic)
+    {
+        if (!H_geometry.allFinite() ||
+            correspondence_ranges.empty())
+        {
+            return false;
+        }
+
+        diagnostic.median_range =
+            MedianValue(
+                correspondence_ranges);
+
+        if (!std::isfinite(diagnostic.median_range) ||
+            diagnostic.median_range <= 0.0)
+        {
+            return false;
+        }
+
+        diagnostic.scale_L =
+            std::clamp(
+                diagnostic.median_range,
+                kShadowMinimumScaleRange,
+                kShadowMaximumScaleRange);
+
+        diagnostic.parameter_unscale.setIdentity();
+
+        const double inverse_scale =
+            1.0 /
+            diagnostic.scale_L;
+
+        // delta_raw = parameter_unscale * delta_normalized.
+        diagnostic.parameter_unscale(0, 0) = inverse_scale;
+        diagnostic.parameter_unscale(1, 1) = inverse_scale;
+        diagnostic.parameter_unscale(2, 2) = inverse_scale;
+
+        Eigen::Matrix<double, 6, 6> H_analysis =
+            diagnostic.parameter_unscale.transpose() *
+            H_geometry *
+            diagnostic.parameter_unscale;
+
+        H_analysis =
+            0.5 *
+            (H_analysis +
+             H_analysis.transpose());
+
+        if (!H_analysis.allFinite())
+        {
+            return false;
+        }
+
+        Eigen::SelfAdjointEigenSolver<
+            Eigen::Matrix<double, 6, 6>>
+            eigen_solver(
+                H_analysis,
+                Eigen::ComputeEigenvectors);
+
+        if (eigen_solver.info() !=
+            Eigen::Success)
+        {
+            return false;
+        }
+
+        diagnostic.eigenvalues =
+            eigen_solver.eigenvalues();
+
+        diagnostic.eigenvectors =
+            eigen_solver.eigenvectors();
+
+        if (!diagnostic.eigenvalues.allFinite() ||
+            !diagnostic.eigenvectors.allFinite())
+        {
+            return false;
+        }
+
+        const double lambda_min =
+            diagnostic.eigenvalues(0);
+
+        const double lambda_max =
+            diagnostic.eigenvalues(5);
+
+        if (!std::isfinite(lambda_max) ||
+            lambda_max <= 1.0e-12)
+        {
+            return false;
+        }
+
+        diagnostic.relative_eigenvalues =
+            diagnostic.eigenvalues /
+            lambda_max;
+
+        if (!diagnostic.relative_eigenvalues.allFinite())
+        {
+            return false;
+        }
+
+        if (std::isfinite(lambda_min) &&
+            lambda_min > 1.0e-12)
+        {
+            diagnostic.condition_number =
+                lambda_max /
+                lambda_min;
+        }
+
+        diagnostic.weakest_direction_normalized =
+            diagnostic.eigenvectors.col(0);
+
+        diagnostic.geometry_weak_directions = 0;
+
+        for (int i = 0;
+             i < 6;
+             ++i)
+        {
+            if (diagnostic.relative_eigenvalues(i) <
+                config.degeneracy_weak_relative_threshold)
+            {
+                ++diagnostic.geometry_weak_directions;
+            }
+        }
+
+        diagnostic.valid = true;
+        return true;
+    }
+
+    bool RunPointToPlaneGaussNewtonV2(
+        const PreparedSource &source,
+        const PreparedTarget &target,
+        const Eigen::Isometry3d &initial_guess,
+        bool enable_trusted_seed_prior,
+        const LoopVerifierConfig &config,
+        Eigen::Isometry3d &T_target_source,
+        std::size_t &iterations_completed,
+        bool &stopped_by_increment,
+        bool &stopped_by_fitness)
+    {
+        T_target_source =
+            initial_guess;
+
+        iterations_completed = 0;
+        stopped_by_increment = false;
+        stopped_by_fitness = false;
+
+        if (!source.cloud ||
+            !target.cloud ||
+            !target.kdtree ||
+            source.cloud->empty() ||
+            target.cloud->empty() ||
+            !initial_guess.matrix().allFinite())
+        {
+            return false;
+        }
+
+        const double maximum_squared_distance =
+            config.max_correspondence_distance *
+            config.max_correspondence_distance;
+
+        const double increment_epsilon =
+            std::sqrt(
+                std::max(
+                    config.transformation_epsilon,
+                    1.0e-16));
+
+        const double ground_normal_cosine_threshold =
+            std::cos(
+                config.ground_normal_max_tilt_deg *
+                kPi /
+                180.0);
+
+        double previous_raw_rmse =
+            std::numeric_limits<double>::infinity();
+
+        bool solved_at_least_once = false;
+
+        std::vector<int> neighbor_indices(
+            static_cast<std::size_t>(
+                kShadowPlaneKnn));
+
+        std::vector<float> neighbor_squared_distances(
+            static_cast<std::size_t>(
+                kShadowPlaneKnn));
+
+        for (std::size_t iteration = 0;
+             iteration < config.max_iterations;
+             ++iteration)
+        {
+            Eigen::Matrix<double, 6, 6> H_geometry =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+            Eigen::Matrix<double, 6, 1> b_geometry =
+                Eigen::Matrix<double, 6, 1>::Zero();
+
+            Eigen::Matrix<double, 6, 6> H_ground =
+                Eigen::Matrix<double, 6, 6>::Zero();
+
+            Eigen::Matrix<double, 6, 1> b_ground =
+                Eigen::Matrix<double, 6, 1>::Zero();
+
+            double raw_squared_error_sum = 0.0;
+            double robust_squared_error_sum = 0.0;
+            double robust_weight_sum = 0.0;
+
+            LoopP2PlaneIterationDiagnostic diagnostic;
+            diagnostic.trusted_seed_prior =
+                enable_trusted_seed_prior &&
+                config.enable_weak_direction_seed_prior;
+
+            std::vector<double> correspondence_ranges;
+            correspondence_ranges.reserve(
+                source.cloud->size());
+
+            const Eigen::Vector3d sensor_origin_target =
+                T_target_source.translation();
+
+            for (const pcl::PointXYZ &source_point :
+                 source.cloud->points)
+            {
+                const Eigen::Vector3d p_source(
+                    static_cast<double>(source_point.x),
+                    static_cast<double>(source_point.y),
+                    static_cast<double>(source_point.z));
+
+                const Eigen::Vector3d p_target =
+                    T_target_source *
+                    p_source;
+
+                if (!p_target.allFinite())
+                {
+                    continue;
+                }
+
+                pcl::PointXYZ query;
+                query.x =
+                    static_cast<float>(p_target.x());
+                query.y =
+                    static_cast<float>(p_target.y());
+                query.z =
+                    static_cast<float>(p_target.z());
+
+                const int found =
+                    target.kdtree->nearestKSearch(
+                        query,
+                        kShadowPlaneKnn,
+                        neighbor_indices,
+                        neighbor_squared_distances);
+
+                if (found < kShadowPlaneKnn)
+                {
+                    continue;
+                }
+
+                const double nearest_squared_distance =
+                    static_cast<double>(
+                        neighbor_squared_distances[0]);
+
+                if (!std::isfinite(nearest_squared_distance) ||
+                    nearest_squared_distance >
+                        maximum_squared_distance)
+                {
+                    continue;
+                }
+
+                Eigen::Vector3d plane_point;
+                Eigen::Vector3d plane_normal;
+
+                if (!FitShadowPlane(
+                        target.cloud,
+                        neighbor_indices,
+                        plane_point,
+                        plane_normal))
+                {
+                    ++diagnostic.plane_fit_failures;
+                    continue;
+                }
+
+                const double residual =
+                    plane_normal.dot(
+                        p_target -
+                        plane_point);
+
+                if (!std::isfinite(residual) ||
+                    std::abs(residual) >
+                        config.point_to_plane_max_residual)
+                {
+                    continue;
+                }
+
+                const Eigen::Vector3d lever_arm_target =
+                    p_target -
+                    sensor_origin_target;
+
+                if (!lever_arm_target.allFinite())
+                {
+                    continue;
+                }
+
+                // Sensor-centered perturbation, order = [rx ry rz tx ty tz].
+                Eigen::Matrix<double, 1, 6> J =
+                    Eigen::Matrix<double, 1, 6>::Zero();
+
+                J.block<1, 3>(0, 0) =
+                    lever_arm_target.cross(
+                                        plane_normal)
+                        .transpose();
+
+                J.block<1, 3>(0, 3) =
+                    plane_normal.transpose();
+
+                const double absolute_residual =
+                    std::abs(residual);
+
+                double huber_weight = 1.0;
+
+                if (absolute_residual >
+                        config.point_to_plane_huber_delta &&
+                    absolute_residual > 1.0e-12)
+                {
+                    huber_weight =
+                        config.point_to_plane_huber_delta /
+                        absolute_residual;
+
+                    ++diagnostic.downweighted;
+                }
+
+                H_geometry.noalias() +=
+                    huber_weight *
+                    J.transpose() *
+                    J;
+
+                b_geometry.noalias() +=
+                    huber_weight *
+                    J.transpose() *
+                    residual;
+
+                raw_squared_error_sum +=
+                    residual *
+                    residual;
+
+                robust_squared_error_sum +=
+                    huber_weight *
+                    residual *
+                    residual;
+
+                robust_weight_sum +=
+                    huber_weight;
+
+                const double range =
+                    lever_arm_target.norm();
+
+                if (std::isfinite(range) &&
+                    range > 1.0e-9)
+                {
+                    correspondence_ranges.push_back(
+                        range);
+                }
+
+                ++diagnostic.correspondences;
+
+                // ------------------------------------------------------------
+                // Loop-local ground-like extra information.
+                //
+                // Unlike realtime frontend Ground V1.3, LoopVerifier currently
+                // does not receive a persisted GroundSegmentationResult for a
+                // Keyframe.  Therefore V2 infers ground-like correspondences
+                // conservatively from the already-fitted target plane:
+                //   * normal close to target-frame +/-Z,
+                //   * source point is below the current LiDAR origin,
+                //   * small point-to-plane residual.
+                //
+                // The Jacobian is then projected to [roll,pitch,z] exactly as
+                // in frontend Ground V1.3: rz / tx / ty are zeroed.
+                // ------------------------------------------------------------
+                if (config.enable_ground_constraint &&
+                    std::abs(plane_normal.z()) >=
+                        ground_normal_cosine_threshold &&
+                    lever_arm_target.z() <=
+                        -config.ground_min_below_sensor_m &&
+                    absolute_residual <=
+                        config.ground_max_residual)
+                {
+                    Eigen::Matrix<double, 1, 6> J_ground =
+                        J;
+
+                    J_ground(0, 2) = 0.0; // yaw
+                    J_ground(0, 3) = 0.0; // x
+                    J_ground(0, 4) = 0.0; // y
+
+                    double ground_robust_weight =
+                        1.0;
+
+                    if (absolute_residual >
+                            config.ground_huber_delta &&
+                        absolute_residual > 1.0e-12)
+                    {
+                        ground_robust_weight =
+                            config.ground_huber_delta /
+                            absolute_residual;
+
+                        ++diagnostic.ground_downweighted;
+                    }
+
+                    const double final_ground_weight =
+                        config.ground_weight *
+                        ground_robust_weight;
+
+                    H_ground.noalias() +=
+                        final_ground_weight *
+                        J_ground.transpose() *
+                        J_ground;
+
+                    b_ground.noalias() +=
+                        final_ground_weight *
+                        J_ground.transpose() *
+                        residual;
+
+                    ++diagnostic.ground_correspondences;
+                }
+            }
+
+            if (diagnostic.correspondences <
+                    kLoopP2PlaneMinimumCorrespondences ||
+                !H_geometry.allFinite() ||
+                !b_geometry.allFinite())
+            {
+                std::cout
+                    << "LOOP_P2PLANE_V2"
+                    << " | iteration=" << iteration
+                    << " | action=STOP_INSUFFICIENT_GEOMETRY"
+                    << " | corr="
+                    << diagnostic.correspondences
+                    << " | min_corr="
+                    << kLoopP2PlaneMinimumCorrespondences
+                    << " | plane_fit_failures="
+                    << diagnostic.plane_fit_failures
+                    << std::endl;
+                break;
+            }
+
+            diagnostic.ground_active =
+                config.enable_ground_constraint &&
+                diagnostic.ground_correspondences >=
+                    config.min_ground_correspondences;
+
+            if (!diagnostic.ground_active)
+            {
+                H_ground.setZero();
+                b_ground.setZero();
+            }
+
+            diagnostic.raw_rmse =
+                std::sqrt(
+                    raw_squared_error_sum /
+                    static_cast<double>(
+                        diagnostic.correspondences));
+
+            if (robust_weight_sum > 0.0)
+            {
+                diagnostic.robust_rmse =
+                    std::sqrt(
+                        robust_squared_error_sum /
+                        robust_weight_sum);
+            }
+
+            if (!AnalyzeLoopP2PlaneHessianV2(
+                    H_geometry,
+                    correspondence_ranges,
+                    config,
+                    diagnostic))
+            {
+                std::cout
+                    << "LOOP_P2PLANE_V2"
+                    << " | iteration=" << iteration
+                    << " | action=STOP_HESSIAN_ANALYSIS_FAILED"
+                    << std::endl;
+                break;
+            }
+
+            // Geometry and Ground are converted to the same normalized space.
+            Eigen::Matrix<double, 6, 6> H_total_analysis =
+                diagnostic.parameter_unscale.transpose() *
+                (H_geometry + H_ground) *
+                diagnostic.parameter_unscale;
+
+            Eigen::Matrix<double, 6, 1> b_total_analysis =
+                diagnostic.parameter_unscale.transpose() *
+                (b_geometry + b_ground);
+
+            H_total_analysis =
+                0.5 *
+                (H_total_analysis +
+                 H_total_analysis.transpose());
+
+            // ------------------------------------------------------------
+            // Weak-direction seed prior.
+            //
+            // The prior is added ONLY when the caller explicitly marks this
+            // initial guess trusted, and ONLY along eigenvectors that geometry
+            // itself says are weak.  It never constrains a strong geometry
+            // direction.
+            // ------------------------------------------------------------
+            if (diagnostic.trusted_seed_prior)
+            {
+                Eigen::Matrix<double, 6, 1> seed_error_raw =
+                    Eigen::Matrix<double, 6, 1>::Zero();
+
+                seed_error_raw.head<3>() =
+                    RotationLogVector(
+                        T_target_source.rotation() *
+                        initial_guess.rotation().transpose());
+
+                seed_error_raw.tail<3>() =
+                    T_target_source.translation() -
+                    initial_guess.translation();
+
+                Eigen::Matrix<double, 6, 1> seed_error_analysis =
+                    seed_error_raw;
+
+                seed_error_analysis.head<3>() *=
+                    diagnostic.scale_L;
+
+                const double geometry_lambda_max =
+                    diagnostic.eigenvalues(5);
+
+                const double target_relative =
+                    std::max(
+                        config.degeneracy_weak_relative_threshold,
+                        config.weak_direction_prior_target_relative);
+
+                const double target_information =
+                    target_relative *
+                    geometry_lambda_max;
+
+                for (int i = 0;
+                     i < 6;
+                     ++i)
+                {
+                    const double relative_lambda =
+                        diagnostic.relative_eigenvalues(i);
+
+                    if (!std::isfinite(relative_lambda) ||
+                        relative_lambda >=
+                            config.degeneracy_weak_relative_threshold)
+                    {
+                        continue;
+                    }
+
+                    const double missing_information =
+                        std::max(
+                            0.0,
+                            target_information -
+                                diagnostic.eigenvalues(i));
+
+                    const double prior_information =
+                        config.weak_direction_prior_gain *
+                        missing_information;
+
+                    if (!std::isfinite(prior_information) ||
+                        prior_information <= 0.0)
+                    {
+                        continue;
+                    }
+
+                    const Eigen::Matrix<double, 6, 1> direction =
+                        diagnostic.eigenvectors.col(i);
+
+                    const double projected_seed_error =
+                        direction.dot(
+                            seed_error_analysis);
+
+                    H_total_analysis.noalias() +=
+                        prior_information *
+                        direction *
+                        direction.transpose();
+
+                    b_total_analysis.noalias() +=
+                        prior_information *
+                        direction *
+                        projected_seed_error;
+
+                    ++diagnostic.prior_directions;
+                }
+            }
+
+            H_total_analysis =
+                0.5 *
+                (H_total_analysis +
+                 H_total_analysis.transpose());
+
+            if (!H_total_analysis.allFinite() ||
+                !b_total_analysis.allFinite())
+            {
+                break;
+            }
+
+            Eigen::SelfAdjointEigenSolver<
+                Eigen::Matrix<double, 6, 6>>
+                total_solver(
+                    H_total_analysis,
+                    Eigen::ComputeEigenvectors);
+
+            if (total_solver.info() !=
+                Eigen::Success)
+            {
+                std::cout
+                    << "LOOP_P2PLANE_V2"
+                    << " | iteration=" << iteration
+                    << " | action=STOP_SOLVE_FAILURE"
+                    << std::endl;
+                break;
+            }
+
+            const Eigen::Matrix<double, 6, 1>
+                total_eigenvalues =
+                    total_solver.eigenvalues();
+
+            const Eigen::Matrix<double, 6, 6>
+                total_eigenvectors =
+                    total_solver.eigenvectors();
+
+            if (!total_eigenvalues.allFinite() ||
+                !total_eigenvectors.allFinite())
+            {
+                break;
+            }
+
+            const double total_lambda_max =
+                total_eigenvalues(5);
+
+            if (!std::isfinite(total_lambda_max) ||
+                total_lambda_max <= 1.0e-12)
+            {
+                break;
+            }
+
+            diagnostic.total_relative_eigenvalues =
+                total_eigenvalues /
+                total_lambda_max;
+
+            if (total_eigenvalues(0) > 1.0e-12)
+            {
+                diagnostic.total_condition_number =
+                    total_lambda_max /
+                    total_eigenvalues(0);
+            }
+
+            const Eigen::Matrix<double, 6, 1>
+                gradient_eigen =
+                    total_eigenvectors.transpose() *
+                    b_total_analysis;
+
+            Eigen::Matrix<double, 6, 1>
+                delta_eigen =
+                    Eigen::Matrix<double, 6, 1>::Zero();
+
+            const double damping =
+                kLoopP2PlaneNumericalDampingRatio *
+                std::max(
+                    1.0,
+                    total_lambda_max);
+
+            diagnostic.suppressed_directions = 0;
+
+            int usable_directions = 0;
+
+            for (int i = 0;
+                 i < 6;
+                 ++i)
+            {
+                const double lambda =
+                    total_eigenvalues(i);
+
+                const double relative_lambda =
+                    diagnostic.total_relative_eigenvalues(i);
+
+                if (!std::isfinite(lambda) ||
+                    lambda <= 1.0e-12 ||
+                    !std::isfinite(relative_lambda))
+                {
+                    ++diagnostic.suppressed_directions;
+                    continue;
+                }
+
+                double direction_scale = 1.0;
+
+                if (config.enable_degeneracy_suppression)
+                {
+                    if (relative_lambda <
+                        config.degeneracy_hard_relative_threshold)
+                    {
+                        ++diagnostic.suppressed_directions;
+                        continue;
+                    }
+
+                    if (relative_lambda <
+                        config.degeneracy_weak_relative_threshold)
+                    {
+                        direction_scale =
+                            std::clamp(
+                                relative_lambda /
+                                    config.degeneracy_weak_relative_threshold,
+                                0.0,
+                                1.0);
+
+                        ++diagnostic.suppressed_directions;
+                    }
+                }
+
+                delta_eigen(i) =
+                    direction_scale *
+                    (-gradient_eigen(i) /
+                     (lambda + damping));
+
+                ++usable_directions;
+            }
+
+            if (usable_directions <= 0)
+            {
+                std::cout
+                    << "LOOP_P2PLANE_V2"
+                    << " | iteration=" << iteration
+                    << " | action=STOP_ALL_DIRECTIONS_SUPPRESSED"
+                    << std::endl;
+                break;
+            }
+
+            const Eigen::Matrix<double, 6, 1>
+                delta_analysis =
+                    total_eigenvectors *
+                    delta_eigen;
+
+            const Eigen::Matrix<double, 6, 1>
+                delta =
+                    diagnostic.parameter_unscale *
+                    delta_analysis;
+
+            if (!delta.allFinite())
+            {
+                break;
+            }
+
+            const Eigen::Vector3d delta_rotation =
+                delta.head<3>();
+
+            const Eigen::Vector3d delta_translation =
+                delta.tail<3>();
+
+            const double delta_rotation_rad =
+                delta_rotation.norm();
+
+            const double delta_translation_norm =
+                delta_translation.norm();
+
+            std::cout
+                << "LOOP_P2PLANE_V2"
+                << " | iteration=" << iteration
+                << " | corr="
+                << diagnostic.correspondences
+                << " | plane_fit_failures="
+                << diagnostic.plane_fit_failures
+                << " | general_huber_delta="
+                << config.point_to_plane_huber_delta
+                << " m"
+                << " | downweighted="
+                << diagnostic.downweighted
+                << " | ground_active="
+                << (diagnostic.ground_active ? "true" : "false")
+                << " | ground_corr="
+                << diagnostic.ground_correspondences
+                << " | ground_weight="
+                << config.ground_weight
+                << " | trusted_seed_prior="
+                << (diagnostic.trusted_seed_prior ? "true" : "false")
+                << " | geometry_weak_dirs="
+                << diagnostic.geometry_weak_directions
+                << " | prior_dirs="
+                << diagnostic.prior_directions
+                << " | suppressed_dirs="
+                << diagnostic.suppressed_directions
+                << " | raw_rmse="
+                << diagnostic.raw_rmse
+                << " m"
+                << " | robust_rmse="
+                << diagnostic.robust_rmse
+                << " m"
+                << " | dT="
+                << delta_translation_norm
+                << " m"
+                << " | dR="
+                << delta_rotation_rad *
+                       180.0 / kPi
+                << " deg"
+                << std::endl;
+
+            std::cout
+                << "LOOP_P2PLANE_HESSIAN_V2"
+                << " | iteration=" << iteration
+                << " | valid="
+                << (diagnostic.valid ? "true" : "false")
+                << " | coordinates=[Lrx Lry Lrz tx ty tz]"
+                << " | median_range="
+                << diagnostic.median_range
+                << " m"
+                << " | scale_L="
+                << diagnostic.scale_L
+                << " m"
+                << " | geometry_eigen=["
+                << diagnostic.eigenvalues.transpose()
+                << "]"
+                << " | geometry_relative=["
+                << diagnostic.relative_eigenvalues.transpose()
+                << "]"
+                << " | geometry_min_relative="
+                << diagnostic.relative_eigenvalues.minCoeff()
+                << " | geometry_condition="
+                << diagnostic.condition_number
+                << " | weakest_normalized=["
+                << diagnostic.weakest_direction_normalized.transpose()
+                << "]"
+                << " | total_relative=["
+                << diagnostic.total_relative_eigenvalues.transpose()
+                << "]"
+                << " | total_condition="
+                << diagnostic.total_condition_number
+                << std::endl;
+
+            Eigen::Matrix3d delta_R =
+                Eigen::Matrix3d::Identity();
+
+            if (delta_rotation_rad >
+                1.0e-12)
+            {
+                delta_R =
+                    Eigen::AngleAxisd(
+                        delta_rotation_rad,
+                        delta_rotation /
+                            delta_rotation_rad)
+                        .toRotationMatrix();
+            }
+
+            T_target_source.linear() =
+                delta_R *
+                T_target_source.rotation();
+
+            T_target_source.translation() +=
+                delta_translation;
+
+            if (!T_target_source.matrix().allFinite())
+            {
+                return false;
+            }
+
+            ++iterations_completed;
+            solved_at_least_once = true;
+
+            const bool increment_converged =
+                delta_translation_norm <=
+                    increment_epsilon &&
+                delta_rotation_rad <=
+                    increment_epsilon;
+
+            const bool fitness_converged =
+                std::isfinite(previous_raw_rmse) &&
+                std::isfinite(diagnostic.raw_rmse) &&
+                std::abs(
+                    previous_raw_rmse -
+                    diagnostic.raw_rmse) <=
+                    config.euclidean_fitness_epsilon;
+
+            previous_raw_rmse =
+                diagnostic.raw_rmse;
+
+            if (increment_converged)
+            {
+                stopped_by_increment = true;
+                break;
+            }
+
+            if (fitness_converged)
+            {
+                stopped_by_fitness = true;
+                break;
+            }
+        }
+
+        return solved_at_least_once &&
+               T_target_source.matrix().allFinite();
     }
 
     LoopVerificationResult RunHypothesis(
@@ -1131,6 +2115,8 @@ namespace
         const PreparedTarget &target,
         const Eigen::Isometry3d &initial_guess,
         LoopVerifierHypothesis hypothesis,
+        bool enable_trusted_seed_prior,
+        bool enable_trusted_reverse_sequence_gate,
         const LoopVerifierConfig &config)
     {
         LoopVerificationResult result;
@@ -1142,81 +2128,47 @@ namespace
         result.target_points =
             target.cloud ? target.cloud->size() : 0;
 
+        const std::size_t minimum_source_cloud_points =
+            enable_trusted_reverse_sequence_gate
+                ? config.trusted_reverse_min_cloud_points
+                : config.min_cloud_points;
+
         if (!source.cloud ||
             !target.cloud ||
             !target.kdtree ||
-            source.cloud->size() < config.min_cloud_points ||
+            source.cloud->size() < minimum_source_cloud_points ||
             target.cloud->size() < config.min_cloud_points ||
             !initial_guess.matrix().allFinite())
         {
             return result;
         }
 
-        pcl::IterativeClosestPoint<
-            pcl::PointXYZ,
-            pcl::PointXYZ>
-            icp;
+        std::size_t iterations_completed = 0;
+        bool stopped_by_increment = false;
+        bool stopped_by_fitness = false;
 
-        icp.setInputSource(source.cloud);
-        icp.setInputTarget(target.cloud);
-
-        icp.setSearchMethodTarget(
-            target.kdtree,
-            true);
-
-        icp.setMaximumIterations(
-            static_cast<int>(
-                config.max_iterations));
-
-        icp.setMaxCorrespondenceDistance(
-            config.max_correspondence_distance);
-
-        icp.setTransformationEpsilon(
-            config.transformation_epsilon);
-
-        icp.setEuclideanFitnessEpsilon(
-            config.euclidean_fitness_epsilon);
-
-        pcl::PointCloud<pcl::PointXYZ> aligned;
-
-        icp.align(
-            aligned,
-            initial_guess
-                .matrix()
-                .cast<float>());
+        const bool solver_ok =
+            RunPointToPlaneGaussNewtonV2(
+                source,
+                target,
+                initial_guess,
+                enable_trusted_seed_prior,
+                config,
+                result.T_target_source,
+                iterations_completed,
+                stopped_by_increment,
+                stopped_by_fitness);
 
         result.converged =
-            icp.hasConverged();
+            solver_ok;
 
-        if (!result.converged)
-        {
-            return result;
-        }
-
-        const Eigen::Matrix4d final_matrix =
-            icp.getFinalTransformation()
-                .cast<double>();
-
-        if (!final_matrix.allFinite())
-        {
-            return result;
-        }
-
-        result.T_target_source =
-            Eigen::Isometry3d::Identity();
-
-        result.T_target_source.matrix() =
-            final_matrix;
-
-        if (!result.T_target_source
+        if (!solver_ok ||
+            !result.T_target_source
                  .matrix()
                  .allFinite())
         {
             return result;
         }
-
-        result.fitness_score =
-            icp.getFitnessScore();
 
         const bool metrics_ok =
             EvaluateAlignment(
@@ -1234,6 +2186,14 @@ namespace
             return result;
         }
 
+        // Keep the legacy fitness_score field meaningful for diagnostics.
+        // Final acceptance still uses the unchanged explicit point-to-point
+        // overlap/RMSE measurement below.
+        result.fitness_score =
+            std::isfinite(result.rmse)
+                ? result.rmse * result.rmse
+                : std::numeric_limits<double>::infinity();
+
         result.correction_translation =
             (result.T_target_source.translation() -
              initial_guess.translation())
@@ -1244,10 +2204,56 @@ namespace
                 initial_guess,
                 result.T_target_source);
 
+        const Eigen::Vector3d initial_t =
+            initial_guess.translation();
+
+        const Eigen::Vector3d final_t =
+            result.T_target_source.translation();
+
+        const Eigen::Vector3d delta_t =
+            final_t - initial_t;
+
+        // Keep the old grep token so existing log scripts still work, but
+        // identify the new pose solver explicitly.
+        std::cout
+            << "LOOP_ICP_POSE_DEBUG"
+            << " | solver=POINT_TO_PLANE_V2_DEGENERACY_GROUND"
+            << " | hypothesis="
+            << static_cast<int>(hypothesis)
+            << " | initial_t=["
+            << initial_t.transpose()
+            << "]"
+            << " | initial_norm="
+            << initial_t.norm()
+            << " m"
+            << " | final_t=["
+            << final_t.transpose()
+            << "]"
+            << " | final_norm="
+            << final_t.norm()
+            << " m"
+            << " | delta_t=["
+            << delta_t.transpose()
+            << "]"
+            << " | delta_norm="
+            << delta_t.norm()
+            << " m"
+            << " | correction_rotation="
+            << result.correction_rotation_deg
+            << " deg"
+            << " | iterations="
+            << iterations_completed
+            << " | stop="
+            << (stopped_by_increment
+                    ? "INCREMENT"
+                    : (stopped_by_fitness
+                           ? "FITNESS"
+                           : "MAX_ITER_OR_OTHER"))
+            << std::endl;
+
         result.success = true;
 
-        // Acceptance logic intentionally unchanged.
-        result.accepted =
+        const bool standard_geometry_accepted =
             result.inliers >= config.min_inliers &&
             result.overlap_ratio >= config.min_overlap_ratio &&
             std::isfinite(result.rmse) &&
@@ -1259,10 +2265,52 @@ namespace
             result.correction_rotation_deg <=
                 config.max_correction_rotation_deg;
 
-        // ------------------------------------------------------------------------
-        // Diagnostic-only shadow point-to-plane Hessian.
-        // This does NOT modify result.accepted or the loop measurement.
-        // ------------------------------------------------------------------------
+        // V2.1: confirmed reverse traversal has intrinsically asymmetric
+        // single-frame visibility.  Relax ONLY point-count / overlap support,
+        // while making RMSE and pose-correction limits much tighter.
+        //
+        // This flag is supplied only for CANDIDATE_REVERSE_SEQUENCE after the
+        // RAW-SC temporal sequence has been confirmed in fr_loop_backend.cpp.
+        const bool trusted_reverse_geometry_accepted =
+            enable_trusted_reverse_sequence_gate &&
+            result.inliers >= config.trusted_reverse_min_inliers &&
+            result.overlap_ratio >=
+                config.trusted_reverse_min_overlap_ratio &&
+            std::isfinite(result.rmse) &&
+            result.rmse <=
+                config.trusted_reverse_max_rmse &&
+            std::isfinite(result.correction_translation) &&
+            result.correction_translation <=
+                config.trusted_reverse_max_correction_translation &&
+            std::isfinite(result.correction_rotation_deg) &&
+            result.correction_rotation_deg <=
+                config.trusted_reverse_max_correction_rotation_deg;
+
+        result.accepted =
+            standard_geometry_accepted ||
+            trusted_reverse_geometry_accepted;
+
+        if (enable_trusted_reverse_sequence_gate)
+        {
+            std::cout
+                << "LOOP_REVERSE_SEQUENCE_GATE_V2_1"
+                << " | source_points=" << result.source_points
+                << " | target_points=" << result.target_points
+                << " | inliers=" << result.inliers
+                << " | overlap=" << result.overlap_ratio
+                << " | rmse=" << result.rmse << " m"
+                << " | correction_translation="
+                << result.correction_translation << " m"
+                << " | correction_rotation="
+                << result.correction_rotation_deg << " deg"
+                << " | standard="
+                << (standard_geometry_accepted ? "PASS" : "FAIL")
+                << " | trusted_reverse="
+                << (trusted_reverse_geometry_accepted ? "PASS" : "FAIL")
+                << std::endl;
+        }
+
+        // Final-pose observability diagnostic remains diagnostic-only.
         LoopShadowHessianDiagnostic shadow_diagnostic;
 
         BuildLoopShadowHessianDiagnostic(
@@ -1400,6 +2448,41 @@ LoopVerifier::LoopVerifier(
         config_.min_cloud_points = 300;
     }
 
+    if (config_.trusted_reverse_min_cloud_points == 0)
+    {
+        config_.trusted_reverse_min_cloud_points = 150;
+    }
+
+    if (config_.trusted_reverse_min_inliers == 0)
+    {
+        config_.trusted_reverse_min_inliers = 100;
+    }
+
+    if (!std::isfinite(config_.trusted_reverse_min_overlap_ratio) ||
+        config_.trusted_reverse_min_overlap_ratio <= 0.0 ||
+        config_.trusted_reverse_min_overlap_ratio > 1.0)
+    {
+        config_.trusted_reverse_min_overlap_ratio = 0.35;
+    }
+
+    if (!std::isfinite(config_.trusted_reverse_max_rmse) ||
+        config_.trusted_reverse_max_rmse <= 0.0)
+    {
+        config_.trusted_reverse_max_rmse = 0.50;
+    }
+
+    if (!std::isfinite(config_.trusted_reverse_max_correction_translation) ||
+        config_.trusted_reverse_max_correction_translation <= 0.0)
+    {
+        config_.trusted_reverse_max_correction_translation = 1.50;
+    }
+
+    if (!std::isfinite(config_.trusted_reverse_max_correction_rotation_deg) ||
+        config_.trusted_reverse_max_correction_rotation_deg <= 0.0)
+    {
+        config_.trusted_reverse_max_correction_rotation_deg = 15.0;
+    }
+
     if (!std::isfinite(config_.prescore_inlier_distance) ||
         config_.prescore_inlier_distance <= 0.0)
     {
@@ -1425,10 +2508,115 @@ LoopVerifier::LoopVerifier(
         config_.max_correction_rotation_deg = 45.0;
     }
 
+    if (!std::isfinite(config_.point_to_plane_max_residual) ||
+        config_.point_to_plane_max_residual <= 0.0)
+    {
+        config_.point_to_plane_max_residual = 1.00;
+    }
+
+    if (!std::isfinite(config_.point_to_plane_huber_delta) ||
+        config_.point_to_plane_huber_delta <= 0.0)
+    {
+        config_.point_to_plane_huber_delta = 0.10;
+    }
+
+    if (!std::isfinite(config_.degeneracy_hard_relative_threshold) ||
+        config_.degeneracy_hard_relative_threshold <= 0.0 ||
+        config_.degeneracy_hard_relative_threshold >= 1.0)
+    {
+        config_.degeneracy_hard_relative_threshold = 0.01;
+    }
+
+    if (!std::isfinite(config_.degeneracy_weak_relative_threshold) ||
+        config_.degeneracy_weak_relative_threshold <=
+            config_.degeneracy_hard_relative_threshold ||
+        config_.degeneracy_weak_relative_threshold >= 1.0)
+    {
+        config_.degeneracy_weak_relative_threshold = 0.03;
+    }
+
+    if (!std::isfinite(config_.weak_direction_prior_target_relative) ||
+        config_.weak_direction_prior_target_relative <= 0.0 ||
+        config_.weak_direction_prior_target_relative >= 1.0)
+    {
+        config_.weak_direction_prior_target_relative = 0.05;
+    }
+
+    if (!std::isfinite(config_.weak_direction_prior_gain) ||
+        config_.weak_direction_prior_gain < 0.0)
+    {
+        config_.weak_direction_prior_gain = 1.0;
+    }
+
+    if (!std::isfinite(config_.ground_weight) ||
+        config_.ground_weight < 0.0)
+    {
+        config_.ground_weight = 4.0;
+    }
+
+    if (!std::isfinite(config_.ground_normal_max_tilt_deg) ||
+        config_.ground_normal_max_tilt_deg <= 0.0 ||
+        config_.ground_normal_max_tilt_deg >= 89.0)
+    {
+        config_.ground_normal_max_tilt_deg = 25.0;
+    }
+
+    if (!std::isfinite(config_.ground_min_below_sensor_m) ||
+        config_.ground_min_below_sensor_m < 0.0)
+    {
+        config_.ground_min_below_sensor_m = 0.30;
+    }
+
+    if (!std::isfinite(config_.ground_max_residual) ||
+        config_.ground_max_residual <= 0.0)
+    {
+        config_.ground_max_residual = 0.25;
+    }
+
+    if (!std::isfinite(config_.ground_huber_delta) ||
+        config_.ground_huber_delta <= 0.0)
+    {
+        config_.ground_huber_delta = 0.10;
+    }
+
+    if (config_.min_ground_correspondences == 0)
+    {
+        config_.min_ground_correspondences = 30;
+    }
+
     if (config_.max_cached_targets == 0)
     {
         config_.max_cached_targets = 1;
     }
+
+    std::cout
+        << "LoopVerifier Point-to-Plane V2"
+        << " | normalized_coordinates=[Lrx Lry Lrz tx ty tz]"
+        << " | hard_rel=" << config_.degeneracy_hard_relative_threshold
+        << " | weak_rel=" << config_.degeneracy_weak_relative_threshold
+        << " | weak_seed_prior="
+        << (config_.enable_weak_direction_seed_prior ? "ON" : "OFF")
+        << " | prior_target_rel="
+        << config_.weak_direction_prior_target_relative
+        << " | ground="
+        << (config_.enable_ground_constraint ? "ON" : "OFF")
+        << " | ground_weight=" << config_.ground_weight
+        << " | ground_dofs=ROLL_PITCH_Z"
+        << " | ground_source=LOOP_LOCAL_PLANE_INFERENCE"
+        << " | trusted_reverse_sequence_gate=ON"
+        << " | reverse_min_source_points="
+        << config_.trusted_reverse_min_cloud_points
+        << " | reverse_min_inliers="
+        << config_.trusted_reverse_min_inliers
+        << " | reverse_min_overlap="
+        << config_.trusted_reverse_min_overlap_ratio
+        << " | reverse_max_rmse="
+        << config_.trusted_reverse_max_rmse
+        << " | reverse_max_corr_t="
+        << config_.trusted_reverse_max_correction_translation
+        << " | reverse_max_corr_R="
+        << config_.trusted_reverse_max_correction_rotation_deg
+        << std::endl;
 }
 
 LoopVerifier::~LoopVerifier() = default;
@@ -1437,6 +2625,21 @@ bool LoopVerifier::ScoreInitialGuess(
     const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
     const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
     const Eigen::Isometry3d &initial_guess,
+    LoopVerifierInitialGuessScore &score) const
+{
+    return ScoreInitialGuess(
+        source_current,
+        target_historical,
+        initial_guess,
+        false,
+        score);
+}
+
+bool LoopVerifier::ScoreInitialGuess(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+    const Eigen::Isometry3d &initial_guess,
+    bool enable_trusted_reverse_sequence_gate,
     LoopVerifierInitialGuessScore &score) const
 {
     score = LoopVerifierInitialGuessScore();
@@ -1471,8 +2674,13 @@ bool LoopVerifier::ScoreInitialGuess(
                 source_xyz,
                 config_.voxel_leaf_size);
 
+        const std::size_t minimum_source_cloud_points =
+            enable_trusted_reverse_sequence_gate
+                ? config_.trusted_reverse_min_cloud_points
+                : config_.min_cloud_points;
+
         if (!source_filtered ||
-            source_filtered->size() < config_.min_cloud_points)
+            source_filtered->size() < minimum_source_cloud_points)
         {
             return false;
         }
@@ -1605,6 +2813,42 @@ bool LoopVerifier::Verify(
     double scan_context_yaw_shift_deg,
     LoopVerificationResult &result) const
 {
+    return Verify(
+        source_current,
+        target_historical,
+        graph_initial_guess,
+        scan_context_yaw_shift_deg,
+        false,
+        result);
+}
+
+bool LoopVerifier::Verify(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+    const Eigen::Isometry3d &graph_initial_guess,
+    double scan_context_yaw_shift_deg,
+    bool enable_trusted_seed_prior,
+    LoopVerificationResult &result) const
+{
+    return Verify(
+        source_current,
+        target_historical,
+        graph_initial_guess,
+        scan_context_yaw_shift_deg,
+        enable_trusted_seed_prior,
+        false,
+        result);
+}
+
+bool LoopVerifier::Verify(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &source_current,
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &target_historical,
+    const Eigen::Isometry3d &graph_initial_guess,
+    double scan_context_yaw_shift_deg,
+    bool enable_trusted_seed_prior,
+    bool enable_trusted_reverse_sequence_gate,
+    LoopVerificationResult &result) const
+{
     result = LoopVerificationResult();
 
     if (!source_current ||
@@ -1637,8 +2881,13 @@ bool LoopVerifier::Verify(
                 source_xyz,
                 config_.voxel_leaf_size);
 
+        const std::size_t minimum_source_cloud_points =
+            enable_trusted_reverse_sequence_gate
+                ? config_.trusted_reverse_min_cloud_points
+                : config_.min_cloud_points;
+
         if (!source_filtered ||
-            source_filtered->size() < config_.min_cloud_points)
+            source_filtered->size() < minimum_source_cloud_points)
         {
             return false;
         }
@@ -1784,6 +3033,8 @@ bool LoopVerifier::Verify(
                 prepared_target,
                 entry.second,
                 entry.first,
+                enable_trusted_seed_prior,
+                enable_trusted_reverse_sequence_gate,
                 config_);
 
         if (IsBetterResult(candidate, best))

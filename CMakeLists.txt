@@ -133,6 +133,15 @@ target_sources(fr_slam_node PRIVATE
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_pose_graph_optimizer.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_segmenter.cpp
                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_ground_input_bridge.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_lidar_frontend.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/fr_lidar_frontend_ground.cpp
+
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_backend_worker.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_pose_graph_backend.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_global_map_backend.cpp
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/fr_post_pgo_refinement.cpp
+
+                                            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/fr_loop_backend.cpp
                                             )
 
 target_include_directories(fr_slam_node PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

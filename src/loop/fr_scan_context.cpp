@@ -7,8 +7,8 @@
 namespace
 {
 
-constexpr double kPi =
-    3.14159265358979323846;
+    constexpr double kPi =
+        3.14159265358979323846;
 
 } // namespace
 
@@ -35,7 +35,7 @@ ScanContext::ScanContext(
     if (!std::isfinite(config_.max_radius) ||
         config_.max_radius <= config_.min_radius)
     {
-        config_.max_radius = 80.0;
+        config_.max_radius = 30.0;
     }
 
     if (config_.min_valid_points == 0)
@@ -43,17 +43,55 @@ ScanContext::ScanContext(
         config_.min_valid_points = 100;
     }
 
+    if (config_.min_occupied_sectors == 0)
+    {
+        config_.min_occupied_sectors = 6;
+    }
+
+    config_.min_occupied_sectors =
+        std::min(
+            config_.min_occupied_sectors,
+            config_.num_sectors);
+
+    if (config_.min_occupied_cells == 0)
+    {
+        config_.min_occupied_cells = 12;
+    }
+
+    const std::size_t maximum_cells =
+        config_.num_rings *
+        config_.num_sectors;
+
+    config_.min_occupied_cells =
+        std::min(
+            config_.min_occupied_cells,
+            maximum_cells);
+
+    if (!std::isfinite(config_.min_sector_coverage_ratio) ||
+        config_.min_sector_coverage_ratio < 0.0 ||
+        config_.min_sector_coverage_ratio > 1.0)
+    {
+        config_.min_sector_coverage_ratio = 0.20;
+    }
+
+    if (!std::isfinite(config_.coverage_penalty_weight) ||
+        config_.coverage_penalty_weight < 0.0 ||
+        config_.coverage_penalty_weight > 1.0)
+    {
+        config_.coverage_penalty_weight = 0.50;
+    }
+
     if (!std::isfinite(
             config_.occupied_height_epsilon) ||
         config_.occupied_height_epsilon <= 0.0)
     {
-        config_.occupied_height_epsilon = 1.0;
+        config_.occupied_height_epsilon = 1.0e-3;
     }
 }
 
 ScanContextDescriptor
 ScanContext::MakeDescriptor(
-    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_S) const
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_keyframe) const
 {
     ScanContextDescriptor descriptor;
 
@@ -64,8 +102,8 @@ ScanContext::MakeDescriptor(
             static_cast<Eigen::Index>(
                 config_.num_sectors));
 
-    if (!cloud_S ||
-        cloud_S->empty())
+    if (!cloud_keyframe ||
+        cloud_keyframe->empty())
     {
         return descriptor;
     }
@@ -87,7 +125,7 @@ ScanContext::MakeDescriptor(
     std::size_t valid_points = 0;
 
     for (const LIDAR_POINT &point :
-         cloud_S->points)
+         cloud_keyframe->points)
     {
         if (!std::isfinite(point.x) ||
             !std::isfinite(point.y) ||
@@ -153,7 +191,7 @@ ScanContext::MakeDescriptor(
         config_.min_radius;
 
     for (const LIDAR_POINT &point :
-         cloud_S->points)
+         cloud_keyframe->points)
     {
         if (!std::isfinite(point.x) ||
             !std::isfinite(point.y) ||
@@ -252,8 +290,36 @@ ScanContext::MakeDescriptor(
         }
     }
 
+    for (Eigen::Index sector = 0;
+         sector < descriptor.matrix.cols();
+         ++sector)
+    {
+        bool sector_occupied = false;
+
+        for (Eigen::Index ring = 0;
+             ring < descriptor.matrix.rows();
+             ++ring)
+        {
+            if (descriptor.matrix(ring, sector) <= 0.0f)
+            {
+                continue;
+            }
+
+            sector_occupied = true;
+            ++descriptor.occupied_cells;
+        }
+
+        if (sector_occupied)
+        {
+            ++descriptor.occupied_sectors;
+        }
+    }
+
     descriptor.valid =
-        descriptor.matrix.maxCoeff() > 0.0f;
+        descriptor.occupied_sectors >=
+            config_.min_occupied_sectors &&
+        descriptor.occupied_cells >=
+            config_.min_occupied_cells;
 
     return descriptor;
 }
@@ -352,8 +418,17 @@ ScanContextMatch ScanContext::Compare(
     //
     //     query.col((sector + shift) % num_sectors)
     //
-    // The score is the average cosine similarity over sector pairs that are
-    // non-empty in BOTH descriptors.
+    // V3 starts from the average cosine similarity over sector pairs that are
+    // non-empty in BOTH descriptors, then applies true intersection-over-
+    // union (IoU/Jaccard) coverage penalties for occupied sectors and cells.
+    //
+    // V1 ignored unmatched occupancy entirely.  V2 used intersection / max
+    // occupancy, which still overestimated support when both descriptors had
+    // many different occupied bins.  V3 uses:
+    //
+    //     intersection / union
+    //
+    // so unmatched geometry is explicitly penalized.
     // ------------------------------------------------------------------------
     for (std::size_t shift = 0;
          shift < config_.num_sectors;
@@ -361,6 +436,7 @@ ScanContextMatch ScanContext::Compare(
     {
         double similarity_sum = 0.0;
         std::size_t compared_sectors = 0;
+        std::size_t common_occupied_cells = 0;
 
         for (std::size_t sector = 0;
              sector < config_.num_sectors;
@@ -380,6 +456,17 @@ ScanContextMatch ScanContext::Compare(
                     static_cast<Eigen::Index>(
                         query_sector_index));
 
+            for (Eigen::Index ring = 0;
+                 ring < reference_sector.size();
+                 ++ring)
+            {
+                if (reference_sector(ring) > 0.0f &&
+                    query_sector(ring) > 0.0f)
+                {
+                    ++common_occupied_cells;
+                }
+            }
+
             double sector_similarity = 0.0;
 
             if (!SectorCosineSimilarity(
@@ -396,8 +483,8 @@ ScanContextMatch ScanContext::Compare(
             ++compared_sectors;
         }
 
-        // A shift supported by too little common angular coverage is not a
-        // trustworthy Scan Context comparison.
+        // A shift supported by too little absolute or relative angular
+        // coverage is not a trustworthy Scan Context comparison.
         const std::size_t minimum_compared_sectors =
             std::max<std::size_t>(
                 3,
@@ -409,10 +496,98 @@ ScanContextMatch ScanContext::Compare(
             continue;
         }
 
-        const double similarity =
+        // --------------------------------------------------------------------
+        // V3 occupancy coverage:
+        //
+        // Use true intersection-over-union (IoU/Jaccard) rather than
+        // intersection / max(count_A, count_B).
+        //
+        // For sectors:
+        //
+        //     intersection = compared_sectors
+        //
+        // because SectorCosineSimilarity() succeeds only when BOTH shifted
+        // sector columns are occupied.
+        //
+        // For cells:
+        //
+        //     intersection = common_occupied_cells
+        //
+        // The total occupied counts of each descriptor are invariant under
+        // the circular sector shift, therefore:
+        //
+        //     union = count_A + count_B - intersection
+        // --------------------------------------------------------------------
+        const std::size_t union_occupied_sectors =
+            reference.occupied_sectors +
+            query.occupied_sectors -
+            compared_sectors;
+
+        const std::size_t union_occupied_cells =
+            reference.occupied_cells +
+            query.occupied_cells -
+            common_occupied_cells;
+
+        if (union_occupied_sectors == 0 ||
+            union_occupied_cells == 0)
+        {
+            continue;
+        }
+
+        const double sector_coverage_ratio =
+            std::min(
+                1.0,
+                static_cast<double>(
+                    compared_sectors) /
+                    static_cast<double>(
+                        union_occupied_sectors));
+
+        if (!std::isfinite(sector_coverage_ratio) ||
+            sector_coverage_ratio <
+                config_.min_sector_coverage_ratio)
+        {
+            continue;
+        }
+
+        const double cell_coverage_ratio =
+            std::min(
+                1.0,
+                static_cast<double>(
+                    common_occupied_cells) /
+                    static_cast<double>(
+                        union_occupied_cells));
+
+        if (!std::isfinite(cell_coverage_ratio))
+        {
+            continue;
+        }
+
+        const double raw_cosine_similarity =
             similarity_sum /
             static_cast<double>(
                 compared_sectors);
+
+        // Geometric mean requires both angular and radial-bin IoU support.
+        // A high value in only one metric cannot hide poor overlap in the
+        // other.
+        const double coverage_quality =
+            std::sqrt(
+                std::max(
+                    0.0,
+                    sector_coverage_ratio *
+                        cell_coverage_ratio));
+
+        const double missing_coverage_penalty =
+            config_.coverage_penalty_weight *
+            (1.0 - coverage_quality);
+
+        const double similarity =
+            std::max(
+                0.0,
+                std::min(
+                    1.0,
+                    raw_cosine_similarity -
+                        missing_coverage_penalty));
 
         const double distance =
             1.0 -
@@ -432,6 +607,14 @@ ScanContextMatch ScanContext::Compare(
                 distance;
             best_match.similarity =
                 similarity;
+            best_match.raw_cosine_similarity =
+                raw_cosine_similarity;
+            best_match.sector_coverage_ratio =
+                sector_coverage_ratio;
+            best_match.cell_coverage_ratio =
+                cell_coverage_ratio;
+            best_match.compared_sectors =
+                compared_sectors;
             best_match.sector_shift =
                 shift;
             best_match.yaw_shift_deg =

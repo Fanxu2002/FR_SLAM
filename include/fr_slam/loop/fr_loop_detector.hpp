@@ -37,6 +37,11 @@ struct LoopCandidate
     // Scan Context similarity: larger is better.
     double scan_context_similarity = 0.0;
 
+    double scan_context_raw_cosine_similarity = 0.0;
+    double scan_context_sector_coverage_ratio = 0.0;
+    double scan_context_cell_coverage_ratio = 0.0;
+    std::size_t scan_context_compared_sectors = 0;
+
     std::size_t sector_shift = 0;
     double yaw_shift_deg = 0.0;
 };
@@ -54,15 +59,31 @@ struct LoopDetectorConfig
     double min_time_separation_sec = 10.0;
 
     // Scan Context candidate gate.
-    double max_scan_context_distance = 0.30;
+    // V2 distance includes an explicit sparse-coverage penalty.  Candidate
+    // retrieval is intentionally a little broader because LoopVerifier still
+    // performs the geometric acceptance test.
+    double max_scan_context_distance = 0.40;
 
     // Pose distance remains optional because loop closure must survive drift.
     bool use_pose_distance_gate = false;
     double max_candidate_distance = 5.0;
 
-    std::size_t max_candidates = 5;
+    std::size_t max_candidates = 10;
 
     ScanContextConfig scan_context;
+};
+
+struct LoopDetectionDiagnostics
+{
+    std::size_t database_entries = 0;
+    std::size_t separation_eligible = 0;
+    std::size_t valid_scan_context_matches = 0;
+    std::size_t accepted_candidates = 0;
+
+    bool has_best_scan_context_match = false;
+    LoopCandidate best_scan_context_match;
+
+    double max_scan_context_distance = 0.0;
 };
 
 // ============================================================================
@@ -96,8 +117,11 @@ public:
 
     std::size_t DescriptorCount() const;
 
+    const LoopDetectorConfig &GetConfig() const;
+
     std::vector<LoopCandidate> Detect(
-        std::size_t current_keyframe_id) const;
+        std::size_t current_keyframe_id,
+        LoopDetectionDiagnostics *diagnostics = nullptr) const;
 
     void Clear();
 
