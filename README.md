@@ -1,3 +1,5 @@
+
+
 # FR-SLAM
 
 FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR odometry, ground/wall structural constraints, BTC loop closure, g2o pose graph optimization, and global mapping.
@@ -52,6 +54,10 @@ Each save creates a separate timestamped directory to avoid overwriting previous
 ## Demo
 
 Full demo:
+
+
+https://github.com/user-attachments/assets/b335c305-ebd7-4d81-80b5-f00bc73c70aa
+
 
 https://github.com/Fanxu2002/FR_SLAM/releases/download/fr_slam_pre_esikf_20260912/fr_slam_demo.mp4
 
