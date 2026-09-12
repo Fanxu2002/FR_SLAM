@@ -88,6 +88,18 @@ ros2 launch fr_slam lo.launch.py \
 
 ---
 
+## 保存地图与轨迹
+
+运行 SLAM 后，可通过 ROS 2 service 保存当前地图与轨迹：
+
+```bash
+ros2 service call /save_slam_maps std_srvs/srv/Trigger "{}"
+```
+
+每次保存都会生成独立的时间戳目录，避免覆盖之前的实验结果。
+
+---
+
 ## BTC Loop Closure
 
 BTC configuration files are stored in:
@@ -112,21 +124,11 @@ voxel_size: 1.5
 
 ---
 
-## 保存地图与轨迹
-
-运行 SLAM 后，可通过 ROS 2 service 保存当前地图与轨迹：
-
-```bash
-ros2 service call /save_slam_maps std_srvs/srv/Trigger "{}"
-```
-
-每次保存都会生成独立的时间戳目录，避免覆盖之前的实验结果。
-
----
-
 ## Demo
 
 [Watch the FR-SLAM running demo](https://github.com/Fanxu2002/FR_SLAM/releases/download/fr_slam_pre_esikf_20260912/fr_slam_demo.mp4)
+
+The demo shows the current pre-ESIKF FR-SLAM pipeline, including LiDAR odometry, structural plane processing, BTC loop closure, pose graph optimization, and mapping.
 
 ---
 
@@ -143,6 +145,12 @@ Current ESIKF development branch:
 ```text
 feature/esikf
 ```
+
+---
+
+## Repository
+
+https://github.com/Fanxu2002/FR_SLAM
 
 ---
 
