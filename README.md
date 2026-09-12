@@ -1,49 +1,6 @@
 # FR-SLAM
 
-FR-SLAM is a ROS 2 LiDAR SLAM system for indoor and outdoor robotic mapping.
-
-The current system includes:
-
-- Livox / Hesai LiDAR support
-- IMU integration and LiDAR deskew
-- Scan-to-local-map LiDAR odometry
-- Ground plane detection
-- Persistent wall association
-- BTC loop closure
-- g2o pose graph optimization
-- Incremental global mapping
-
-A tightly coupled ESIKF frontend is currently under development.
-
----
-
-## Platform
-
-Tested on:
-
-- Ubuntu 22.04
-- ROS 2 Humble
-- PCL 1.12
-- Eigen3
-- OpenCV
-- Ceres Solver
-
----
-
-## Clone
-
-```bash
-git clone --recursive git@github.com:Fanxu2002/FR_SLAM.git
-cd FR_SLAM
-```
-
-If the repository has already been cloned:
-
-```bash
-git submodule update --init --recursive
-```
-
----
+FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR odometry, ground/wall structural constraints, BTC loop closure, g2o pose graph optimization, and global mapping.
 
 ## Build
 
@@ -59,8 +16,6 @@ colcon build \
 
 source ~/ros2_ws/install/setup.bash
 ```
-
----
 
 ## Run
 
@@ -86,74 +41,38 @@ ros2 launch fr_slam lo.launch.py \
   backend_loop_closure_enable:=true
 ```
 
----
-
-## 保存地图与轨迹
-
-运行 SLAM 后，可通过 ROS 2 service 保存当前地图与轨迹：
+## Save Map and Trajectory
 
 ```bash
 ros2 service call /save_slam_maps std_srvs/srv/Trigger "{}"
 ```
 
-每次保存都会生成独立的时间戳目录，避免覆盖之前的实验结果。
-
----
-
-## BTC Loop Closure
-
-BTC configuration files are stored in:
-
-```text
-config/btc/
-├── config_indoor.yaml
-└── config_outdoor.yaml
-```
-
-The official BTC implementation is included as a Git submodule:
-
-```text
-third_party/upstream/btc_descriptor
-```
-
-The current outdoor BTC profile uses:
-
-```yaml
-voxel_size: 1.5
-```
-
----
+Each save creates a separate timestamped directory to avoid overwriting previous results.
 
 ## Demo
 
-[Watch the FR-SLAM running demo](https://github.com/Fanxu2002/FR_SLAM/releases/download/fr_slam_pre_esikf_20260912/fr_slam_demo.mp4)
+Full demo:
 
-The demo shows the current pre-ESIKF FR-SLAM pipeline, including LiDAR odometry, structural plane processing, BTC loop closure, pose graph optimization, and mapping.
+https://github.com/Fanxu2002/FR_SLAM/releases/download/fr_slam_pre_esikf_20260912/fr_slam_demo.mp4
 
----
+<!--
+After uploading fr_slam_demo_readme.mp4 to GitHub as a user attachment,
+replace the line below with the generated user-attachments URL to show
+the video directly in the README.
+
+https://github.com/user-attachments/assets/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+-->
 
 ## Version
 
-Stable pre-ESIKF baseline:
+Stable baseline:
 
 ```text
 fr_slam_pre_esikf_20260912
 ```
 
-Current ESIKF development branch:
+Current development branch:
 
 ```text
 feature/esikf
 ```
-
----
-
-## Repository
-
-https://github.com/Fanxu2002/FR_SLAM
-
----
-
-## License
-
-For research use.
