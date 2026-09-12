@@ -49,7 +49,7 @@ colcon build \
 
 source install/setup.bash
 
-ros2 launch fr_slam fr_slam.launch.py
+ros2 launch fr_slam lo.launch.py
 ```
 
 ## 保存地图与轨迹

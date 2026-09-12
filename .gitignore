@@ -25,3 +25,14 @@ cmake_install.cmake
 .DS_Store
 output/
 *.pcd
+
+# FR-SLAM local debug / backup artifacts
+.*_backup_*/
+__pycache__/
+*.pyc
+
+# Local analysis outputs
+v15_*.txt
+wall_assoc_*_summary.txt
+trajectory_visualization.py
+second

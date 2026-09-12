@@ -7,58 +7,122 @@ fr_slam:
     lidar_topic: "/lidar_points"
     imu_topic: "/fixposition/poiimu"
 
-    # Verified from existing bags:
+    # 已从现有 rosbag 中确认： / Verified from existing bags:
     #   /lidar_points       sensor_msgs/msg/PointCloud2
     #   /fixposition/poiimu sensor_msgs/msg/Imu
 
     # ============================================================
-    # Frames
+    # 坐标系 / Frames
     # ============================================================
     world_frame: "world"
     odom_frame: "odom"
 
     # ============================================================
-    # Realtime / synchronization
+    # 实时处理 / 时间同步 / Realtime / synchronization
     # ============================================================
     max_lidar_queue_size: 3
     imu_qos_depth: 1000
     imu_initialization_sample_count: 200
     imu_history_duration: 0.5
 
-    # A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
-    # Only waits/lag at or above this threshold are emitted as WARN.
+    # LiDAR→IMU 等待几毫秒属于正常的异步到达现象。 / A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
+    # 只有等待/滞后达到或超过该阈值时才输出 WARN。 / Only waits/lag at or above this threshold are emitted as WARN.
     imu_wait_warning_threshold_ms: 20.0
 
     # ============================================================
-    # LocalMap
+    # 局部地图 LocalMap / LocalMap
     # ============================================================
     local_map_max_frames: 10
     local_map_voxel_leaf_size: 0.30
 
     # ============================================================
-    # Scan Context V3 / loop candidate retrieval
+    # Ground V1.4：冻结世界平面的横滚/俯仰/Z 方向锚定 / Ground V1.4: frozen world-plane roll/pitch/Z anchor
     # ============================================================
-    # These values are now read by fr_slam_node.cpp and passed explicitly
-    # into LoopDetectorConfig.  They are no longer dead YAML entries.
-    scan_context_num_rings: 20
-    scan_context_num_sectors: 60
-    scan_context_min_radius: 1.0
-    scan_context_max_radius: 30.0
-    scan_context_min_valid_points: 100
-    scan_context_min_occupied_sectors: 6
-    scan_context_min_occupied_cells: 12
-    scan_context_min_sector_coverage_ratio: 0.20
-    scan_context_coverage_penalty_weight: 0.50
-    scan_context_occupied_height_epsilon: 0.001
+    # 在坡道、多层地面或无法用单一固定支撑平面描述的地形中，请使用 "off"。 / Use "off" for ramps, multi-level floors, or terrain where one fixed
+    # 此时固定支撑平面不再是有效的世界模型。 / support plane is not a valid world model.
+    ground_constraint_enable: true
+    ground_constraint_mode: "flat_anchor"
+    ground_analysis_voxel_leaf_size: 0.15
 
-    # distance = 1 - coverage-adjusted similarity
-    loop_max_scan_context_distance: 0.30
+    ground_anchor_bootstrap_frames: 8
+    ground_anchor_max_normal_spread_deg: 2.0
+    ground_anchor_max_plane_d_spread_m: 0.08
+
+    ground_plane_information_scale: 1.0
+    ground_height_sigma_m: 0.05
+    ground_normal_sigma_deg: 2.0
+    ground_height_huber_delta_m: 0.05
+    ground_normal_huber_delta_deg: 2.0
+    ground_max_height_residual_m: 0.30
+    ground_max_normal_residual_deg: 10.0
+
+    ground_max_translation_correction_m: 0.05
+    ground_max_rotation_correction_deg: 0.50
+    ground_max_general_rmse_ratio: 1.03
+    ground_max_general_rmse_absolute_increase_m: 0.003
+    ground_min_general_correspondence_ratio: 0.85
+    ground_max_refinement_iterations: 2
+
+    ground_support_constraint_minimum_points: 120
+    ground_support_constraint_minimum_cells: 35
+    ground_support_constraint_minimum_center_cells: 3
+    ground_support_constraint_minimum_inlier_ratio: 0.90
+    ground_support_constraint_maximum_rmse_m: 0.030
+    ground_support_constraint_minimum_score: 8.5
+    ground_support_constraint_enter_confidence: 0.72
+    ground_support_constraint_keep_confidence: 0.62
+    ground_clearance_bootstrap_samples: 8
+    ground_diagnostics_enable: true
 
     # ============================================================
-    # LiDAR preprocessing
+    # Scan Context V3 / 回环候选检索 / Scan Context V3 / loop candidate retrieval
     # ============================================================
-    # Start with the same conservative front-end settings as Livox.
-    # The XT32 ROI and self-body box can be tuned after the first live run.
+    # 这些参数现在由 lo_node.cpp 读取并显式传递。 / These values are now read by lo_node.cpp and passed explicitly
+    # 它们会进入 LoopDetectorConfig，不再是无效的 YAML 配置项。 / into LoopDetectorConfig.  They are no longer dead YAML entries.
+    # 设置为 false 时保留后端里程计/地图更新，但关闭完整的回环链路。 / false keeps backend odometry/map updates, but disables the complete
+    # 即关闭 Scan Context → 回环 ICP → Loop Edge → 回环触发 PGO 的完整流程。 / Scan Context -> loop ICP -> Loop Edge -> loop-triggered PGO chain.
+    backend_loop_closure_enable: true
+
+    # ============================================================
+    # 回环一致性 / 回环边稀疏化 / Loop closure consistency / edge sparsification
+    # ============================================================
+    # Phase-1 迁移：这些参数值特意保持原先 C++ 默认值不变。 / Phase-1 migration: values intentionally preserve the old C++ defaults.
+    loop_use_temporal_consistency: false
+    loop_temporal_max_current_gap: 12
+    loop_temporal_max_historical_gap: 15
+    loop_temporal_min_consistent_proposals: 2
+
+    loop_use_cycle_consistency: false
+    loop_max_cycle_translation_error_m: 2.0
+    loop_max_cycle_rotation_error_deg: 10.0
+    loop_consistency_max_history_size: 20
+
+    loop_edge_current_keyframe_spacing: 4
+    loop_edge_historical_keyframe_spacing: 2
+
+    # ============================================================
+    # BTC 回环描述子 / 检索 / BTC loop descriptor / retrieval
+    # ============================================================
+    # 运行时选择官方 BTC 参数配置。 / Select the official BTC profile at runtime.
+    # 可选值："indoor"、"outdoor"。 / Valid values: "indoor", "outdoor".
+    btc_config_profile: "outdoor"
+
+    # FR-SLAM / BTC 集成参数。 / FR-SLAM/BTC integration parameters.
+    btc_skip_near_num: 30
+    btc_proj_plane_num: 3
+
+    # 滑动窗口构建参数。 / Sliding-window construction.
+    btc_window_size: 7
+    btc_window_stride: 4
+    btc_min_valid_dense_keyframes: 5
+
+    # 距离 = 1 - 经覆盖率修正后的相似度 / distance = 1 - coverage-adjusted similarity
+
+    # ============================================================
+    # LiDAR 预处理 / LiDAR preprocessing
+    # ============================================================
+    # 初始使用与 Livox 相同的保守前端参数。 / Start with the same conservative front-end settings as Livox.
+    # XT32 的 ROI 与机体裁剪框可在首次实机运行后再调节。 / The XT32 ROI and self-body box can be tuned after the first live run.
     preprocessor_enable_range_filter: true
     preprocessor_range_min: 1.0
     preprocessor_range_max: 30.0
@@ -93,18 +157,20 @@ fr_slam:
     preprocessor_ror_min_neighbors: 1
 
     # ============================================================
-    # Mode defaults
+    # 运行模式默认参数 / Mode defaults
     # ============================================================
-    # Both launch files override these values to enforce their own mode.
+    # 不同 launch 文件可覆盖这些值，以强制使用各自的运行模式。 / Both launch files override these values to enforce their own mode.
+    # 仅用于调试的室内假设：x/y/yaw 自由，z/roll/pitch 固定。 / Debug-only indoor assumption: x/y/yaw free, z/roll/pitch fixed.
+    planar_motion_mode: false
     enable_lidar_imu_rotation_pair_export: false
     calibration_use_imu_initial_guess: true
     lidar_imu_rotation_pairs_path: "lidar_imu_rotation_pairs.csv"
 
     # ============================================================
-    # LiDAR -> Fixposition IMU extrinsic fallback
+    # LiDAR → Fixposition IMU 外参备用值 / LiDAR -> Fixposition IMU extrinsic fallback
     # ============================================================
-    # Never reuse the Livox calibration here.  Normal Hesai launch will only
-    # load results stored below output/calibration/hesai/.
+    # 这里绝不能复用 Livox 标定结果；正常 Hesai 启动只会加载 Hesai 自己的标定。 / Never reuse the Livox calibration here.  Normal Hesai launch will only
+    # 标定结果应存放在 output/calibration/hesai/ 下。 / load results stored below output/calibration/hesai/.
     imu_extrinsic_q_il_x: 0.0
     imu_extrinsic_q_il_y: 0.0
     imu_extrinsic_q_il_z: 0.0

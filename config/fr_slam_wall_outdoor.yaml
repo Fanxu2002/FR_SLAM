@@ -1,0 +1,5 @@
+fr_slam:
+  ros__parameters:
+    # MultiPlane Wall eligibility profile for outdoor runs.
+    # Keeps the previous behavior unchanged.
+    wall_constraint_minimum_radius_m: 0.80

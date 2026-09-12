@@ -1,0 +1,6 @@
+fr_slam:
+  ros__parameters:
+    # Indoor corridor profile:
+    # allow smaller but high-quality vertical planes into Wall association.
+    # Ground/common radius remains unchanged at 0.80 m.
+    wall_constraint_minimum_radius_m: 0.50

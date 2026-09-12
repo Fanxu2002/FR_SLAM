@@ -1,0 +1,4 @@
+FR-SLAM bundled g2o
+tag: 20230806_git
+commit: 0fa1486
+purpose: keep g2o/Eigen compile flags identical to FR-SLAM

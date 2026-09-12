@@ -111,7 +111,7 @@ def _launch_setup(context):
 
     collector_node = Node(
         package='fr_slam',
-        executable='fr_slam_node',
+        executable='lo_node',
         name='fr_slam',
         output='both',
         parameters=[
