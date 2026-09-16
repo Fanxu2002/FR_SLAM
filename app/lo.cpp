@@ -461,17 +461,24 @@ private:
             true};
 
     // ============================================================
-    // Real-time overload protection.
+    // FR-SLAM Final Sensor Pipeline V1.
     //
-    // IMPORTANT:
-    // The worker keeps queue.front() until processing is finished.
-    // Therefore the callback NEVER removes queue.front(). When the
-    // queue is full it removes the second-oldest waiting frame instead.
-    // This preserves the frame currently owned by the worker.
+    // Sensor-time deterministic LiDAR FIFO.
+    //
+    // The queue is transport only. Queue occupancy, CPU load and
+    // thread scheduling must NEVER decide which LiDAR frame enters
+    // the SLAM frontend.
+    //
+    // Reaching the hard limit is an explicit frontend overload
+    // failure. No LiDAR frame is silently removed.
     // ============================================================
     std::size_t
-        max_lidar_queue_size_ =
-            3;
+        lidar_queue_hard_limit_ =
+            200;
+
+    std::size_t
+        lidar_qos_depth_ =
+            200;
 
     std::atomic<std::size_t>
         dropped_lidar_frames_{
@@ -783,94 +790,63 @@ private:
         std::size_t queue_size =
             0;
 
-        std::size_t dropped_now =
-            0;
+        bool frontend_overload =
+            false;
 
         {
             std::lock_guard<std::mutex> lock(
                 lidar_queue_mutex_);
 
             // ----------------------------------------------------
-            // Bounded queue.
+            // Strict FIFO.
             //
-            // queue.front() may already be copied by ProcessingLoop()
-            // and still be under processing. Never erase it here.
-            // Remove the second-oldest waiting frame instead, keeping
-            // the newest measurements available for catch-up.
+            // Runtime backlog must never change the measurement
+            // sequence seen by SLAM.
+            //
+            // If the hard safety limit is reached, fail explicitly
+            // instead of deleting any waiting LiDAR frame.
             // ----------------------------------------------------
-            while (lidar_queue_.size() >=
-                   max_lidar_queue_size_)
+            if (lidar_queue_.size() >=
+                lidar_queue_hard_limit_)
             {
-                if (lidar_queue_.size() <= 1)
-                {
-                    break;
-                }
+                frontend_overload =
+                    true;
 
-                lidar_queue_.erase(
-                    lidar_queue_.begin() + 1);
-
-                ++dropped_now;
-            }
-
-            lidar_queue_.push_back(
-                std::move(pending));
-
-            queue_size =
-                lidar_queue_.size();
-        }
-
-        if (dropped_now > 0)
-        {
-            dropped_lidar_frames_.fetch_add(
-                dropped_now);
-
-            const LidarWorkerState worker_state =
-                static_cast<LidarWorkerState>(
-                    lidar_worker_state_.load(
-                        std::memory_order_relaxed));
-
-            const char *overflow_reason =
-                "OTHER_BACKLOG";
-
-            if (worker_state ==
-                LidarWorkerState::WAIT_FOR_IMU)
-            {
-                dropped_queue_while_imu_wait_.fetch_add(
-                    dropped_now);
-                overflow_reason =
-                    "IMU_WAIT_BACKLOG";
-            }
-            else if (worker_state ==
-                     LidarWorkerState::PROCESSING)
-            {
-                dropped_queue_while_processing_.fetch_add(
-                    dropped_now);
-                overflow_reason =
-                    "PROCESSING_BACKLOG";
+                queue_size =
+                    lidar_queue_.size();
             }
             else
             {
-                dropped_queue_other_.fetch_add(
-                    dropped_now);
-            }
+                lidar_queue_.push_back(
+                    std::move(pending));
 
-            RCLCPP_WARN_THROTTLE(
+                queue_size =
+                    lidar_queue_.size();
+            }
+        }
+
+        if (frontend_overload)
+        {
+            RCLCPP_FATAL(
                 this->get_logger(),
-                *this->get_clock(),
-                1000,
-                "LiDAR queue overflow | "
-                "reason=%s dropped_waiting=%zu total_dropped=%zu "
-                "queue=%zu max_queue=%zu latest_imu=%.9f",
-                overflow_reason,
-                dropped_now,
-                dropped_lidar_frames_.load(),
+                "FRONTEND_OVERLOAD | "
+                "LiDAR FIFO reached hard limit | "
+                "queue=%zu hard_limit=%zu latest_imu=%.9f | "
+                "No LiDAR frame was silently dropped.",
                 queue_size,
-                max_lidar_queue_size_,
+                lidar_queue_hard_limit_,
                 latest_imu_timestamp_.load(
                     std::memory_order_relaxed));
+
+            running_.store(false);
+
+            data_condition_.notify_all();
+
+            return;
         }
 
         data_condition_.notify_one();
+
 
     }
 
@@ -4606,7 +4582,7 @@ public:
                         0.30)));
 
         // ========================================================
-        // Ground V1.4 frozen world-plane anchor.
+        // Final Ground V1: decoupled Ground-only correction.
         // ========================================================
         ground_constraint_config.enabled =
             this->declare_parameter<bool>(
@@ -4616,7 +4592,7 @@ public:
         ground_constraint_config.mode =
             this->declare_parameter<std::string>(
                 "ground_constraint_mode",
-                "flat_anchor");
+                "piecewise_frozen");
 
         std::transform(
             ground_constraint_config.mode.begin(),
@@ -4628,20 +4604,20 @@ public:
                     std::tolower(character));
             });
 
-        if (ground_constraint_config.mode != "flat_anchor" &&
+        if (ground_constraint_config.mode != "piecewise_frozen" &&
+            ground_constraint_config.mode != "flat_anchor" &&
             ground_constraint_config.mode != "off" &&
             ground_constraint_config.mode != "disabled")
         {
             RCLCPP_FATAL(
                 this->get_logger(),
                 "Invalid ground_constraint_mode='%s'. "
-                "Valid values: flat_anchor, off.",
+                "Valid values: piecewise_frozen, flat_anchor, off.",
                 ground_constraint_config.mode.c_str());
 
             throw std::runtime_error(
                 "Invalid ground_constraint_mode");
         }
-
         ground_constraint_config.analysis_voxel_leaf_m =
             std::max(
                 0.03,
@@ -4678,61 +4654,130 @@ public:
                     "ground_plane_information_scale",
                     1.0));
 
-        ground_constraint_config.height_sigma_m =
-            std::max(
-                0.005,
-                this->declare_parameter<double>(
-                    "ground_height_sigma_m",
-                    0.05));
-
-        ground_constraint_config.normal_sigma_deg =
-            std::max(
-                0.1,
-                this->declare_parameter<double>(
-                    "ground_normal_sigma_deg",
-                    2.0));
-
-        ground_constraint_config.height_huber_delta_m =
-            std::max(
-                0.005,
-                this->declare_parameter<double>(
-                    "ground_height_huber_delta_m",
-                    0.05));
-
-        ground_constraint_config.normal_huber_delta_deg =
-            std::max(
-                0.1,
-                this->declare_parameter<double>(
-                    "ground_normal_huber_delta_deg",
-                    2.0));
+        // Legacy Ground V1.4 optimizer parameters are still declared so older
+        // YAML files remain loadable.  Final Ground V1 deliberately ignores
+        // them because Ground no longer enters the ICP Hessian.
+        (void)this->declare_parameter<double>(
+            "ground_height_sigma_m",
+            0.05);
+        (void)this->declare_parameter<double>(
+            "ground_normal_sigma_deg",
+            2.0);
+        (void)this->declare_parameter<double>(
+            "ground_height_huber_delta_m",
+            0.05);
+        (void)this->declare_parameter<double>(
+            "ground_normal_huber_delta_deg",
+            2.0);
+        (void)this->declare_parameter<double>(
+            "ground_max_translation_correction_m",
+            0.05);
+        (void)this->declare_parameter<double>(
+            "ground_max_rotation_correction_deg",
+            0.50);
+        (void)this->declare_parameter<int>(
+            "ground_max_refinement_iterations",
+            2);
 
         ground_constraint_config.maximum_height_residual_m =
             std::max(
-                ground_constraint_config.height_huber_delta_m,
+                0.0,
                 this->declare_parameter<double>(
                     "ground_max_height_residual_m",
-                    0.30));
+                    5.0));
 
         ground_constraint_config.maximum_normal_residual_deg =
             std::max(
-                ground_constraint_config.normal_huber_delta_deg,
+                0.0,
                 this->declare_parameter<double>(
                     "ground_max_normal_residual_deg",
                     10.0));
 
-        ground_constraint_config.maximum_total_translation_correction_m =
+        ground_constraint_config.maximum_tilt_correction_deg =
             std::max(
                 0.001,
                 this->declare_parameter<double>(
-                    "ground_max_translation_correction_m",
-                    0.05));
+                    "ground_max_tilt_correction_deg",
+                    0.25));
 
-        ground_constraint_config.maximum_total_rotation_correction_deg =
+        ground_constraint_config.maximum_z_correction_m =
             std::max(
-                0.01,
+                0.0001,
                 this->declare_parameter<double>(
-                    "ground_max_rotation_correction_deg",
-                    0.50));
+                    "ground_max_z_correction_m",
+                    0.030));
+
+        ground_constraint_config.minimum_reference_normal_z =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "ground_min_reference_normal_z",
+                    0.50),
+                0.0,
+                1.0);
+
+        ground_constraint_config.minimum_heading_projection_norm =
+            std::max(
+                1.0e-9,
+                this->declare_parameter<double>(
+                    "ground_min_heading_projection_norm",
+                    1.0e-4));
+
+        ground_constraint_config.ground_sanity_height_tolerance_m =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "ground_sanity_height_tolerance_m",
+                    0.005));
+
+        ground_constraint_config.ground_sanity_normal_tolerance_deg =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "ground_sanity_normal_tolerance_deg",
+                    1.0e-6));
+
+        ground_constraint_config.forward_axis_x =
+            this->declare_parameter<double>(
+                "ground_forward_axis_x",
+                1.0);
+        ground_constraint_config.forward_axis_y =
+            this->declare_parameter<double>(
+                "ground_forward_axis_y",
+                0.0);
+        ground_constraint_config.forward_axis_z =
+            this->declare_parameter<double>(
+                "ground_forward_axis_z",
+                0.0);
+
+        ground_constraint_config.line_search_alpha_1 =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "ground_line_search_alpha_1",
+                    1.0),
+                0.0,
+                1.0);
+        ground_constraint_config.line_search_alpha_2 =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "ground_line_search_alpha_2",
+                    0.5),
+                0.0,
+                1.0);
+        ground_constraint_config.line_search_alpha_3 =
+            std::clamp(
+                this->declare_parameter<double>(
+                    "ground_line_search_alpha_3",
+                    0.25),
+                0.0,
+                1.0);
+
+        ground_constraint_config.reference_switch_confirmation_frames =
+            static_cast<std::size_t>(
+                std::max(
+                    1L,
+                    this->declare_parameter<int>(
+                        "ground_reference_switch_confirmation_frames",
+                        8)));
 
         ground_constraint_config.maximum_general_rmse_ratio =
             std::max(
@@ -4756,13 +4801,6 @@ public:
                     0.85),
                 0.0,
                 1.0);
-
-        ground_constraint_config.maximum_refinement_iterations =
-            std::max(
-                0L,
-                this->declare_parameter<int>(
-                    "ground_max_refinement_iterations",
-                    2));
 
         ground_constraint_config.diagnostics_enabled =
             this->declare_parameter<bool>(
@@ -5122,16 +5160,27 @@ public:
         // ========================================================
         // 3. Real-time pipeline parameters.
         // ========================================================
-        const int configured_max_queue_size =
+        const int configured_queue_hard_limit =
             this->declare_parameter<int>(
-                "max_lidar_queue_size",
-                3);
+                "lidar_queue_hard_limit",
+                200);
 
-        max_lidar_queue_size_ =
+        lidar_queue_hard_limit_ =
             static_cast<std::size_t>(
                 std::max(
-                    2,
-                    configured_max_queue_size));
+                    10,
+                    configured_queue_hard_limit));
+
+        const int configured_lidar_qos_depth =
+            this->declare_parameter<int>(
+                "lidar_qos_depth",
+                200);
+
+        lidar_qos_depth_ =
+            static_cast<std::size_t>(
+                std::max(
+                    10,
+                    configured_lidar_qos_depth));
 
         const int configured_imu_qos_depth =
             this->declare_parameter<int>(
@@ -5535,11 +5584,18 @@ public:
         lidar_options.callback_group =
             lidar_callback_group_;
 
+        rclcpp::QoS lidar_qos{
+            rclcpp::KeepLast(
+                lidar_qos_depth_)};
+
+        lidar_qos.best_effort();
+        lidar_qos.durability_volatile();
+
         lidar_sub_ =
             this->create_subscription<
                 sensor_msgs::msg::PointCloud2>(
                 lidar_topic_,
-                rclcpp::SensorDataQoS(),
+                lidar_qos,
                 std::bind(
                     &lidar_registration_scan2localmap::
                         LidarCallback,

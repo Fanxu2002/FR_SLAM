@@ -34,7 +34,7 @@ def _sensor_name(context):
 
 def _profile_name(context):
     profile = (
-        LaunchConfiguration('profile')
+        LaunchConfiguration('btc')
         .perform(context)
         .strip()
         .lower()
@@ -42,7 +42,7 @@ def _profile_name(context):
 
     if profile not in SUPPORTED_PROFILES:
         raise RuntimeError(
-            'Unsupported environment profile: '
+            'Unsupported BTC profile: '
             + profile
             + '. Valid values: '
             + ', '.join(SUPPORTED_PROFILES)
@@ -235,22 +235,14 @@ def _load_q_il(calibration_file):
 def _launch_setup(context):
     sensor = _sensor_name(context)
     profile = _profile_name(context)
-    backend_loop_closure_override = _optional_boolean(
-        context,
-        'backend_loop_closure_enable'
-    )
-    ground_constraint_override = _optional_boolean(
-        context,
-        'ground_constraint_enable'
-    )
-    planar_motion_override = _optional_boolean(
-        context,
-        'planar_motion_mode'
-    )
-    wall_constraint_minimum_radius_override = _optional_float(
-        context,
-        'wall_constraint_minimum_radius_m'
-    )
+    mode = LaunchConfiguration('mode').perform(context).strip().lower()
+    if mode not in ('lo', 'lio'):
+        raise RuntimeError("Invalid mode='" + mode + "'. Valid values: lo, lio.")
+    ground_mode = LaunchConfiguration('ground').perform(context).strip().lower()
+    if ground_mode not in ('off', 'flat_anchor', 'piecewise_frozen'):
+        raise RuntimeError("Invalid ground='" + ground_mode + "'.")
+    if mode == 'lio' and ground_mode == 'piecewise_frozen':
+        raise RuntimeError('LIO + piecewise_frozen is not supported yet.')
     package_share_directory = Path(
         get_package_share_directory('fr_slam')
     )
@@ -270,13 +262,13 @@ def _launch_setup(context):
         'src' /
         'fr_slam' /
         'config' /
-        ('fr_slam_' + sensor + '.yaml')
+        (sensor + '.yaml')
     )
 
     installed_slam_config_path = (
         package_share_directory /
         'config' /
-        ('fr_slam_' + sensor + '.yaml')
+        (sensor + '.yaml')
     )
 
     if source_slam_config_path.is_file():
@@ -299,13 +291,13 @@ def _launch_setup(context):
         'src' /
         'fr_slam' /
         'config' /
-        ('fr_slam_wall_' + profile + '.yaml')
+        (profile + '.yaml')
     )
 
     installed_wall_profile_config_path = (
         package_share_directory /
         'config' /
-        ('fr_slam_wall_' + profile + '.yaml')
+        (profile + '.yaml')
     )
 
     if source_wall_profile_config_path.is_file():
@@ -321,6 +313,30 @@ def _launch_setup(context):
         raise RuntimeError(
             'Wall profile YAML does not exist: '
             + str(wall_profile_config_path)
+        )
+
+    source_mode_config_path = (
+        workspace_directory /
+        'src' /
+        'fr_slam' /
+        'config' /
+        (mode + '.yaml')
+    )
+
+    installed_mode_config_path = (
+        package_share_directory /
+        'config' /
+        (mode + '.yaml')
+    )
+
+    if source_mode_config_path.is_file():
+        mode_config_path = source_mode_config_path
+    else:
+        mode_config_path = installed_mode_config_path
+
+    if not mode_config_path.is_file():
+        raise RuntimeError(
+            'Mode YAML does not exist: ' + str(mode_config_path)
         )
 
     output_directory = (
@@ -395,34 +411,18 @@ def _launch_setup(context):
         'imu_extrinsic_q_il_w': q_il[3]
     }
 
-    if backend_loop_closure_override is not None:
-        parameter_overrides['backend_loop_closure_enable'] = (
-            backend_loop_closure_override
-        )
-
-    if ground_constraint_override is not None:
-        parameter_overrides['ground_constraint_enable'] = (
-            ground_constraint_override
-        )
-
-    if planar_motion_override is not None:
-        parameter_overrides['planar_motion_mode'] = (
-            planar_motion_override
-        )
-
-    if wall_constraint_minimum_radius_override is not None:
-        parameter_overrides[
-            'wall_constraint_minimum_radius_m'
-        ] = wall_constraint_minimum_radius_override
-
+    parameter_overrides['btc_config_profile'] = profile
+    parameter_overrides['ground_constraint_enable'] = (ground_mode != 'off')
+    parameter_overrides['ground_constraint_mode'] = ground_mode
     slam_node = Node(
         package='fr_slam',
-        executable='lo',
+        executable=mode,
         name='fr_slam',
         output='both',
         parameters=[
             str(slam_config_path),
             str(wall_profile_config_path),
+            str(mode_config_path),
             parameter_overrides
         ],
         emulate_tty=True,
@@ -451,7 +451,7 @@ def _launch_setup(context):
             msg='Sensor profile: ' + str(slam_config_path)
         ),
         LogInfo(
-            msg='Environment profile: ' + profile
+            msg='BTC profile: ' + profile
         ),
         LogInfo(
             msg='Wall profile: '
@@ -465,40 +465,6 @@ def _launch_setup(context):
             msg='This run will be preserved under: '
                 + str(run_directory)
         ),
-        LogInfo(
-            msg=(
-                'Ablation overrides | backend_loop_closure='
-                + (
-                    'YAML default'
-                    if backend_loop_closure_override is None
-                    else (
-                        'ON'
-                        if backend_loop_closure_override
-                        else 'OFF'
-                    )
-                )
-                + ' | ground_constraint='
-                + (
-                    'YAML default'
-                    if ground_constraint_override is None
-                    else (
-                        'ON'
-                        if ground_constraint_override
-                        else 'OFF'
-                    )
-                )
-                + ' | planar_motion='
-                + (
-                    'YAML default'
-                    if planar_motion_override is None
-                    else (
-                        'ON'
-                        if planar_motion_override
-                        else 'OFF'
-                    )
-                )
-            )
-        ),
         slam_node,
         rviz_node
     ]
@@ -509,45 +475,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sensor',
             default_value='livox',
-            description='Sensor profile: livox or hesai'
+            description='LiDAR sensor: livox or hesai'
         ),
         DeclareLaunchArgument(
-            'profile',
+            'mode',
+            default_value='lio',
+            description='Frontend mode: lo or lio'
+        ),
+        DeclareLaunchArgument(
+            'btc',
             default_value='outdoor',
-            description='Environment profile: outdoor or indoor'
+            description='BTC profile: outdoor or indoor'
         ),
         DeclareLaunchArgument(
-            'backend_loop_closure_enable',
-            default_value='',
-            description=(
-                'Optional loop-closure override: true/false; '
-                'empty uses the sensor YAML value'
-            )
-        ),
-        DeclareLaunchArgument(
-            'ground_constraint_enable',
-            default_value='',
-            description=(
-                'Optional Ground-constraint override: true/false; '
-                'empty uses the sensor YAML value'
-            )
-        ),
-        DeclareLaunchArgument(
-            'planar_motion_mode',
-            default_value='',
-            description=(
-                'Optional planar-motion debug override: true/false; '
-                'empty uses the sensor YAML value'
-            )
-        ),
-        DeclareLaunchArgument(
-            'wall_constraint_minimum_radius_m',
-            default_value='',
-            description=(
-                'Optional MultiPlane Wall-only minimum radius in meters; '
-                'empty uses the selected Wall profile YAML. '
-                'This is only a temporary command-line override.'
-            )
+            'ground',
+            default_value='off',
+            description='Ground mode: off, flat_anchor, or piecewise_frozen'
         ),
         OpaqueFunction(function=_launch_setup)
     ])

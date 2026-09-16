@@ -180,6 +180,15 @@ set(FR_SLAM_LO_FRONTEND_SOURCES
 )
 
 # --------------------------------------------------------------------------
+# LIO frontend
+# --------------------------------------------------------------------------
+set(FR_SLAM_LIO_FRONTEND_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/ieskf.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_measurement.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_frontend.cpp
+)
+
+# --------------------------------------------------------------------------
 # Ground constraint
 # --------------------------------------------------------------------------
 set(FR_SLAM_GROUND_SOURCES
@@ -228,13 +237,13 @@ set(FR_SLAM_THIRD_PARTY_SOURCES
 )
 
 
-add_executable(lo_node)
+add_executable(lo)
 
 target_sources(
-    lo_node
+    lo
     PRIVATE
 
-    ${CMAKE_CURRENT_SOURCE_DIR}/app/lo_node.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/app/lo.cpp
 
     ${FR_SLAM_SENSOR_SOURCES}
     ${FR_SLAM_IMU_SOURCES}
@@ -251,7 +260,7 @@ target_sources(
 )
 
 target_include_directories(
-    lo_node
+    lo
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/btc_core/include
@@ -261,7 +270,7 @@ target_include_directories(
 )
 
 ament_target_dependencies(
-    lo_node
+    lo
     rclcpp
     sensor_msgs
     std_srvs
@@ -273,7 +282,7 @@ ament_target_dependencies(
 )
 
 target_link_libraries(
-    lo_node
+    lo
 
     ${PCL_LIBRARIES}
 
@@ -292,25 +301,109 @@ target_link_libraries(
 )
 
 target_compile_definitions(
-    lo_node
+    lo
     PRIVATE
     PCL_NO_PRECOMPILE
 )
 
 target_compile_definitions(
-    lo_node
+    lo
     PRIVATE
     FR_SLAM_BTC_CONFIG_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/config/btc\"
 )
 
 
 # ============================================
+
+# ============================================
+#   LIO
+# ============================================
+
+add_executable(lio)
+
+target_sources(
+    lio
+    PRIVATE
+
+    ${CMAKE_CURRENT_SOURCE_DIR}/app/lio.cpp
+
+    ${FR_SLAM_SENSOR_SOURCES}
+    ${FR_SLAM_IMU_SOURCES}
+    ${FR_SLAM_LIDAR_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/lio_lidar_deskew.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lidar/lio_preprocessor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_map_odom_bridge.cpp
+
+    ${FR_SLAM_LO_FRONTEND_SOURCES}
+    ${FR_SLAM_LIO_FRONTEND_SOURCES}
+    ${FR_SLAM_GROUND_SOURCES}
+
+    ${FR_SLAM_MAPPING_SOURCES}
+    ${FR_SLAM_LOOP_SOURCES}
+    ${FR_SLAM_BACKEND_SOURCES}
+
+    ${FR_SLAM_THIRD_PARTY_SOURCES}
+)
+
+target_include_directories(
+    lio
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/btc_core/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/g2o
+    ${OpenCV_INCLUDE_DIRS}
+    /usr/local/include
+)
+
+ament_target_dependencies(
+    lio
+    rclcpp
+    sensor_msgs
+    std_srvs
+    pcl_conversions
+    nav_msgs
+    geometry_msgs
+    visualization_msgs
+    tf2_ros
+)
+
+target_link_libraries(
+    lio
+
+    ${PCL_LIBRARIES}
+
+    types_slam3d
+    solver_eigen
+    core
+    stuff
+
+    ${OpenCV_LIBS}
+    Ceres::ceres
+    TBB::tbb
+
+    Threads::Threads
+    fmt::fmt
+    ${LZ4_LIBRARY}
+)
+
+target_compile_definitions(
+    lio
+    PRIVATE
+    PCL_NO_PRECOMPILE
+)
+
+target_compile_definitions(
+    lio
+    PRIVATE
+    FR_SLAM_BTC_CONFIG_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/config/btc\"
+)
+
 #   OFFLINE LIDAR-IMU ROTATION CALIBRATION
 # ============================================
 #
 # This is a normal C++ executable installed in the ROS 2 package so it can be
 # launched with `ros2 run`. It does not create an rclcpp::Node and does not
-# subscribe to topics. It reads the synchronized CSV exported by lo_node.
+# subscribe to topics. It reads the synchronized CSV exported by lo.
 # ============================================
 
 add_executable(lidar_imu_rotation_calibration)
@@ -398,7 +491,8 @@ install(
 )
 install(
   TARGETS
-          lo_node
+          lo
+          lio
           lidar_imu_rotation_calibration
           ground_segmentation_debug
   RUNTIME DESTINATION lib/${PROJECT_NAME})

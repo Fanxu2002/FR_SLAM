@@ -16,10 +16,13 @@ fr_slam:
     # ============================================================
     # 实时处理 / 时间同步 / Realtime / synchronization
     # ============================================================
-    max_lidar_queue_size: 20
+
+    lidar_queue_hard_limit: 200
+    lidar_qos_depth: 200
+    
     imu_qos_depth: 1000
     imu_initialization_sample_count: 200
-    imu_history_duration: 0.5
+    imu_history_duration: 60.0
 
     # LiDAR→IMU 等待几毫秒属于正常的异步到达现象。 / A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
     # 只有等待/滞后达到或超过该阈值时才输出 WARN。 / Only waits/lag at or above this threshold are emitted as WARN.
@@ -82,7 +85,7 @@ fr_slam:
 
     # 可信支撑面门限与逐帧审计 CSV。 / Trusted-support gate and per-frame audit CSV.
     ground_support_constraint_minimum_points: 120
-    ground_support_constraint_minimum_cells: 30
+    ground_support_constraint_minimum_cells: 35
     ground_support_constraint_minimum_center_cells: 3
     ground_support_constraint_minimum_inlier_ratio: 0.90
     ground_support_constraint_maximum_rmse_m: 0.030

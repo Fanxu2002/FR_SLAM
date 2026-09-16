@@ -1,0 +1,3893 @@
+.
+├── 1.txt
+├── app
+│   ├── lidar_registration_scan2scan.cpp
+│   ├── lio.cpp
+│   ├── lio.cpp.before_bridge_compile_fix
+│   ├── lio.cpp.before_bridge_member
+│   ├── lio.cpp.before_bridge_publish_wiring
+│   ├── lio.cpp.before_ieskf_initialize
+│   ├── lio.cpp.before_lio_config
+│   ├── lio.cpp.before_lio_map_odom_bridge
+│   ├── lio.cpp.before_lio_runtime_wiring
+│   ├── lio.cpp.before_lio_update_quality_log
+│   ├── lio.cpp.before_lio_wiring
+│   ├── lio.cpp.before_localmap_z_diag
+│   ├── lio.cpp.before_map_odom_state_log
+│   ├── lio.cpp.before_processing_loop_fix
+│   ├── lio.cpp.before_target_pre_z_diag
+│   ├── lo.cpp
+│   └── path.cpp
+├── CMakeLists.txt
+├── CMakeLists.txt.before_lio_deskew_split
+├── CMakeLists.txt.before_lio_target
+├── config
+│   ├── btc
+│   │   ├── config_indoor.yaml
+│   │   └── config_outdoor.yaml
+│   ├── fr_slam_hesai.yaml
+│   ├── fr_slam_livox.yaml
+│   ├── fr_slam_livox.yaml.before_enter062_test
+│   ├── FR_SLAM.rviz
+│   ├── fr_slam_wall_indoor.yaml
+│   ├── fr_slam_wall_outdoor.yaml
+│   └── Ground.rviz
+├── include
+│   └── fr_slam
+│       ├── backend
+│       │   ├── pose_graph.hpp
+│       │   └── pose_graph_optimizer.hpp
+│       ├── common
+│       │   ├── lidar_frame.hpp
+│       │   └── point_types.hpp
+│       ├── frontend
+│       │   ├── ground_constraint_config.hpp
+│       │   ├── ground_constraint_config.hpp.before_height_recovery_test
+│       │   ├── ground_constraint_config.hpp.before_lio_compat
+│       │   ├── ground_input_bridge.hpp
+│       │   ├── ground_segmenter.hpp
+│       │   ├── ground_segmenter.hpp.before_connectivity_diag
+│       │   ├── ground_segmenter.hpp.before_gate_stress_15deg_015m
+│       │   ├── ground_segmenter.hpp.before_outside_corridor_diag
+│       │   ├── ieskf.hpp
+│       │   ├── lio_frontend.hpp
+│       │   ├── lio_frontend.hpp.before_lio_deskew_split
+│       │   ├── lio_map_odom_bridge.hpp
+│       │   ├── lio_math.hpp
+│       │   ├── lio_measurement.hpp
+│       │   ├── lio_state.hpp
+│       │   ├── lo_frontend.hpp
+│       │   └── multi_plane_extractor.hpp
+│       ├── imu
+│       │   ├── imu_buffer.hpp
+│       │   ├── imu_initializer.hpp
+│       │   ├── imu_integrator.hpp
+│       │   └── imu_types.hpp
+│       ├── lidar
+│       │   ├── lidar_deskew.hpp
+│       │   ├── lidar_preprocessor.hpp
+│       │   ├── lidar_registration_config.hpp
+│       │   ├── lidar_registration.hpp
+│       │   ├── lio_lidar_deskew.hpp
+│       │   ├── lio_preprocessor.hpp
+│       │   └── preprocessor_config.hpp
+│       ├── loop
+│       │   ├── btc_adapter.hpp
+│       │   ├── btc_descriptor.hpp
+│       │   ├── loop_consistency.hpp
+│       │   ├── loop_decision_debug.hpp
+│       │   ├── loop_detector.hpp
+│       │   └── loop_verifier.hpp
+│       ├── mapping
+│       │   ├── incremental_global_map.hpp
+│       │   ├── keyframe_detector.hpp
+│       │   ├── keyframe.hpp
+│       │   ├── keyframe_manager.hpp
+│       │   ├── local_map.hpp
+│       │   ├── submap.hpp
+│       │   └── submap_manager.hpp
+│       ├── ros
+│       │   └── state_publisher.hpp
+│       └── sensor
+│           ├── hesai_adapter.hpp
+│           ├── imu_adapter.hpp
+│           ├── lidar_adapter.hpp
+│           └── mid360s_adapter.hpp
+├── launch
+│   ├── lidar_imu_calibration.launch.py
+│   ├── lio.launch.py
+│   ├── lio.launch.py.before_ground_mode_off
+│   ├── lo.launch.py
+│   └── __pycache__
+│       └── lo.launch.cpython-310.pyc
+├── LICENSE
+├── output
+│   ├── calibration
+│   │   ├── hesai
+│   │   │   └── sessions
+│   │   │       ├── 20260903_134218_338178
+│   │   │       │   ├── diagnostics
+│   │   │       │   │   ├── backend
+│   │   │       │   │   └── frontend
+│   │   │       │   ├── loop
+│   │   │       │   └── saves
+│   │   │       ├── 20260903_134317_592947
+│   │   │       │   ├── diagnostics
+│   │   │       │   │   ├── backend
+│   │   │       │   │   └── frontend
+│   │   │       │   ├── loop
+│   │   │       │   └── saves
+│   │   │       └── 20260903_134633_713667
+│   │   │           ├── diagnostics
+│   │   │           │   ├── backend
+│   │   │           │   └── frontend
+│   │   │           ├── loop
+│   │   │           └── saves
+│   │   └── livox
+│   │       ├── lidar_imu_rotation_calibration.yaml
+│   │       ├── lidar_imu_rotation_pairs.csv
+│   │       └── sessions
+│   └── runs
+│       ├── hesai
+│       └── livox
+│           ├── 20260903_173244_159751
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_173551_544030
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_173633_397666
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_173830_684240
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_175138_465340
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_175623_445703
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_175926_292743
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260903_175933_636531
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           │       └── 20260903_180457_695
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260903_181529_441256
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_182557_793124
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_183654_245910
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_184958_753827
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_191901_873800
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_194523_990831
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_200430_302558
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_202315_468823
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_203145_173876
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_203559_897098
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_205156_172452
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_205508_555353
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_205933_632513
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_211119_187839
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260903_212358_824358
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_213325_804927
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_214831_192724
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260903_220548_575074
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_073243_062558
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_074635_397916
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   │   └── frontend_loop_drift.csv
+│           │   └── saves
+│           ├── 20260904_113821_551158
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_120032_532904
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_144013_773308
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_153246_538622
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260904_155312_702275
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_152059_467658
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_154336_660566
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_162252_009921
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260905_162308_169051
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_164447_612996
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_165147_543874
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_172756_584405
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260905_175436_646083
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_104237_591824
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_110734_431631
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_112245_407320
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_120240_447440
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_122744_722086
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_130742_472544
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_133640_246753
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_135854_637965
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_141517_795878
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_143143_325922
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_145334_369274
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_151745_404143
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_163255_179964
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260906_170826_144595
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_092141_135708
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_094023_007415
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260907_094804_433
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260907_095739_769402
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260907_102836_626550
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_104915_930900
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_111340_118926
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_114614_668034
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_120343_130476
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_135515_941601
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_143525_904563
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_150611_618926
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_155418_770428
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_161158_569827
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_162249_409563
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_164439_737988
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_170458_888262
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_172506_684561
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_182425_123355
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260907_185946_666013
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_194520_768422
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_202211_228040
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_210713_069524
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_213314_295284
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260907_213530_238562
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_215251_671172
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_222136_034643
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260907_223642_395111
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260908_085330_196894
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260908_143303_078913
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_143907_020
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_150518_380314
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260908_151436_400896
+│           ├── 20260908_153837_471824
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260908_154721_445981
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260908_162524_509903
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_163140_478
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_165305_314781
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_165843_851
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_173246_179719
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── scan_context_only_candidates.csv
+│           │   └── saves
+│           ├── 20260908_174556_840119
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── scan_context_only_candidates.csv
+│           │   └── saves
+│           ├── 20260908_174824_909503
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── scan_context_only_candidates.csv
+│           │   └── saves
+│           │       └── 20260908_175325_780
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_181344_360540
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_181919_243
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_184644_170165
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_185207_913
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_190000_030152
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260908_190735_071399
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── scan_context_ab_raw_top20.csv
+│           │   └── saves
+│           │       └── 20260908_191413_881
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260908_193008_889761
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260908_193533_615
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260909_082151_752312
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_084001_665978
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_085317_923729
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_091455_258852
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_092525_240394
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_094124_094495
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_101035_456552
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_102618_194383
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_104609_397518
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_105917_400591
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_111624_275872
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_120229_132465
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   ├── pgo_loop_edges.csv
+│           │   │   └── scan_context_ab_bidir3m_raw_top20.csv
+│           │   └── saves
+│           │       └── 20260909_120858_931
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260909_134905_482736
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   ├── frontend_loop_drift.csv
+│           │   │   ├── pgo_loop_edges.csv
+│           │   │   └── scan_context_ab_bidir3m_raw_top20.csv
+│           │   └── saves
+│           ├── 20260909_142858_617385
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260909_143437_764531
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_150402_537271
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_153952_830430
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_162329_149634
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_163130_773690
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_164004_139317
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_171151_131560
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_180213_031648
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_182410_438813
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_183349_370100
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_184234_463752
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_185322_145658
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_190529_584764
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_191545_799548
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_192442_410616
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_193407_686249
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_195455_449101
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_201208_836174
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_203513_413673
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260909_203518_683869
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_203931_441197
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_205110_338677
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260909_205127_280644
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_213551_915810
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_214102_604783
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_220538_283066
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_221721_014043
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_222827_658316
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260909_225957_693000
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_231754_527178
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260909_233920_480356
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260910_000406_216669
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260910_001927_586344
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260910_002928_105715
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260910_004622_140469
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260910_005706_008583
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260910_005715_799226
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260910_010045_539068
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260910_012048_430169
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260910_015721_377700
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260910_021250_348892
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260910_021710_399
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               ├── pose_graph_before_trajectory.csv
+│           │               └── trajectory_analysis
+│           │                   ├── 01_xy_trajectory_comparison.png
+│           │                   ├── 02_z_drift_comparison.png
+│           │                   ├── 03_relative_z_drift.png
+│           │                   ├── 04_x_component.png
+│           │                   ├── 04_y_component.png
+│           │                   ├── 04_z_component.png
+│           │                   ├── 05_3d_trajectory_comparison.png
+│           │                   ├── 06_pgo_correction_magnitude.png
+│           │                   ├── 07_pgo_xy_correction_vectors.png
+│           │                   └── trajectory_analysis.txt
+│           ├── 20260911_143119_825725
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260911_143126_922650
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260911_144529_957418
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260911_150252_163549
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260911_150907_182361
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260911_153439_945578
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260911_162439_018183
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260911_170652_108562
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260911_172116_110840
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260911_172501_472295
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260911_180427_526
+│           │           ├── loop_open_trajectory.zip
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260911_180459_704427
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260911_180923_827
+│           │           ├── loop off trajectory.zip
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260911_181653_452584
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260911_182121_327
+│           │           ├── lo only  ground off trajectory.zip
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260911_183928_285288
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       ├── 20260911_184542_200
+│           │       │   ├── maps
+│           │       │   │   ├── optimized_map.pcd
+│           │       │   │   ├── raw_keyframe_map.pcd
+│           │       │   │   └── refined_map.pcd
+│           │       │   └── trajectory
+│           │       │       ├── frontend_trajectory.csv
+│           │       │       ├── optimized_trajectory.csv
+│           │       │       └── pose_graph_before_trajectory.csv
+│           │       └── 20260911_184542_200.zip
+│           ├── 20260911_191051_929849
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260911_191520_393
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260912_111552_415461
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260912_113318_665030
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_114451_344116
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_121000_746834
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_122003_948404
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_124120_193091
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_125709_352843
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_131251_816656
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_133333_850535
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_135736_071050
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_141813_584754
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_143751_309264
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_150121_801040
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_150951_135747
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260912_154308_474939
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260912_155342_496160
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260912_161624_234320
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260912_170327_914808
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260912_170346_341528
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260913_212528_751763
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260913_212539_154688
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_110112_688272
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_111213_472
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260914_122631_842574
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260914_125352_206099
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260914_130218_124415
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_130703_570
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260914_131514_804316
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_132256_439793
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_132720_298
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260914_160925_730649
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           ├── 20260914_161141_351367
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_162212_752423
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_163321_784897
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_164633_488307
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_174415_019863
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_181034_786253
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_181113_992438
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260914_181655_910430
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_182120_930
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260914_182251_290561
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_182523_478143
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_182609_772547
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_182617_808906
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_183219_359139
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_185444_759946
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_191840_066853
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_193205_094673
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_193234_862564
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           ├── 20260914_193728_836314
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_194208_380
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260914_194037_357181
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_194217_318812
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_200805_680186
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_201007_293914
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_201016_630243
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260914_201028_912775
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260914_201454_608
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_083840_030882
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260915_084323_744
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_090450_598053
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260915_094907_088470
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260915_095647_853917
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260915_100106_468
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_101523_486915
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260915_102408_717907
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260915_102827_006
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_112345_001555
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   │   └── btc_submap_only_candidates.csv
+│           │   └── saves
+│           │       └── 20260915_112823_659
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_115339_530205
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260915_115810_380
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_115901_791819
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260915_120557_192205
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           ├── 20260915_120908_011766
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   ├── frontend
+│           │   │   │   └── ground_frontend_diagnostics.csv
+│           │   │   ├── pgo_keyframe_correction.csv
+│           │   │   ├── pgo_odom_edge_deformation.csv
+│           │   │   └── pgo_odom_information.csv
+│           │   ├── loop
+│           │   │   ├── btc_submap_only_candidates.csv
+│           │   │   └── pgo_loop_edges.csv
+│           │   └── saves
+│           │       └── 20260915_121337_075
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_124738_621785
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   │       └── ground_frontend_diagnostics.csv
+│           │   ├── loop
+│           │   └── saves
+│           │       └── 20260915_125243_739
+│           │           ├── maps
+│           │           │   ├── optimized_map.pcd
+│           │           │   ├── raw_keyframe_map.pcd
+│           │           │   └── refined_map.pcd
+│           │           └── trajectory
+│           │               ├── frontend_trajectory.csv
+│           │               ├── optimized_trajectory.csv
+│           │               └── pose_graph_before_trajectory.csv
+│           ├── 20260915_125317_767250
+│           │   ├── diagnostics
+│           │   │   ├── backend
+│           │   │   └── frontend
+│           │   ├── loop
+│           │   └── saves
+│           └── 20260915_125323_908043
+│               ├── diagnostics
+│               │   ├── backend
+│               │   └── frontend
+│               ├── loop
+│               └── saves
+├── package.xml
+├── README.md
+├── src
+│   ├── backend
+│   │   ├── backend_worker.cpp
+│   │   ├── global_map_backend.cpp
+│   │   ├── pose_graph_backend.cpp
+│   │   ├── pose_graph.cpp
+│   │   ├── pose_graph_optimizer.cpp
+│   │   └── post_pgo_refinement.cpp
+│   ├── frontend
+│   │   ├── constraints
+│   │   │   ├── ground
+│   │   │   │   ├── ground_input_bridge.cpp
+│   │   │   │   ├── ground_segmenter.cpp
+│   │   │   │   ├── ground_segmenter.cpp.before_direct_monotonic_v1
+│   │   │   │   ├── ground_segmenter.cpp.before_local_model_diag
+│   │   │   │   ├── ground_segmenter.cpp.before_step2b_local_diag
+│   │   │   │   ├── ground_segmenter.cpp.before_step2_local_diag
+│   │   │   │   ├── ground_segmenter.cpp.before_step3_connectivity_diag
+│   │   │   │   ├── ground_segmenter.cpp.before_step5b1_outside_samples
+│   │   │   │   └── ground_segmenter.cpp.before_step5b2_reject_severity
+│   │   │   └── plane
+│   │   │       └── multi_plane_extractor.cpp
+│   │   ├── lio
+│   │   │   ├── ieskf.cpp
+│   │   │   ├── ieskf.cpp.before_observability_diag
+│   │   │   ├── ieskf.cpp.before_schur_diag
+│   │   │   ├── lio_frontend.cpp
+│   │   │   ├── lio_frontend.cpp.before_atomic_propagation
+│   │   │   ├── lio_frontend.cpp.before_bridge_150ms
+│   │   │   ├── lio_frontend.cpp.before_bridge_250ms
+│   │   │   ├── lio_frontend.cpp.before_prop_z_diag
+│   │   │   ├── lio_frontend.cpp.before_reject_stage_log
+│   │   │   ├── lio_frontend.cpp.before_short_gap_bridge
+│   │   │   ├── lio_frontend.cpp.before_state_update_diag
+│   │   │   ├── lio_map_odom_bridge.cpp
+│   │   │   └── lio_measurement.cpp
+│   │   ├── livo
+│   │   └── lo
+│   │       ├── lo_frontend.cpp
+│   │       ├── lo_frontend_ground.cpp
+│   │       ├── lo_frontend_ground.cpp.before_connectivity_csv
+│   │       ├── lo_frontend_ground.cpp.before_step5_csv
+│   │       ├── lo_frontend_ground.cpp.before_support_diag
+│   │       └── lo_frontend_ground_internal.hpp
+│   ├── imu
+│   │   ├── imu_buffer.cpp
+│   │   ├── imu_initializer.cpp
+│   │   └── imu_integrator.cpp
+│   ├── lidar
+│   │   ├── lidar_deskew.cpp
+│   │   ├── lidar_deskew.cpp.before_time_tolerance
+│   │   ├── lidar_preprocessor.cpp
+│   │   ├── lidar_registration.cpp
+│   │   ├── lio_lidar_deskew.cpp
+│   │   ├── lio_lidar_deskew.cpp.before_time_tolerance
+│   │   └── lio_preprocessor.cpp
+│   ├── loop
+│   │   ├── btc_adapter.cpp
+│   │   ├── loop_closure.cpp
+│   │   ├── loop_consistency.cpp
+│   │   ├── loop_detector.cpp
+│   │   └── loop_verifier.cpp
+│   ├── mapping
+│   │   ├── keyframe_detector.cpp
+│   │   ├── keyframe_manager.cpp
+│   │   ├── local_map.cpp
+│   │   └── submap_manager.cpp
+│   ├── ros
+│   │   └── state_publisher.cpp
+│   └── sensor
+│       ├── hesai_adapter.cpp
+│       ├── imu_adapter.cpp
+│       └── mid360s_adapter.cpp
+├── test
+│   ├── test_hesai_adapter.cpp
+│   ├── test_imu_adapter.cpp
+│   ├── test_imu_buffer.cpp
+│   ├── test_imu_initializer.cpp
+│   ├── test_imu_integrator.cpp
+│   ├── test_lidar_deskewer.cpp
+│   └── test_mid360s_adapter.cpp
+├── third_party
+│   ├── btc_core
+│   │   ├── include
+│   │   │   └── btc_core.hpp
+│   │   └── src
+│   │       └── btc_core.cpp
+│   ├── g2o
+│   │   ├── benchmarks
+│   │   │   ├── CMakeLists.txt
+│   │   │   └── jacobian_timing_tests.cpp
+│   │   ├── build_fr_slam
+│   │   │   ├── CMakeCache.txt
+│   │   │   ├── CMakeFiles
+│   │   │   │   ├── 4.4.3
+│   │   │   │   │   ├── CMakeCCompiler.cmake
+│   │   │   │   │   ├── CMakeCXXCompiler.cmake
+│   │   │   │   │   ├── CMakeDetermineCompilerABI_C.bin
+│   │   │   │   │   ├── CMakeDetermineCompilerABI_CXX.bin
+│   │   │   │   │   ├── CMakeSystem.cmake
+│   │   │   │   │   ├── CompilerIdC
+│   │   │   │   │   │   ├── a.out
+│   │   │   │   │   │   ├── CMakeCCompilerId.c
+│   │   │   │   │   │   └── tmp
+│   │   │   │   │   └── CompilerIdCXX
+│   │   │   │   │       ├── a.out
+│   │   │   │   │       ├── CMakeCXXCompilerId.cpp
+│   │   │   │   │       └── tmp
+│   │   │   │   ├── cmake.check_cache
+│   │   │   │   ├── CMakeConfigureLog.yaml
+│   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   ├── CMakeScratch
+│   │   │   │   ├── Export
+│   │   │   │   │   └── 6f82a6cf743d92c14565b42826281b56
+│   │   │   │   │       ├── g2oTargets.cmake
+│   │   │   │   │       └── g2oTargets-release.cmake
+│   │   │   │   ├── InstallScripts.json
+│   │   │   │   ├── Makefile2
+│   │   │   │   ├── Makefile.cmake
+│   │   │   │   ├── pkgRedirects
+│   │   │   │   ├── progress.marks
+│   │   │   │   └── TargetDirectories.txt
+│   │   │   ├── cmake_install.cmake
+│   │   │   ├── codecov.sh
+│   │   │   ├── CPackConfig.cmake
+│   │   │   ├── CPackSourceConfig.cmake
+│   │   │   ├── g2o
+│   │   │   │   ├── autodiff
+│   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   └── progress.marks
+│   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   └── Makefile
+│   │   │   │   ├── CMakeFiles
+│   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   └── progress.marks
+│   │   │   │   ├── cmake_install.cmake
+│   │   │   │   ├── config.h
+│   │   │   │   ├── core
+│   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   ├── core.dir
+│   │   │   │   │   │   │   ├── batch_stats.cpp.o
+│   │   │   │   │   │   │   ├── batch_stats.cpp.o.d
+│   │   │   │   │   │   │   ├── build.make
+│   │   │   │   │   │   │   ├── cache.cpp.o
+│   │   │   │   │   │   │   ├── cache.cpp.o.d
+│   │   │   │   │   │   │   ├── cmake_clean.cmake
+│   │   │   │   │   │   │   ├── compiler_depend.make
+│   │   │   │   │   │   │   ├── compiler_depend.ts
+│   │   │   │   │   │   │   ├── DependInfo.cmake
+│   │   │   │   │   │   │   ├── depend.make
+│   │   │   │   │   │   │   ├── estimate_propagator.cpp.o
+│   │   │   │   │   │   │   ├── estimate_propagator.cpp.o.d
+│   │   │   │   │   │   │   ├── factory.cpp.o
+│   │   │   │   │   │   │   ├── factory.cpp.o.d
+│   │   │   │   │   │   │   ├── flags.make
+│   │   │   │   │   │   │   ├── hyper_dijkstra.cpp.o
+│   │   │   │   │   │   │   ├── hyper_dijkstra.cpp.o.d
+│   │   │   │   │   │   │   ├── hyper_graph_action.cpp.o
+│   │   │   │   │   │   │   ├── hyper_graph_action.cpp.o.d
+│   │   │   │   │   │   │   ├── hyper_graph.cpp.o
+│   │   │   │   │   │   │   ├── hyper_graph.cpp.o.d
+│   │   │   │   │   │   │   ├── jacobian_workspace.cpp.o
+│   │   │   │   │   │   │   ├── jacobian_workspace.cpp.o.d
+│   │   │   │   │   │   │   ├── link.txt
+│   │   │   │   │   │   │   ├── marginal_covariance_cholesky.cpp.o
+│   │   │   │   │   │   │   ├── marginal_covariance_cholesky.cpp.o.d
+│   │   │   │   │   │   │   ├── matrix_structure.cpp.o
+│   │   │   │   │   │   │   ├── matrix_structure.cpp.o.d
+│   │   │   │   │   │   │   ├── optimizable_graph.cpp.o
+│   │   │   │   │   │   │   ├── optimizable_graph.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm_dogleg.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm_dogleg.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm_factory.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm_factory.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm_gauss_newton.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm_gauss_newton.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm_levenberg.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm_levenberg.cpp.o.d
+│   │   │   │   │   │   │   ├── optimization_algorithm_with_hessian.cpp.o
+│   │   │   │   │   │   │   ├── optimization_algorithm_with_hessian.cpp.o.d
+│   │   │   │   │   │   │   ├── parameter_container.cpp.o
+│   │   │   │   │   │   │   ├── parameter_container.cpp.o.d
+│   │   │   │   │   │   │   ├── parameter.cpp.o
+│   │   │   │   │   │   │   ├── parameter.cpp.o.d
+│   │   │   │   │   │   │   ├── progress.make
+│   │   │   │   │   │   │   ├── robust_kernel.cpp.o
+│   │   │   │   │   │   │   ├── robust_kernel.cpp.o.d
+│   │   │   │   │   │   │   ├── robust_kernel_factory.cpp.o
+│   │   │   │   │   │   │   ├── robust_kernel_factory.cpp.o.d
+│   │   │   │   │   │   │   ├── robust_kernel_impl.cpp.o
+│   │   │   │   │   │   │   ├── robust_kernel_impl.cpp.o.d
+│   │   │   │   │   │   │   ├── solver.cpp.o
+│   │   │   │   │   │   │   ├── solver.cpp.o.d
+│   │   │   │   │   │   │   ├── sparse_optimizer.cpp.o
+│   │   │   │   │   │   │   ├── sparse_optimizer.cpp.o.d
+│   │   │   │   │   │   │   ├── sparse_optimizer_terminate_action.cpp.o
+│   │   │   │   │   │   │   └── sparse_optimizer_terminate_action.cpp.o.d
+│   │   │   │   │   │   └── progress.marks
+│   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   └── Makefile
+│   │   │   │   ├── EXTERNAL
+│   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   └── progress.marks
+│   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   └── Makefile
+│   │   │   │   ├── Makefile
+│   │   │   │   ├── solvers
+│   │   │   │   │   ├── cholmod
+│   │   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   │   └── solver_cholmod.dir
+│   │   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │   │       ├── cholmod_wrapper.cpp.o
+│   │   │   │   │   │   │       ├── cholmod_wrapper.cpp.o.d
+│   │   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │   │       ├── solver_cholmod.cpp.o
+│   │   │   │   │   │   │       └── solver_cholmod.cpp.o.d
+│   │   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   │   └── Makefile
+│   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   └── progress.marks
+│   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   ├── csparse
+│   │   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   │   ├── csparse_extension.dir
+│   │   │   │   │   │   │   │   ├── build.make
+│   │   │   │   │   │   │   │   ├── cmake_clean.cmake
+│   │   │   │   │   │   │   │   ├── compiler_depend.make
+│   │   │   │   │   │   │   │   ├── compiler_depend.ts
+│   │   │   │   │   │   │   │   ├── csparse_extension.cpp.o
+│   │   │   │   │   │   │   │   ├── csparse_extension.cpp.o.d
+│   │   │   │   │   │   │   │   ├── csparse_helper.cpp.o
+│   │   │   │   │   │   │   │   ├── csparse_helper.cpp.o.d
+│   │   │   │   │   │   │   │   ├── DependInfo.cmake
+│   │   │   │   │   │   │   │   ├── depend.make
+│   │   │   │   │   │   │   │   ├── flags.make
+│   │   │   │   │   │   │   │   ├── link.txt
+│   │   │   │   │   │   │   │   └── progress.make
+│   │   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   │   └── solver_csparse.dir
+│   │   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │   │       ├── csparse_wrapper.cpp.o
+│   │   │   │   │   │   │       ├── csparse_wrapper.cpp.o.d
+│   │   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │   │       ├── solver_csparse.cpp.o
+│   │   │   │   │   │   │       └── solver_csparse.cpp.o.d
+│   │   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   │   └── Makefile
+│   │   │   │   │   ├── dense
+│   │   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   │   └── solver_dense.dir
+│   │   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │   │       ├── solver_dense.cpp.o
+│   │   │   │   │   │   │       └── solver_dense.cpp.o.d
+│   │   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   │   └── Makefile
+│   │   │   │   │   ├── eigen
+│   │   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   │   └── solver_eigen.dir
+│   │   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │   │       ├── solver_eigen.cpp.o
+│   │   │   │   │   │   │       └── solver_eigen.cpp.o.d
+│   │   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   │   └── Makefile
+│   │   │   │   │   ├── Makefile
+│   │   │   │   │   ├── pcg
+│   │   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   │   └── solver_pcg.dir
+│   │   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │   │       ├── solver_pcg.cpp.o
+│   │   │   │   │   │   │       └── solver_pcg.cpp.o.d
+│   │   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   │   └── Makefile
+│   │   │   │   │   └── structure_only
+│   │   │   │   │       ├── CMakeFiles
+│   │   │   │   │       │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │       │   ├── progress.marks
+│   │   │   │   │       │   └── solver_structure_only.dir
+│   │   │   │   │       │       ├── build.make
+│   │   │   │   │       │       ├── cmake_clean.cmake
+│   │   │   │   │       │       ├── compiler_depend.make
+│   │   │   │   │       │       ├── compiler_depend.ts
+│   │   │   │   │       │       ├── DependInfo.cmake
+│   │   │   │   │       │       ├── depend.make
+│   │   │   │   │       │       ├── flags.make
+│   │   │   │   │       │       ├── link.txt
+│   │   │   │   │       │       ├── progress.make
+│   │   │   │   │       │       ├── structure_only.cpp.o
+│   │   │   │   │       │       └── structure_only.cpp.o.d
+│   │   │   │   │       ├── cmake_install.cmake
+│   │   │   │   │       └── Makefile
+│   │   │   │   ├── stuff
+│   │   │   │   │   ├── CMakeFiles
+│   │   │   │   │   │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │   │   │   ├── progress.marks
+│   │   │   │   │   │   └── stuff.dir
+│   │   │   │   │   │       ├── build.make
+│   │   │   │   │   │       ├── cmake_clean.cmake
+│   │   │   │   │   │       ├── command_args.cpp.o
+│   │   │   │   │   │       ├── command_args.cpp.o.d
+│   │   │   │   │   │       ├── compiler_depend.make
+│   │   │   │   │   │       ├── compiler_depend.ts
+│   │   │   │   │   │       ├── DependInfo.cmake
+│   │   │   │   │   │       ├── depend.make
+│   │   │   │   │   │       ├── filesys_tools.cpp.o
+│   │   │   │   │   │       ├── filesys_tools.cpp.o.d
+│   │   │   │   │   │       ├── flags.make
+│   │   │   │   │   │       ├── link.txt
+│   │   │   │   │   │       ├── logger.cpp.o
+│   │   │   │   │   │       ├── logger.cpp.o.d
+│   │   │   │   │   │       ├── os_specific.c.o
+│   │   │   │   │   │       ├── os_specific.c.o.d
+│   │   │   │   │   │       ├── progress.make
+│   │   │   │   │   │       ├── property.cpp.o
+│   │   │   │   │   │       ├── property.cpp.o.d
+│   │   │   │   │   │       ├── sampler.cpp.o
+│   │   │   │   │   │       ├── sampler.cpp.o.d
+│   │   │   │   │   │       ├── sparse_helper.cpp.o
+│   │   │   │   │   │       ├── sparse_helper.cpp.o.d
+│   │   │   │   │   │       ├── string_tools.cpp.o
+│   │   │   │   │   │       ├── string_tools.cpp.o.d
+│   │   │   │   │   │       ├── tictoc.cpp.o
+│   │   │   │   │   │       ├── tictoc.cpp.o.d
+│   │   │   │   │   │       ├── timeutil.cpp.o
+│   │   │   │   │   │       └── timeutil.cpp.o.d
+│   │   │   │   │   ├── cmake_install.cmake
+│   │   │   │   │   └── Makefile
+│   │   │   │   └── types
+│   │   │   │       ├── CMakeFiles
+│   │   │   │       │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │       │   └── progress.marks
+│   │   │   │       ├── cmake_install.cmake
+│   │   │   │       ├── Makefile
+│   │   │   │       └── slam3d
+│   │   │   │           ├── CMakeFiles
+│   │   │   │           │   ├── CMakeDirectoryInformation.cmake
+│   │   │   │           │   ├── progress.marks
+│   │   │   │           │   └── types_slam3d.dir
+│   │   │   │           │       ├── build.make
+│   │   │   │           │       ├── cmake_clean.cmake
+│   │   │   │           │       ├── compiler_depend.make
+│   │   │   │           │       ├── compiler_depend.ts
+│   │   │   │           │       ├── DependInfo.cmake
+│   │   │   │           │       ├── depend.make
+│   │   │   │           │       ├── dquat2mat.cpp.o
+│   │   │   │           │       ├── dquat2mat.cpp.o.d
+│   │   │   │           │       ├── edge_pointxyz.cpp.o
+│   │   │   │           │       ├── edge_pointxyz.cpp.o.d
+│   │   │   │           │       ├── edge_se3.cpp.o
+│   │   │   │           │       ├── edge_se3.cpp.o.d
+│   │   │   │           │       ├── edge_se3_lotsofxyz.cpp.o
+│   │   │   │           │       ├── edge_se3_lotsofxyz.cpp.o.d
+│   │   │   │           │       ├── edge_se3_offset.cpp.o
+│   │   │   │           │       ├── edge_se3_offset.cpp.o.d
+│   │   │   │           │       ├── edge_se3_pointxyz.cpp.o
+│   │   │   │           │       ├── edge_se3_pointxyz.cpp.o.d
+│   │   │   │           │       ├── edge_se3_pointxyz_depth.cpp.o
+│   │   │   │           │       ├── edge_se3_pointxyz_depth.cpp.o.d
+│   │   │   │           │       ├── edge_se3_pointxyz_disparity.cpp.o
+│   │   │   │           │       ├── edge_se3_pointxyz_disparity.cpp.o.d
+│   │   │   │           │       ├── edge_se3_prior.cpp.o
+│   │   │   │           │       ├── edge_se3_prior.cpp.o.d
+│   │   │   │           │       ├── edge_se3_xyzprior.cpp.o
+│   │   │   │           │       ├── edge_se3_xyzprior.cpp.o.d
+│   │   │   │           │       ├── edge_xyz_prior.cpp.o
+│   │   │   │           │       ├── edge_xyz_prior.cpp.o.d
+│   │   │   │           │       ├── flags.make
+│   │   │   │           │       ├── isometry3d_gradients.cpp.o
+│   │   │   │           │       ├── isometry3d_gradients.cpp.o.d
+│   │   │   │           │       ├── isometry3d_mappings.cpp.o
+│   │   │   │           │       ├── isometry3d_mappings.cpp.o.d
+│   │   │   │           │       ├── link.txt
+│   │   │   │           │       ├── parameter_camera.cpp.o
+│   │   │   │           │       ├── parameter_camera.cpp.o.d
+│   │   │   │           │       ├── parameter_se3_offset.cpp.o
+│   │   │   │           │       ├── parameter_se3_offset.cpp.o.d
+│   │   │   │           │       ├── parameter_stereo_camera.cpp.o
+│   │   │   │           │       ├── parameter_stereo_camera.cpp.o.d
+│   │   │   │           │       ├── progress.make
+│   │   │   │           │       ├── types_slam3d.cpp.o
+│   │   │   │           │       ├── types_slam3d.cpp.o.d
+│   │   │   │           │       ├── vertex_pointxyz.cpp.o
+│   │   │   │           │       ├── vertex_pointxyz.cpp.o.d
+│   │   │   │           │       ├── vertex_se3.cpp.o
+│   │   │   │           │       └── vertex_se3.cpp.o.d
+│   │   │   │           ├── cmake_install.cmake
+│   │   │   │           └── Makefile
+│   │   │   ├── generated
+│   │   │   │   ├── g2oConfig.cmake
+│   │   │   │   └── g2oConfigVersion.cmake
+│   │   │   ├── lib
+│   │   │   │   ├── libg2o_core.so -> libg2o_core.so.0.1
+│   │   │   │   ├── libg2o_core.so.0.1 -> libg2o_core.so.0.1.0
+│   │   │   │   ├── libg2o_core.so.0.1.0
+│   │   │   │   ├── libg2o_csparse_extension.so -> libg2o_csparse_extension.so.0.1
+│   │   │   │   ├── libg2o_csparse_extension.so.0.1 -> libg2o_csparse_extension.so.0.1.0
+│   │   │   │   ├── libg2o_csparse_extension.so.0.1.0
+│   │   │   │   ├── libg2o_solver_cholmod.so -> libg2o_solver_cholmod.so.0.1
+│   │   │   │   ├── libg2o_solver_cholmod.so.0.1 -> libg2o_solver_cholmod.so.0.1.0
+│   │   │   │   ├── libg2o_solver_cholmod.so.0.1.0
+│   │   │   │   ├── libg2o_solver_csparse.so -> libg2o_solver_csparse.so.0.1
+│   │   │   │   ├── libg2o_solver_csparse.so.0.1 -> libg2o_solver_csparse.so.0.1.0
+│   │   │   │   ├── libg2o_solver_csparse.so.0.1.0
+│   │   │   │   ├── libg2o_solver_dense.so -> libg2o_solver_dense.so.0.1
+│   │   │   │   ├── libg2o_solver_dense.so.0.1 -> libg2o_solver_dense.so.0.1.0
+│   │   │   │   ├── libg2o_solver_dense.so.0.1.0
+│   │   │   │   ├── libg2o_solver_eigen.so -> libg2o_solver_eigen.so.0.1
+│   │   │   │   ├── libg2o_solver_eigen.so.0.1 -> libg2o_solver_eigen.so.0.1.0
+│   │   │   │   ├── libg2o_solver_eigen.so.0.1.0
+│   │   │   │   ├── libg2o_solver_pcg.so -> libg2o_solver_pcg.so.0.1
+│   │   │   │   ├── libg2o_solver_pcg.so.0.1 -> libg2o_solver_pcg.so.0.1.0
+│   │   │   │   ├── libg2o_solver_pcg.so.0.1.0
+│   │   │   │   ├── libg2o_solver_structure_only.so -> libg2o_solver_structure_only.so.0.1
+│   │   │   │   ├── libg2o_solver_structure_only.so.0.1 -> libg2o_solver_structure_only.so.0.1.0
+│   │   │   │   ├── libg2o_solver_structure_only.so.0.1.0
+│   │   │   │   ├── libg2o_stuff.so -> libg2o_stuff.so.0.1
+│   │   │   │   ├── libg2o_stuff.so.0.1 -> libg2o_stuff.so.0.1.0
+│   │   │   │   ├── libg2o_stuff.so.0.1.0
+│   │   │   │   ├── libg2o_types_slam3d.so -> libg2o_types_slam3d.so.0.1
+│   │   │   │   ├── libg2o_types_slam3d.so.0.1 -> libg2o_types_slam3d.so.0.1.0
+│   │   │   │   └── libg2o_types_slam3d.so.0.1.0
+│   │   │   └── Makefile
+│   │   ├── CMakeLists.txt
+│   │   ├── cmake_modules
+│   │   │   ├── CheckIfUnderscorePrefixedBesselFunctionsExist.cmake
+│   │   │   ├── Config.cmake.in
+│   │   │   ├── FindCSparse.cmake
+│   │   │   ├── FindEigen3.cmake
+│   │   │   ├── FindG2O.cmake
+│   │   │   ├── FindMETIS.cmake
+│   │   │   ├── FindQGLViewer.cmake
+│   │   │   └── FindSuiteSparse.cmake
+│   │   ├── codecov.yml
+│   │   ├── config.h.in
+│   │   ├── doc
+│   │   │   ├── doxygen
+│   │   │   │   ├── doxy.config
+│   │   │   │   └── readme.txt
+│   │   │   ├── g2o.tex
+│   │   │   ├── license-bsd.txt
+│   │   │   ├── license-gpl.txt
+│   │   │   ├── license-lgpl.txt
+│   │   │   ├── Makefile
+│   │   │   ├── pics
+│   │   │   │   ├── classes.fig
+│   │   │   │   ├── classes.svg
+│   │   │   │   ├── hgraph.fig
+│   │   │   │   ├── slam.fig
+│   │   │   │   └── viewer.png
+│   │   │   ├── README_IF_IT_WAS_WORKING_AND_IT_DOES_NOT.txt
+│   │   │   └── robots.bib
+│   │   ├── FR_SLAM_G2O_VERSION.txt
+│   │   ├── g2o
+│   │   │   ├── apps
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── g2o_cli
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── dl_wrapper.cpp
+│   │   │   │   │   ├── dl_wrapper.h
+│   │   │   │   │   ├── g2o_cli_api.h
+│   │   │   │   │   ├── g2o_common.cpp
+│   │   │   │   │   ├── g2o_common.h
+│   │   │   │   │   ├── g2o.cpp
+│   │   │   │   │   ├── output_helper.cpp
+│   │   │   │   │   └── output_helper.h
+│   │   │   │   ├── g2o_simulator
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── g2o_simulator_api.h
+│   │   │   │   │   ├── pointsensorparameters.cpp
+│   │   │   │   │   ├── pointsensorparameters.h
+│   │   │   │   │   ├── sensor_line3d.cpp
+│   │   │   │   │   ├── sensor_line3d.h
+│   │   │   │   │   ├── sensor_odometry2d.cpp
+│   │   │   │   │   ├── sensor_odometry2d.h
+│   │   │   │   │   ├── sensor_odometry3d.cpp
+│   │   │   │   │   ├── sensor_odometry3d.h
+│   │   │   │   │   ├── sensor_odometry.h
+│   │   │   │   │   ├── sensor_pointxy_bearing.cpp
+│   │   │   │   │   ├── sensor_pointxy_bearing.h
+│   │   │   │   │   ├── sensor_pointxy.cpp
+│   │   │   │   │   ├── sensor_pointxy.h
+│   │   │   │   │   ├── sensor_pointxy_offset.cpp
+│   │   │   │   │   ├── sensor_pointxy_offset.h
+│   │   │   │   │   ├── sensor_pointxyz.cpp
+│   │   │   │   │   ├── sensor_pointxyz_depth.cpp
+│   │   │   │   │   ├── sensor_pointxyz_depth.h
+│   │   │   │   │   ├── sensor_pointxyz_disparity.cpp
+│   │   │   │   │   ├── sensor_pointxyz_disparity.h
+│   │   │   │   │   ├── sensor_pointxyz.h
+│   │   │   │   │   ├── sensor_pose2d.cpp
+│   │   │   │   │   ├── sensor_pose2d.h
+│   │   │   │   │   ├── sensor_pose3d.cpp
+│   │   │   │   │   ├── sensor_pose3d.h
+│   │   │   │   │   ├── sensor_pose3d_offset.cpp
+│   │   │   │   │   ├── sensor_pose3d_offset.h
+│   │   │   │   │   ├── sensor_se3_prior.cpp
+│   │   │   │   │   ├── sensor_se3_prior.h
+│   │   │   │   │   ├── sensor_segment2d.cpp
+│   │   │   │   │   ├── sensor_segment2d.h
+│   │   │   │   │   ├── sensor_segment2d_line.cpp
+│   │   │   │   │   ├── sensor_segment2d_line.h
+│   │   │   │   │   ├── sensor_segment2d_pointline.cpp
+│   │   │   │   │   ├── sensor_segment2d_pointline.h
+│   │   │   │   │   ├── simulator2d_base.h
+│   │   │   │   │   ├── simulator2d.h
+│   │   │   │   │   ├── simulator2d_segment.cpp
+│   │   │   │   │   ├── simulator3d_base.h
+│   │   │   │   │   ├── simulator3d.h
+│   │   │   │   │   ├── simulator.cpp
+│   │   │   │   │   ├── simulator.h
+│   │   │   │   │   ├── simutils.cpp
+│   │   │   │   │   ├── simutils.h
+│   │   │   │   │   ├── test_simulator2d.cpp
+│   │   │   │   │   └── test_simulator3d.cpp
+│   │   │   │   ├── g2o_viewer
+│   │   │   │   │   ├── base_main_window.ui
+│   │   │   │   │   ├── base_properties_widget.ui
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── g2o_qglviewer.cpp
+│   │   │   │   │   ├── g2o_qglviewer.h
+│   │   │   │   │   ├── g2o_viewer_api.h
+│   │   │   │   │   ├── g2o_viewer.cpp
+│   │   │   │   │   ├── gui_hyper_graph_action.cpp
+│   │   │   │   │   ├── gui_hyper_graph_action.h
+│   │   │   │   │   ├── main_window.cpp
+│   │   │   │   │   ├── main_window.h
+│   │   │   │   │   ├── properties_widget.cpp
+│   │   │   │   │   ├── properties_widget.h
+│   │   │   │   │   ├── run_g2o_viewer.cpp
+│   │   │   │   │   ├── run_g2o_viewer.h
+│   │   │   │   │   ├── stream_redirect.cpp
+│   │   │   │   │   ├── stream_redirect.h
+│   │   │   │   │   ├── viewer_properties_widget.cpp
+│   │   │   │   │   └── viewer_properties_widget.h
+│   │   │   │   └── linked_binaries
+│   │   │   │       └── CMakeLists.txt
+│   │   │   ├── autodiff
+│   │   │   │   ├── array_selector.h
+│   │   │   │   ├── autodiff.h
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── disable_warnings.h
+│   │   │   │   ├── eigen.h
+│   │   │   │   ├── fixed_array.h
+│   │   │   │   ├── integer_sequence_algorithm.h
+│   │   │   │   ├── jet.h
+│   │   │   │   ├── LICENSE
+│   │   │   │   ├── memory.h
+│   │   │   │   ├── parameter_dims.h
+│   │   │   │   ├── reenable_warnings.h
+│   │   │   │   ├── types.h
+│   │   │   │   └── variadic_evaluate.h
+│   │   │   ├── CMakeLists.txt
+│   │   │   ├── core
+│   │   │   │   ├── auto_differentiation.h
+│   │   │   │   ├── base_binary_edge.h
+│   │   │   │   ├── base_dynamic_vertex.h
+│   │   │   │   ├── base_edge.h
+│   │   │   │   ├── base_fixed_sized_edge.h
+│   │   │   │   ├── base_fixed_sized_edge.hpp
+│   │   │   │   ├── base_multi_edge.h
+│   │   │   │   ├── base_unary_edge.h
+│   │   │   │   ├── base_variable_sized_edge.h
+│   │   │   │   ├── base_variable_sized_edge.hpp
+│   │   │   │   ├── base_vertex.h
+│   │   │   │   ├── base_vertex.hpp
+│   │   │   │   ├── batch_stats.cpp
+│   │   │   │   ├── batch_stats.h
+│   │   │   │   ├── block_solver.h
+│   │   │   │   ├── block_solver.hpp
+│   │   │   │   ├── cache.cpp
+│   │   │   │   ├── cache.h
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── creators.h
+│   │   │   │   ├── dynamic_aligned_buffer.hpp
+│   │   │   │   ├── eigen_types.h
+│   │   │   │   ├── estimate_propagator.cpp
+│   │   │   │   ├── estimate_propagator.h
+│   │   │   │   ├── factory.cpp
+│   │   │   │   ├── factory.h
+│   │   │   │   ├── g2o_core_api.h
+│   │   │   │   ├── hyper_dijkstra.cpp
+│   │   │   │   ├── hyper_dijkstra.h
+│   │   │   │   ├── hyper_graph_action.cpp
+│   │   │   │   ├── hyper_graph_action.h
+│   │   │   │   ├── hyper_graph.cpp
+│   │   │   │   ├── hyper_graph.h
+│   │   │   │   ├── io_helper.h
+│   │   │   │   ├── jacobian_workspace.cpp
+│   │   │   │   ├── jacobian_workspace.h
+│   │   │   │   ├── linear_solver.h
+│   │   │   │   ├── marginal_covariance_cholesky.cpp
+│   │   │   │   ├── marginal_covariance_cholesky.h
+│   │   │   │   ├── matrix_operations.h
+│   │   │   │   ├── matrix_structure.cpp
+│   │   │   │   ├── matrix_structure.h
+│   │   │   │   ├── openmp_mutex.h
+│   │   │   │   ├── optimizable_graph.cpp
+│   │   │   │   ├── optimizable_graph.h
+│   │   │   │   ├── optimization_algorithm.cpp
+│   │   │   │   ├── optimization_algorithm_dogleg.cpp
+│   │   │   │   ├── optimization_algorithm_dogleg.h
+│   │   │   │   ├── optimization_algorithm_factory.cpp
+│   │   │   │   ├── optimization_algorithm_factory.h
+│   │   │   │   ├── optimization_algorithm_gauss_newton.cpp
+│   │   │   │   ├── optimization_algorithm_gauss_newton.h
+│   │   │   │   ├── optimization_algorithm.h
+│   │   │   │   ├── optimization_algorithm_levenberg.cpp
+│   │   │   │   ├── optimization_algorithm_levenberg.h
+│   │   │   │   ├── optimization_algorithm_property.h
+│   │   │   │   ├── optimization_algorithm_with_hessian.cpp
+│   │   │   │   ├── optimization_algorithm_with_hessian.h
+│   │   │   │   ├── ownership.h
+│   │   │   │   ├── parameter_container.cpp
+│   │   │   │   ├── parameter_container.h
+│   │   │   │   ├── parameter.cpp
+│   │   │   │   ├── parameter.h
+│   │   │   │   ├── robust_kernel.cpp
+│   │   │   │   ├── robust_kernel_factory.cpp
+│   │   │   │   ├── robust_kernel_factory.h
+│   │   │   │   ├── robust_kernel.h
+│   │   │   │   ├── robust_kernel_impl.cpp
+│   │   │   │   ├── robust_kernel_impl.h
+│   │   │   │   ├── solver.cpp
+│   │   │   │   ├── solver.h
+│   │   │   │   ├── sparse_block_matrix_ccs.h
+│   │   │   │   ├── sparse_block_matrix_diagonal.h
+│   │   │   │   ├── sparse_block_matrix.h
+│   │   │   │   ├── sparse_block_matrix.hpp
+│   │   │   │   ├── sparse_optimizer.cpp
+│   │   │   │   ├── sparse_optimizer.h
+│   │   │   │   ├── sparse_optimizer_terminate_action.cpp
+│   │   │   │   └── sparse_optimizer_terminate_action.h
+│   │   │   ├── examples
+│   │   │   │   ├── anonymize_observations
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── g2o_anonymize_observations.cpp
+│   │   │   │   ├── ba
+│   │   │   │   │   ├── ba_demo.cpp
+│   │   │   │   │   └── CMakeLists.txt
+│   │   │   │   ├── ba_anchored_inverse_depth
+│   │   │   │   │   ├── ba_anchored_inverse_depth_demo.cpp
+│   │   │   │   │   └── CMakeLists.txt
+│   │   │   │   ├── bal
+│   │   │   │   │   ├── bal_example.cpp
+│   │   │   │   │   └── CMakeLists.txt
+│   │   │   │   ├── calibration_odom_laser
+│   │   │   │   │   ├── closed_form_calibration.cpp
+│   │   │   │   │   ├── closed_form_calibration.h
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_se2_pure_calib.cpp
+│   │   │   │   │   ├── edge_se2_pure_calib.h
+│   │   │   │   │   ├── g2o_calibration_odom_laser_api.h
+│   │   │   │   │   ├── gm2dl_io.cpp
+│   │   │   │   │   ├── gm2dl_io.h
+│   │   │   │   │   ├── motion_information.h
+│   │   │   │   │   ├── sclam_helpers.cpp
+│   │   │   │   │   ├── sclam_helpers.h
+│   │   │   │   │   ├── sclam_laser_calib.cpp
+│   │   │   │   │   ├── sclam_odom_laser.cpp
+│   │   │   │   │   └── sclam_pure_calibration.cpp
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── convert_segment_line
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── convertSegmentLine.cpp
+│   │   │   │   ├── data_convert
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── convert_sba_slam3d.cpp
+│   │   │   │   ├── data_fitting
+│   │   │   │   │   ├── circle_fit.cpp
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── curve_fit.cpp
+│   │   │   │   ├── dynamic_vertex
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── polynomial_fit.cpp
+│   │   │   │   │   └── static_dynamic_function_fit.cpp
+│   │   │   │   ├── g2o_hierarchical
+│   │   │   │   │   ├── backbone_tree_action.cpp
+│   │   │   │   │   ├── backbone_tree_action.h
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_creator.cpp
+│   │   │   │   │   ├── edge_creator.h
+│   │   │   │   │   ├── edge_labeler.cpp
+│   │   │   │   │   ├── edge_labeler.h
+│   │   │   │   │   ├── edge_types_cost_function.cpp
+│   │   │   │   │   ├── edge_types_cost_function.h
+│   │   │   │   │   ├── g2o_hierarchical_api.h
+│   │   │   │   │   ├── g2o_hierarchical.cpp
+│   │   │   │   │   ├── g2o_hierarchical_test_functions.cpp
+│   │   │   │   │   ├── simple_star_ops.cpp
+│   │   │   │   │   ├── simple_star_ops.h
+│   │   │   │   │   ├── star.cpp
+│   │   │   │   │   └── star.h
+│   │   │   │   ├── g2o_unfold
+│   │   │   │   │   ├── g2o-unfold.cpp
+│   │   │   │   │   ├── tools.cpp
+│   │   │   │   │   └── tools.h
+│   │   │   │   ├── icp
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── gicp_demo.cpp
+│   │   │   │   │   ├── gicp_sba_demo.cpp
+│   │   │   │   │   └── gicp-test1.dat
+│   │   │   │   ├── interactive_slam
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── g2o_incremental
+│   │   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   │   ├── g2o_incremental_api.h
+│   │   │   │   │   │   ├── g2o_incremental.cpp
+│   │   │   │   │   │   ├── graph_optimizer_sparse_incremental.cpp
+│   │   │   │   │   │   ├── graph_optimizer_sparse_incremental.h
+│   │   │   │   │   │   ├── linear_solver_cholmod_online.h
+│   │   │   │   │   │   ├── protocol.txt
+│   │   │   │   │   │   └── README.txt
+│   │   │   │   │   ├── g2o_interactive
+│   │   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   │   ├── fast_output.h
+│   │   │   │   │   │   ├── g2o_interactive_api.h
+│   │   │   │   │   │   ├── g2o_online.cpp
+│   │   │   │   │   │   ├── g2o_slam_interface.cpp
+│   │   │   │   │   │   ├── g2o_slam_interface.h
+│   │   │   │   │   │   ├── generate_commands.cpp
+│   │   │   │   │   │   ├── graph_optimizer_sparse_online.cpp
+│   │   │   │   │   │   ├── graph_optimizer_sparse_online.h
+│   │   │   │   │   │   ├── protocol.txt
+│   │   │   │   │   │   ├── types_online.cpp
+│   │   │   │   │   │   ├── types_slam2d_online.h
+│   │   │   │   │   │   └── types_slam3d_online.h
+│   │   │   │   │   ├── README.txt
+│   │   │   │   │   └── slam_parser
+│   │   │   │   │       ├── CMakeLists.txt
+│   │   │   │   │       ├── example
+│   │   │   │   │       │   ├── CMakeLists.txt
+│   │   │   │   │       │   ├── example_slam_interface.cpp
+│   │   │   │   │       │   ├── example_slam_interface.h
+│   │   │   │   │       │   └── test_slam_interface.cpp
+│   │   │   │   │       ├── interface
+│   │   │   │   │       │   ├── abstract_slam_interface.h
+│   │   │   │   │       │   ├── CMakeLists.txt
+│   │   │   │   │       │   ├── parser_interface.cpp
+│   │   │   │   │       │   ├── parser_interface.h
+│   │   │   │   │       │   ├── slam_context_interface.cpp
+│   │   │   │   │       │   └── slam_context_interface.h
+│   │   │   │   │       └── parser
+│   │   │   │   │           ├── bison_parser.cpp
+│   │   │   │   │           ├── bison_parser.h
+│   │   │   │   │           ├── CMakeLists.txt
+│   │   │   │   │           ├── commands.h
+│   │   │   │   │           ├── driver.cpp
+│   │   │   │   │           ├── driver.h
+│   │   │   │   │           ├── FlexLexer.h
+│   │   │   │   │           ├── flex_scanner.cpp
+│   │   │   │   │           ├── grammar.sh
+│   │   │   │   │           ├── location.hh
+│   │   │   │   │           ├── parser.yy
+│   │   │   │   │           ├── position.hh
+│   │   │   │   │           ├── scanner.h
+│   │   │   │   │           ├── scanner.l
+│   │   │   │   │           ├── slam_context.cpp
+│   │   │   │   │           ├── slam_context.h
+│   │   │   │   │           └── test_slam_parser.cpp
+│   │   │   │   ├── line_slam
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── line_test.cpp
+│   │   │   │   │   └── simulator_3d_line.cpp
+│   │   │   │   ├── plane_slam
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── plane_test.cpp
+│   │   │   │   │   └── simulator_3d_plane.cpp
+│   │   │   │   ├── sba
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── sba_demo.cpp
+│   │   │   │   ├── sim3
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── optimize_sphere_by_sim3.cpp
+│   │   │   │   ├── simple_optimize
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── simple_optimize.cpp
+│   │   │   │   ├── slam2d
+│   │   │   │   │   ├── base_main_window.ui
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── main_window.cpp
+│   │   │   │   │   ├── main_window.h
+│   │   │   │   │   ├── slam2d_g2o.cpp
+│   │   │   │   │   ├── slam2d_viewer.cpp
+│   │   │   │   │   └── slam2d_viewer.h
+│   │   │   │   ├── sphere
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   └── create_sphere.cpp
+│   │   │   │   ├── target
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── constant_velocity_target.cpp
+│   │   │   │   │   ├── continuous_to_discrete.h
+│   │   │   │   │   ├── static_target.cpp
+│   │   │   │   │   ├── targetTypes3D.hpp
+│   │   │   │   │   └── targetTypes6D.hpp
+│   │   │   │   └── tutorial_slam2d
+│   │   │   │       ├── CMakeLists.txt
+│   │   │   │       ├── edge_se2.cpp
+│   │   │   │       ├── edge_se2.h
+│   │   │   │       ├── edge_se2_pointxy.cpp
+│   │   │   │       ├── edge_se2_pointxy.h
+│   │   │   │       ├── g2o_tutorial_slam2d_api.h
+│   │   │   │       ├── parameter_se2_offset.cpp
+│   │   │   │       ├── parameter_se2_offset.h
+│   │   │   │       ├── se2.h
+│   │   │   │       ├── simulator.cpp
+│   │   │   │       ├── simulator.h
+│   │   │   │       ├── tutorial_slam2d.cpp
+│   │   │   │       ├── types_tutorial_slam2d.cpp
+│   │   │   │       ├── types_tutorial_slam2d.h
+│   │   │   │       ├── vertex_point_xy.cpp
+│   │   │   │       ├── vertex_point_xy.h
+│   │   │   │       ├── vertex_se2.cpp
+│   │   │   │       └── vertex_se2.h
+│   │   │   ├── EXTERNAL
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   └── freeglut
+│   │   │   │       ├── CMakeLists.txt
+│   │   │   │       ├── COPYING
+│   │   │   │       ├── freeglut_font.cpp
+│   │   │   │       ├── freeglut_minimal.h
+│   │   │   │       ├── freeglut_stroke_mono_roman.cpp
+│   │   │   │       └── freeglut_stroke_roman.cpp
+│   │   │   ├── solvers
+│   │   │   │   ├── cholmod
+│   │   │   │   │   ├── cholmod_ext.h
+│   │   │   │   │   ├── cholmod_wrapper.cpp
+│   │   │   │   │   ├── cholmod_wrapper.h
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── linear_solver_cholmod.h
+│   │   │   │   │   └── solver_cholmod.cpp
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── csparse
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── csparse_extension.cpp
+│   │   │   │   │   ├── csparse_extension.h
+│   │   │   │   │   ├── csparse_helper.cpp
+│   │   │   │   │   ├── csparse_helper.h
+│   │   │   │   │   ├── csparse_wrapper.cpp
+│   │   │   │   │   ├── csparse_wrapper.h
+│   │   │   │   │   ├── g2o_csparse_api.h
+│   │   │   │   │   ├── g2o_csparse_extension_api.h
+│   │   │   │   │   ├── linear_solver_csparse.h
+│   │   │   │   │   └── solver_csparse.cpp
+│   │   │   │   ├── dense
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── linear_solver_dense.h
+│   │   │   │   │   └── solver_dense.cpp
+│   │   │   │   ├── eigen
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── linear_solver_eigen.h
+│   │   │   │   │   └── solver_eigen.cpp
+│   │   │   │   ├── pcg
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── linear_solver_pcg.h
+│   │   │   │   │   ├── linear_solver_pcg.hpp
+│   │   │   │   │   └── solver_pcg.cpp
+│   │   │   │   ├── slam2d_linear
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── g2o_slam2d_linear_api.h
+│   │   │   │   │   ├── slam2d_linear.cpp
+│   │   │   │   │   ├── solver_slam2d_linear.cpp
+│   │   │   │   │   └── solver_slam2d_linear.h
+│   │   │   │   └── structure_only
+│   │   │   │       ├── CMakeLists.txt
+│   │   │   │       ├── structure_only.cpp
+│   │   │   │       └── structure_only_solver.h
+│   │   │   ├── stuff
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── color_macros.h
+│   │   │   │   ├── command_args.cpp
+│   │   │   │   ├── command_args.h
+│   │   │   │   ├── filesys_tools.cpp
+│   │   │   │   ├── filesys_tools.h
+│   │   │   │   ├── g2o_stuff_api.h
+│   │   │   │   ├── logger.cpp
+│   │   │   │   ├── logger_format.h
+│   │   │   │   ├── logger.h
+│   │   │   │   ├── macros.h
+│   │   │   │   ├── misc.h
+│   │   │   │   ├── opengl_primitives.cpp
+│   │   │   │   ├── opengl_primitives.h
+│   │   │   │   ├── opengl_wrapper.h
+│   │   │   │   ├── os_specific.c
+│   │   │   │   ├── os_specific.h
+│   │   │   │   ├── property.cpp
+│   │   │   │   ├── property.h
+│   │   │   │   ├── sampler.cpp
+│   │   │   │   ├── sampler.h
+│   │   │   │   ├── sparse_helper.cpp
+│   │   │   │   ├── sparse_helper.h
+│   │   │   │   ├── string_tools.cpp
+│   │   │   │   ├── string_tools.h
+│   │   │   │   ├── tictoc.cpp
+│   │   │   │   ├── tictoc.h
+│   │   │   │   ├── timeutil.cpp
+│   │   │   │   ├── timeutil.h
+│   │   │   │   ├── tuple_tools.h
+│   │   │   │   └── unscented.h
+│   │   │   ├── types
+│   │   │   │   ├── CMakeLists.txt
+│   │   │   │   ├── data
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── data_queue.cpp
+│   │   │   │   │   ├── data_queue.h
+│   │   │   │   │   ├── g2o_types_data_api.h
+│   │   │   │   │   ├── laser_parameters.cpp
+│   │   │   │   │   ├── laser_parameters.h
+│   │   │   │   │   ├── raw_laser.cpp
+│   │   │   │   │   ├── raw_laser.h
+│   │   │   │   │   ├── robot_data.cpp
+│   │   │   │   │   ├── robot_data.h
+│   │   │   │   │   ├── robot_laser.cpp
+│   │   │   │   │   ├── robot_laser.h
+│   │   │   │   │   ├── types_data.cpp
+│   │   │   │   │   ├── types_data.h
+│   │   │   │   │   ├── vertex_ellipse.cpp
+│   │   │   │   │   ├── vertex_ellipse.h
+│   │   │   │   │   ├── vertex_tag.cpp
+│   │   │   │   │   └── vertex_tag.h
+│   │   │   │   ├── icp
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── g2o_types_icp_api.h
+│   │   │   │   │   ├── types_icp.cpp
+│   │   │   │   │   └── types_icp.h
+│   │   │   │   ├── sba
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_project_p2mc.cpp
+│   │   │   │   │   ├── edge_project_p2mc.h
+│   │   │   │   │   ├── edge_project_p2sc.cpp
+│   │   │   │   │   ├── edge_project_p2sc.h
+│   │   │   │   │   ├── edge_project_psi2uv.cpp
+│   │   │   │   │   ├── edge_project_psi2uv.h
+│   │   │   │   │   ├── edge_project_stereo_xyz.cpp
+│   │   │   │   │   ├── edge_project_stereo_xyz.h
+│   │   │   │   │   ├── edge_project_stereo_xyz_onlypose.cpp
+│   │   │   │   │   ├── edge_project_stereo_xyz_onlypose.h
+│   │   │   │   │   ├── edge_project_xyz2uv.cpp
+│   │   │   │   │   ├── edge_project_xyz2uv.h
+│   │   │   │   │   ├── edge_project_xyz2uvu.cpp
+│   │   │   │   │   ├── edge_project_xyz2uvu.h
+│   │   │   │   │   ├── edge_project_xyz.cpp
+│   │   │   │   │   ├── edge_project_xyz.h
+│   │   │   │   │   ├── edge_project_xyz_onlypose.cpp
+│   │   │   │   │   ├── edge_project_xyz_onlypose.h
+│   │   │   │   │   ├── edge_sba_cam.cpp
+│   │   │   │   │   ├── edge_sba_cam.h
+│   │   │   │   │   ├── edge_sba_scale.cpp
+│   │   │   │   │   ├── edge_sba_scale.h
+│   │   │   │   │   ├── edge_se3_expmap.cpp
+│   │   │   │   │   ├── edge_se3_expmap.h
+│   │   │   │   │   ├── g2o_types_sba_api.h
+│   │   │   │   │   ├── parameter_cameraparameters.cpp
+│   │   │   │   │   ├── parameter_cameraparameters.h
+│   │   │   │   │   ├── sbacam.cpp
+│   │   │   │   │   ├── sbacam.h
+│   │   │   │   │   ├── sba_utils.h
+│   │   │   │   │   ├── types_sba.cpp
+│   │   │   │   │   ├── types_sba.h
+│   │   │   │   │   ├── types_six_dof_expmap.cpp
+│   │   │   │   │   ├── types_six_dof_expmap.h
+│   │   │   │   │   ├── vertex_cam.cpp
+│   │   │   │   │   ├── vertex_cam.h
+│   │   │   │   │   ├── vertex_intrinsics.cpp
+│   │   │   │   │   ├── vertex_intrinsics.h
+│   │   │   │   │   ├── vertex_se3_expmap.cpp
+│   │   │   │   │   └── vertex_se3_expmap.h
+│   │   │   │   ├── sclam2d
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_se2_odom_differential_calib.cpp
+│   │   │   │   │   ├── edge_se2_odom_differential_calib.h
+│   │   │   │   │   ├── edge_se2_sensor_calib.cpp
+│   │   │   │   │   ├── edge_se2_sensor_calib.h
+│   │   │   │   │   ├── g2o_types_sclam2d_api.h
+│   │   │   │   │   ├── odometry_measurement.cpp
+│   │   │   │   │   ├── odometry_measurement.h
+│   │   │   │   │   ├── types_sclam2d.cpp
+│   │   │   │   │   ├── types_sclam2d.h
+│   │   │   │   │   ├── vertex_odom_differential_params.cpp
+│   │   │   │   │   └── vertex_odom_differential_params.h
+│   │   │   │   ├── sim3
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── sim3.h
+│   │   │   │   │   ├── types_seven_dof_expmap.cpp
+│   │   │   │   │   └── types_seven_dof_expmap.h
+│   │   │   │   ├── slam2d
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_pointxy.cpp
+│   │   │   │   │   ├── edge_pointxy.h
+│   │   │   │   │   ├── edge_se2.cpp
+│   │   │   │   │   ├── edge_se2.h
+│   │   │   │   │   ├── edge_se2_lotsofxy.cpp
+│   │   │   │   │   ├── edge_se2_lotsofxy.h
+│   │   │   │   │   ├── edge_se2_offset.cpp
+│   │   │   │   │   ├── edge_se2_offset.h
+│   │   │   │   │   ├── edge_se2_pointxy_bearing.cpp
+│   │   │   │   │   ├── edge_se2_pointxy_bearing.h
+│   │   │   │   │   ├── edge_se2_pointxy_calib.cpp
+│   │   │   │   │   ├── edge_se2_pointxy_calib.h
+│   │   │   │   │   ├── edge_se2_pointxy.cpp
+│   │   │   │   │   ├── edge_se2_pointxy.h
+│   │   │   │   │   ├── edge_se2_pointxy_offset.cpp
+│   │   │   │   │   ├── edge_se2_pointxy_offset.h
+│   │   │   │   │   ├── edge_se2_prior.cpp
+│   │   │   │   │   ├── edge_se2_prior.h
+│   │   │   │   │   ├── edge_se2_twopointsxy.cpp
+│   │   │   │   │   ├── edge_se2_twopointsxy.h
+│   │   │   │   │   ├── edge_se2_xyprior.cpp
+│   │   │   │   │   ├── edge_se2_xyprior.h
+│   │   │   │   │   ├── edge_xy_prior.cpp
+│   │   │   │   │   ├── edge_xy_prior.h
+│   │   │   │   │   ├── g2o_types_slam2d_api.h
+│   │   │   │   │   ├── parameter_se2_offset.cpp
+│   │   │   │   │   ├── parameter_se2_offset.h
+│   │   │   │   │   ├── se2.h
+│   │   │   │   │   ├── types_slam2d.cpp
+│   │   │   │   │   ├── types_slam2d.h
+│   │   │   │   │   ├── vertex_point_xy.cpp
+│   │   │   │   │   ├── vertex_point_xy.h
+│   │   │   │   │   ├── vertex_se2.cpp
+│   │   │   │   │   └── vertex_se2.h
+│   │   │   │   ├── slam2d_addons
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── edge_line2d.cpp
+│   │   │   │   │   ├── edge_line2d.h
+│   │   │   │   │   ├── edge_line2d_pointxy.cpp
+│   │   │   │   │   ├── edge_line2d_pointxy.h
+│   │   │   │   │   ├── edge_se2_line2d.cpp
+│   │   │   │   │   ├── edge_se2_line2d.h
+│   │   │   │   │   ├── edge_se2_segment2d.cpp
+│   │   │   │   │   ├── edge_se2_segment2d.h
+│   │   │   │   │   ├── edge_se2_segment2d_line.cpp
+│   │   │   │   │   ├── edge_se2_segment2d_line.h
+│   │   │   │   │   ├── edge_se2_segment2d_pointLine.cpp
+│   │   │   │   │   ├── edge_se2_segment2d_pointLine.h
+│   │   │   │   │   ├── g2o_types_slam2d_addons_api.h
+│   │   │   │   │   ├── line_2d.h
+│   │   │   │   │   ├── types_slam2d_addons.cpp
+│   │   │   │   │   ├── types_slam2d_addons.h
+│   │   │   │   │   ├── vertex_line2d.cpp
+│   │   │   │   │   ├── vertex_line2d.h
+│   │   │   │   │   ├── vertex_segment2d.cpp
+│   │   │   │   │   └── vertex_segment2d.h
+│   │   │   │   ├── slam3d
+│   │   │   │   │   ├── CMakeLists.txt
+│   │   │   │   │   ├── dquat2mat.cpp
+│   │   │   │   │   ├── dquat2mat.h
+│   │   │   │   │   ├── dquat2mat_maxima_generated.cpp
+│   │   │   │   │   ├── dquat2mat.wxm
+│   │   │   │   │   ├── edge_pointxyz.cpp
+│   │   │   │   │   ├── edge_pointxyz.h
+│   │   │   │   │   ├── edge_se3.cpp
+│   │   │   │   │   ├── edge_se3.h
+│   │   │   │   │   ├── edge_se3_lotsofxyz.cpp
+│   │   │   │   │   ├── edge_se3_lotsofxyz.h
+│   │   │   │   │   ├── edge_se3_offset.cpp
+│   │   │   │   │   ├── edge_se3_offset.h
+│   │   │   │   │   ├── edge_se3_pointxyz.cpp
+│   │   │   │   │   ├── edge_se3_pointxyz_depth.cpp
+│   │   │   │   │   ├── edge_se3_pointxyz_depth.h
+│   │   │   │   │   ├── edge_se3_pointxyz_disparity.cpp
+│   │   │   │   │   ├── edge_se3_pointxyz_disparity.h
+│   │   │   │   │   ├── edge_se3_pointxyz.h
+│   │   │   │   │   ├── edge_se3_prior.cpp
+│   │   │   │   │   ├── edge_se3_prior.h
+│   │   │   │   │   ├── edge_se3_xyzprior.cpp
+│   │   │   │   │   ├── edge_se3_xyzprior.h
+│   │   │   │   │   ├── edge_xyz_prior.cpp
+│   │   │   │   │   ├── edge_xyz_prior.h
+│   │   │   │   │   ├── g2o_types_slam3d_api.h
+│   │   │   │   │   ├── isometry3d_gradients.cpp
+│   │   │   │   │   ├── isometry3d_gradients.h
+│   │   │   │   │   ├── isometry3d_mappings.cpp
+│   │   │   │   │   ├── isometry3d_mappings.h
+│   │   │   │   │   ├── parameter_camera.cpp
+│   │   │   │   │   ├── parameter_camera.h
+│   │   │   │   │   ├── parameter_se3_offset.cpp
+│   │   │   │   │   ├── parameter_se3_offset.h
+│   │   │   │   │   ├── parameter_stereo_camera.cpp
+│   │   │   │   │   ├── parameter_stereo_camera.h
+│   │   │   │   │   ├── se3_ops.h
+│   │   │   │   │   ├── se3_ops.hpp
+│   │   │   │   │   ├── se3quat.h
+│   │   │   │   │   ├── types_slam3d.cpp
+│   │   │   │   │   ├── types_slam3d.h
+│   │   │   │   │   ├── vertex_pointxyz.cpp
+│   │   │   │   │   ├── vertex_pointxyz.h
+│   │   │   │   │   ├── vertex_se3.cpp
+│   │   │   │   │   └── vertex_se3.h
+│   │   │   │   └── slam3d_addons
+│   │   │   │       ├── CMakeLists.txt
+│   │   │   │       ├── edge_plane.cpp
+│   │   │   │       ├── edge_plane.h
+│   │   │   │       ├── edge_se3_calib.cpp
+│   │   │   │       ├── edge_se3_calib.h
+│   │   │   │       ├── edge_se3_euler.cpp
+│   │   │   │       ├── edge_se3_euler.h
+│   │   │   │       ├── edge_se3_line.cpp
+│   │   │   │       ├── edge_se3_line.h
+│   │   │   │       ├── edge_se3_plane_calib.cpp
+│   │   │   │       ├── edge_se3_plane_calib.h
+│   │   │   │       ├── g2o_types_slam3d_addons_api.h
+│   │   │   │       ├── line3d.cpp
+│   │   │   │       ├── line3d.h
+│   │   │   │       ├── plane3d.h
+│   │   │   │       ├── types_slam3d_addons.cpp
+│   │   │   │       ├── types_slam3d_addons.h
+│   │   │   │       ├── vertex_line3d.cpp
+│   │   │   │       ├── vertex_line3d.h
+│   │   │   │       ├── vertex_plane.cpp
+│   │   │   │       ├── vertex_plane.h
+│   │   │   │       ├── vertex_se3_euler.cpp
+│   │   │   │       └── vertex_se3_euler.h
+│   │   │   └── what_is_in_these_directories.txt
+│   │   ├── Makefile
+│   │   ├── README.md
+│   │   ├── script
+│   │   │   ├── android.toolchain.cmake
+│   │   │   ├── codecov.sh.in
+│   │   │   ├── install-additional-deps-windows.bat
+│   │   │   ├── install-deps-linux.sh
+│   │   │   ├── install-deps-osx.sh
+│   │   │   └── install-deps-windows.bat
+│   │   └── unit_test
+│   │       ├── CMakeLists.txt
+│   │       ├── data
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── data_queue_tests.cpp
+│   │       │   └── io_data.cpp
+│   │       ├── general
+│   │       │   ├── allocate_optimizer.cpp
+│   │       │   ├── allocate_optimizer.h
+│   │       │   ├── auto_diff.cpp
+│   │       │   ├── base_fixed_sized_edge.cpp
+│   │       │   ├── batch_statistics.cpp
+│   │       │   ├── clear_and_redo.cpp
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── graph_operations.cpp
+│   │       │   ├── robust_kernel_tests.cpp
+│   │       │   └── sparse_block_matrix.cpp
+│   │       ├── sba
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── io_sba.cpp
+│   │       │   └── io_six_dof_expmap.cpp
+│   │       ├── sclam2d
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── io_sclam2d.cpp
+│   │       │   └── odom_convert_sclam2d.cpp
+│   │       ├── sim3
+│   │       │   ├── allocate_sim3.cpp
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── io_sim3.cpp
+│   │       │   └── jacobians_sim3.cpp
+│   │       ├── slam2d
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── io_slam2d.cpp
+│   │       │   ├── jacobians_slam2d.cpp
+│   │       │   └── mappings_se2.cpp
+│   │       ├── slam2d_addons
+│   │       │   ├── CMakeLists.txt
+│   │       │   └── io_slam2d_addons.cpp
+│   │       ├── slam3d
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── io_slam3d.cpp
+│   │       │   ├── jacobians_slam3d.cpp
+│   │       │   ├── mappings_slam3d.cpp
+│   │       │   ├── optimization_slam3d.cpp
+│   │       │   └── orthogonal_matrix.cpp
+│   │       ├── slam3d_addons
+│   │       │   ├── CMakeLists.txt
+│   │       │   └── io_slam3d_addons.cpp
+│   │       ├── solver
+│   │       │   ├── allocate_algorithm_test.cpp
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── linear_solver_test.cpp
+│   │       │   ├── sparse_system_helper.cpp
+│   │       │   └── sparse_system_helper.h
+│   │       ├── stuff
+│   │       │   ├── CMakeLists.txt
+│   │       │   ├── command_args_tests.cpp
+│   │       │   ├── filesys_tools_tests.cpp
+│   │       │   ├── misc_tests.cpp
+│   │       │   ├── property_tests.cpp
+│   │       │   ├── string_tools_tests.cpp
+│   │       │   └── tuple_tools_tests.cpp
+│   │       └── test_helper
+│   │           ├── evaluate_jacobian.h
+│   │           ├── io.h
+│   │           ├── random_state.h
+│   │           └── test_main.cpp
+│   └── upstream
+│       └── btc_descriptor
+│           ├── CMakeLists.txt
+│           ├── config
+│           │   ├── config_indoor.yaml
+│           │   └── config_outdoor.yaml
+│           ├── example
+│           │   └── place_recognition.cpp
+│           ├── figs
+│           │   ├── system_pipeline_btc.png
+│           │   └── video_cover.jpg
+│           ├── include
+│           │   ├── btc.h
+│           │   ├── CustomMsg.h
+│           │   ├── CustomPoint.h
+│           │   └── utils.h
+│           ├── launch
+│           │   └── place_recognition.launch
+│           ├── package.xml
+│           ├── poses
+│           │   ├── kitti00.txt
+│           │   ├── kitti02.txt
+│           │   ├── kitti05.txt
+│           │   ├── kitti06.txt
+│           │   ├── kitti07.txt
+│           │   └── kitti08.txt
+│           ├── README.MD
+│           ├── rviz_cfg
+│           │   └── loop.rviz
+│           ├── src
+│           │   ├── btc.cpp
+│           │   └── utils.cpp
+│           └── supply
+│               └── Supplementary_Material_for_BTC.pdf
+├── tools
+│   ├── ground_segmentation_debug.cpp
+│   └── lidar_imu_rotation_calibration.cpp
+└── trajectory_visualization.py
+
+1688 directories, 2202 files

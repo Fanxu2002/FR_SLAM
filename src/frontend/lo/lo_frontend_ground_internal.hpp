@@ -13,6 +13,14 @@
 #include "fr_slam/frontend/lo_frontend.hpp"
 #include "fr_slam/frontend/ground_segmenter.hpp"
 
+
+enum class GroundReferenceState
+{
+    Bootstrap,
+    Frozen,
+    PendingSwitch
+};
+
 // Source-private runtime for Ground segmentation, the frozen world reference
 // plane, and per-frame Ground refinement diagnostics.
 struct GroundIcpRuntime
@@ -53,6 +61,9 @@ struct GroundIcpRuntime
 
     bool enabled = true;
 
+    GroundReferenceState reference_state =
+        GroundReferenceState::Bootstrap;
+
     bool reference_plane_valid = false;
     Eigen::Vector3d reference_normal_W = Eigen::Vector3d::UnitZ();
     double reference_plane_d_W = 0.0;
@@ -60,6 +71,10 @@ struct GroundIcpRuntime
     std::vector<double> anchor_plane_d_samples_W;
     double last_anchor_sample_timestamp =
         std::numeric_limits<double>::quiet_NaN();
+
+    // Reserved for pose-invariant terrain-change evidence.  Final Ground V1
+    // never enters PendingSwitch from pose/reference residual alone.
+    std::size_t pending_reference_confirmation_frames = 0;
 
     std::string last_input_source = "UNKNOWN";
     std::size_t last_raw_input_points = 0;

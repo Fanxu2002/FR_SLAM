@@ -94,6 +94,23 @@ public:
         LidarRegistrationResult &registration_result,
         const Eigen::Quaterniond *imu_relative_rotation = nullptr);
 
+    // Read-only access to the tracking target owned by the existing
+    // SubmapManager. LIO uses exactly this target for its point-to-plane
+    // measurement update; no second LocalMap is created.
+    const PreparedLidarTarget *
+    GetPreparedTrackingTarget() const;
+
+    // Commit a pose already estimated by an external tightly-coupled
+    // frontend (IESKF). This bypasses legacy Scan-to-LocalMap ICP while
+    // preserving the existing Keyframe -> Submap -> backend -> BTC -> PGO
+    // lifecycle.
+    bool CommitExternalPoseFrame(
+        const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+        double timestamp,
+        const Eigen::Isometry3d &T_WL_external,
+        const Eigen::Matrix<double, 6, 6> *odom_information = nullptr,
+        bool *is_keyframe = nullptr);
+
     Eigen::Isometry3d GetPose() const;
 
     pcl::PointCloud<LIDAR_POINT>::ConstPtr

@@ -1,0 +1,1750 @@
+#include "fr_slam/frontend/ieskf.hpp"
+
+#include <cmath>
+#include <iostream>
+
+#include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
+
+#include "fr_slam/frontend/lio_math.hpp"
+#include "fr_slam/frontend/lio_measurement.hpp"
+
+namespace
+{
+
+    constexpr double GRAVITY_TRANSPORT_EPSILON =
+        1.0e-6;
+
+    bool InitialUncertaintyIsValid(
+        const IeskfInitialUncertainty &uncertainty)
+    {
+        return std::isfinite(uncertainty.rotation_std) &&
+               uncertainty.rotation_std > 0.0 &&
+
+               std::isfinite(uncertainty.position_std) &&
+               uncertainty.position_std > 0.0 &&
+
+               std::isfinite(uncertainty.velocity_std) &&
+               uncertainty.velocity_std > 0.0 &&
+
+               std::isfinite(uncertainty.gyro_bias_std) &&
+               uncertainty.gyro_bias_std > 0.0 &&
+
+               std::isfinite(uncertainty.accel_bias_std) &&
+               uncertainty.accel_bias_std > 0.0 &&
+
+               std::isfinite(uncertainty.gravity_std) &&
+               uncertainty.gravity_std > 0.0 &&
+
+               std::isfinite(uncertainty.extrinsic_rotation_std) &&
+               uncertainty.extrinsic_rotation_std > 0.0 &&
+
+               std::isfinite(uncertainty.extrinsic_position_std) &&
+               uncertainty.extrinsic_position_std > 0.0;
+    }
+
+    bool ProcessNoiseIsValid(
+        const IeskfConfig &config)
+    {
+        return std::isfinite(config.gyro_noise_std) &&
+               config.gyro_noise_std >= 0.0 &&
+
+               std::isfinite(config.accel_noise_std) &&
+               config.accel_noise_std >= 0.0 &&
+
+               std::isfinite(config.gyro_bias_random_walk_std) &&
+               config.gyro_bias_random_walk_std >= 0.0 &&
+
+               std::isfinite(config.accel_bias_random_walk_std) &&
+               config.accel_bias_random_walk_std >= 0.0;
+    }
+
+    bool ImuDataIsFinite(
+        const IMU_DATA &imu)
+    {
+        return std::isfinite(imu.timestamp) &&
+               imu.gyro.allFinite() &&
+               imu.accelerometer.allFinite();
+    }
+
+    bool LidarIterationConfigIsValid(
+        const IeskfConfig &config)
+    {
+        return config.max_lidar_iterations > 0 &&
+
+               std::isfinite(
+                   config.lidar_convergence_rotation_rad) &&
+               config.lidar_convergence_rotation_rad > 0.0 &&
+
+               std::isfinite(
+                   config.lidar_convergence_position_m) &&
+               config.lidar_convergence_position_m > 0.0;
+    }
+
+} // namespace
+
+Ieskf::Ieskf()
+{
+}
+
+Ieskf::Ieskf(
+    const IeskfConfig &config)
+    : config_(config)
+{
+}
+
+bool Ieskf::SetConfig(
+    const IeskfConfig &config)
+{
+    if (!ConfigIsValid(config))
+    {
+        return false;
+    }
+
+    config_ =
+        config;
+
+    return true;
+}
+
+const IeskfConfig &Ieskf::Config() const
+{
+    return config_;
+}
+
+bool Ieskf::Initialize(
+    const LioState &initial_state)
+{
+    if (!StateIsFinite(initial_state))
+    {
+        return false;
+    }
+
+    if (!InitialUncertaintyIsValid(
+            config_.initial_uncertainty))
+    {
+        return false;
+    }
+
+    LioState normalized_state =
+        initial_state;
+
+    normalized_state.Q_WI =
+        NormalizeQuaternion(
+            normalized_state.Q_WI);
+
+    normalized_state.Q_IL =
+        NormalizeQuaternion(
+            normalized_state.Q_IL);
+
+    const double gravity_magnitude =
+        normalized_state.gravity_W.norm();
+
+    if (!std::isfinite(gravity_magnitude) ||
+        gravity_magnitude < 1.0e-12)
+    {
+        return false;
+    }
+
+    StateMatrix initial_covariance =
+        BuildInitialCovariance();
+
+    initial_covariance =
+        0.5 *
+        (initial_covariance +
+         initial_covariance.transpose());
+
+    if (!CovarianceIsFinite(initial_covariance))
+    {
+        return false;
+    }
+
+    state_ =
+        normalized_state;
+
+    covariance_ =
+        initial_covariance;
+
+    initialized_ =
+        true;
+
+    return true;
+}
+
+bool Ieskf::IsInitialized() const
+{
+    return initialized_;
+}
+
+const LioState &Ieskf::State() const
+{
+    return state_;
+}
+
+const Ieskf::StateMatrix &
+Ieskf::Covariance() const
+{
+    return covariance_;
+}
+
+Ieskf::StateMatrix
+Ieskf::BuildInitialCovariance() const
+{
+    StateMatrix covariance =
+        StateMatrix::Zero();
+
+    const IeskfInitialUncertainty &uncertainty =
+        config_.initial_uncertainty;
+
+    covariance.block<3, 3>(
+        LioStateIndex::ROTATION,
+        LioStateIndex::ROTATION) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.rotation_std *
+        uncertainty.rotation_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::POSITION,
+        LioStateIndex::POSITION) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.position_std *
+        uncertainty.position_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::VELOCITY,
+        LioStateIndex::VELOCITY) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.velocity_std *
+        uncertainty.velocity_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::GYRO_BIAS,
+        LioStateIndex::GYRO_BIAS) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.gyro_bias_std *
+        uncertainty.gyro_bias_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::ACCEL_BIAS,
+        LioStateIndex::ACCEL_BIAS) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.accel_bias_std *
+        uncertainty.accel_bias_std;
+
+    covariance.block<2, 2>(
+        LioStateIndex::GRAVITY,
+        LioStateIndex::GRAVITY) =
+        Eigen::Matrix2d::Identity() *
+        uncertainty.gravity_std *
+        uncertainty.gravity_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::EXTRINSIC_ROTATION,
+        LioStateIndex::EXTRINSIC_ROTATION) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.extrinsic_rotation_std *
+        uncertainty.extrinsic_rotation_std;
+
+    covariance.block<3, 3>(
+        LioStateIndex::EXTRINSIC_POSITION,
+        LioStateIndex::EXTRINSIC_POSITION) =
+        Eigen::Matrix3d::Identity() *
+        uncertainty.extrinsic_position_std *
+        uncertainty.extrinsic_position_std;
+
+    return covariance;
+}
+
+void Ieskf::BoxPlus(
+    LioState &state,
+    const StateVector &delta_x)
+{
+    const Eigen::Vector3d delta_theta_WI =
+        delta_x.segment<3>(
+            LioStateIndex::ROTATION);
+
+    const Eigen::Matrix3d R_WI_new =
+        state.Q_WI.normalized().toRotationMatrix() *
+        ExpSO3(delta_theta_WI);
+
+    state.Q_WI =
+        NormalizeQuaternion(
+            Eigen::Quaterniond(
+                R_WI_new));
+
+    state.P_WI +=
+        delta_x.segment<3>(
+            LioStateIndex::POSITION);
+
+    state.V_WI +=
+        delta_x.segment<3>(
+            LioStateIndex::VELOCITY);
+
+    state.gyro_bias +=
+        delta_x.segment<3>(
+            LioStateIndex::GYRO_BIAS);
+
+    state.accel_bias +=
+        delta_x.segment<3>(
+            LioStateIndex::ACCEL_BIAS);
+
+    state.gravity_W =
+        GravityBoxPlus(
+            state.gravity_W,
+            delta_x.segment<2>(
+                LioStateIndex::GRAVITY));
+
+    const Eigen::Vector3d delta_theta_IL =
+        delta_x.segment<3>(
+            LioStateIndex::EXTRINSIC_ROTATION);
+
+    const Eigen::Matrix3d R_IL_new =
+        state.Q_IL.normalized().toRotationMatrix() *
+        ExpSO3(delta_theta_IL);
+
+    state.Q_IL =
+        NormalizeQuaternion(
+            Eigen::Quaterniond(
+                R_IL_new));
+
+    state.P_IL +=
+        delta_x.segment<3>(
+            LioStateIndex::EXTRINSIC_POSITION);
+}
+
+Ieskf::StateVector
+Ieskf::BoxMinus(
+    const LioState &target,
+    const LioState &reference)
+{
+    StateVector delta_x =
+        StateVector::Zero();
+
+    const Eigen::Matrix3d R_WI_reference =
+        reference.Q_WI.normalized().toRotationMatrix();
+
+    const Eigen::Matrix3d R_WI_target =
+        target.Q_WI.normalized().toRotationMatrix();
+
+    delta_x.segment<3>(
+        LioStateIndex::ROTATION) =
+        LogSO3(
+            R_WI_reference.transpose() *
+            R_WI_target);
+
+    delta_x.segment<3>(
+        LioStateIndex::POSITION) =
+        target.P_WI -
+        reference.P_WI;
+
+    delta_x.segment<3>(
+        LioStateIndex::VELOCITY) =
+        target.V_WI -
+        reference.V_WI;
+
+    delta_x.segment<3>(
+        LioStateIndex::GYRO_BIAS) =
+        target.gyro_bias -
+        reference.gyro_bias;
+
+    delta_x.segment<3>(
+        LioStateIndex::ACCEL_BIAS) =
+        target.accel_bias -
+        reference.accel_bias;
+
+    delta_x.segment<2>(
+        LioStateIndex::GRAVITY) =
+        GravityBoxMinus(
+            target.gravity_W,
+            reference.gravity_W);
+
+    const Eigen::Matrix3d R_IL_reference =
+        reference.Q_IL.normalized().toRotationMatrix();
+
+    const Eigen::Matrix3d R_IL_target =
+        target.Q_IL.normalized().toRotationMatrix();
+
+    delta_x.segment<3>(
+        LioStateIndex::EXTRINSIC_ROTATION) =
+        LogSO3(
+            R_IL_reference.transpose() *
+            R_IL_target);
+
+    delta_x.segment<3>(
+        LioStateIndex::EXTRINSIC_POSITION) =
+        target.P_IL -
+        reference.P_IL;
+
+    return delta_x;
+}
+
+Ieskf::StateMatrix
+Ieskf::BuildErrorStateJacobian(
+    const LioState &linearization_state,
+    const Eigen::Vector3d &omega_unbiased,
+    const Eigen::Vector3d &accel_unbiased) const
+{
+    StateMatrix F =
+        StateMatrix::Zero();
+
+    const Eigen::Matrix3d R_WI =
+        linearization_state.Q_WI
+            .normalized()
+            .toRotationMatrix();
+
+    F.block<3, 3>(
+        LioStateIndex::ROTATION,
+        LioStateIndex::ROTATION) =
+        -Skew(
+            omega_unbiased);
+
+    F.block<3, 3>(
+        LioStateIndex::ROTATION,
+        LioStateIndex::GYRO_BIAS) =
+        -Eigen::Matrix3d::Identity();
+
+    F.block<3, 3>(
+        LioStateIndex::POSITION,
+        LioStateIndex::VELOCITY) =
+        Eigen::Matrix3d::Identity();
+
+    F.block<3, 3>(
+        LioStateIndex::VELOCITY,
+        LioStateIndex::ROTATION) =
+        -R_WI *
+        Skew(
+            accel_unbiased);
+
+    F.block<3, 3>(
+        LioStateIndex::VELOCITY,
+        LioStateIndex::ACCEL_BIAS) =
+        -R_WI;
+
+    F.block<3, 2>(
+        LioStateIndex::VELOCITY,
+        LioStateIndex::GRAVITY) =
+        GravityErrorJacobian(
+            linearization_state.gravity_W);
+
+    return F;
+}
+
+Ieskf::NoiseJacobian
+Ieskf::BuildNoiseJacobian(
+    const LioState &linearization_state) const
+{
+    NoiseJacobian G =
+        NoiseJacobian::Zero();
+
+    const Eigen::Matrix3d R_WI =
+        linearization_state.Q_WI
+            .normalized()
+            .toRotationMatrix();
+
+    constexpr int GYRO_NOISE = 0;
+    constexpr int ACCEL_NOISE = 3;
+    constexpr int GYRO_BIAS_RANDOM_WALK = 6;
+    constexpr int ACCEL_BIAS_RANDOM_WALK = 9;
+
+    G.block<3, 3>(
+        LioStateIndex::ROTATION,
+        GYRO_NOISE) =
+        -Eigen::Matrix3d::Identity();
+
+    G.block<3, 3>(
+        LioStateIndex::VELOCITY,
+        ACCEL_NOISE) =
+        -R_WI;
+
+    G.block<3, 3>(
+        LioStateIndex::GYRO_BIAS,
+        GYRO_BIAS_RANDOM_WALK) =
+        Eigen::Matrix3d::Identity();
+
+    G.block<3, 3>(
+        LioStateIndex::ACCEL_BIAS,
+        ACCEL_BIAS_RANDOM_WALK) =
+        Eigen::Matrix3d::Identity();
+
+    return G;
+}
+
+Ieskf::NoiseMatrix
+Ieskf::BuildContinuousNoiseCovariance() const
+{
+    NoiseMatrix Q_c =
+        NoiseMatrix::Zero();
+
+    constexpr int GYRO_NOISE = 0;
+    constexpr int ACCEL_NOISE = 3;
+    constexpr int GYRO_BIAS_RANDOM_WALK = 6;
+    constexpr int ACCEL_BIAS_RANDOM_WALK = 9;
+
+    const double gyro_noise_variance =
+        config_.gyro_noise_std *
+        config_.gyro_noise_std;
+
+    const double accel_noise_variance =
+        config_.accel_noise_std *
+        config_.accel_noise_std;
+
+    const double gyro_bias_random_walk_variance =
+        config_.gyro_bias_random_walk_std *
+        config_.gyro_bias_random_walk_std;
+
+    const double accel_bias_random_walk_variance =
+        config_.accel_bias_random_walk_std *
+        config_.accel_bias_random_walk_std;
+
+    Q_c.block<3, 3>(
+        GYRO_NOISE,
+        GYRO_NOISE) =
+        Eigen::Matrix3d::Identity() *
+        gyro_noise_variance;
+
+    Q_c.block<3, 3>(
+        ACCEL_NOISE,
+        ACCEL_NOISE) =
+        Eigen::Matrix3d::Identity() *
+        accel_noise_variance;
+
+    Q_c.block<3, 3>(
+        GYRO_BIAS_RANDOM_WALK,
+        GYRO_BIAS_RANDOM_WALK) =
+        Eigen::Matrix3d::Identity() *
+        gyro_bias_random_walk_variance;
+
+    Q_c.block<3, 3>(
+        ACCEL_BIAS_RANDOM_WALK,
+        ACCEL_BIAS_RANDOM_WALK) =
+        Eigen::Matrix3d::Identity() *
+        accel_bias_random_walk_variance;
+
+    return Q_c;
+}
+
+bool Ieskf::Propagate(
+    const IMU_DATA &imu_k,
+    const IMU_DATA &imu_next)
+{
+    if (!initialized_ ||
+        !ProcessNoiseIsValid(config_) ||
+        !ImuDataIsFinite(imu_k) ||
+        !ImuDataIsFinite(imu_next))
+    {
+        return false;
+    }
+
+    const double dt =
+        imu_next.timestamp -
+        imu_k.timestamp;
+
+    if (!std::isfinite(dt) ||
+        dt <= 0.0 ||
+        dt > config_.max_imu_dt)
+    {
+        return false;
+    }
+
+    const LioState state_before =
+        state_;
+
+    const StateMatrix covariance_before =
+        covariance_;
+
+    if (!StateIsFinite(state_before) ||
+        !CovarianceIsFinite(covariance_before))
+    {
+        return false;
+    }
+
+    const Eigen::Vector3d omega_k =
+        imu_k.gyro -
+        state_before.gyro_bias;
+
+    const Eigen::Vector3d omega_next =
+        imu_next.gyro -
+        state_before.gyro_bias;
+
+    const Eigen::Vector3d omega_mid =
+        0.5 *
+        (omega_k +
+         omega_next);
+
+    const Eigen::Vector3d accel_k_I =
+        imu_k.accelerometer -
+        state_before.accel_bias;
+
+    const Eigen::Vector3d accel_next_I =
+        imu_next.accelerometer -
+        state_before.accel_bias;
+
+    const Eigen::Vector3d accel_mid_I =
+        0.5 *
+        (accel_k_I +
+         accel_next_I);
+
+    if (!omega_mid.allFinite() ||
+        !accel_mid_I.allFinite())
+    {
+        return false;
+    }
+
+    const Eigen::Matrix3d R_WI_k =
+        state_before.Q_WI
+            .normalized()
+            .toRotationMatrix();
+
+    const Eigen::Matrix3d R_WI_next =
+        R_WI_k *
+        ExpSO3(
+            omega_mid *
+            dt);
+
+    const Eigen::Vector3d accel_k_W =
+        R_WI_k *
+            accel_k_I +
+        state_before.gravity_W;
+
+    const Eigen::Vector3d accel_next_W =
+        R_WI_next *
+            accel_next_I +
+        state_before.gravity_W;
+
+    const Eigen::Vector3d accel_mid_W =
+        0.5 *
+        (accel_k_W +
+         accel_next_W);
+
+    LioState next_state =
+        state_before;
+
+    next_state.timestamp =
+        imu_next.timestamp;
+
+    next_state.Q_WI =
+        NormalizeQuaternion(
+            Eigen::Quaterniond(
+                R_WI_next));
+
+    next_state.P_WI =
+        state_before.P_WI +
+        state_before.V_WI * dt +
+        0.5 * accel_mid_W * dt * dt;
+
+    next_state.V_WI =
+        state_before.V_WI +
+        accel_mid_W * dt;
+
+    if (!StateIsFinite(next_state))
+    {
+        return false;
+    }
+
+    LioState linearization_state =
+        state_before;
+
+    linearization_state.Q_WI =
+        NormalizeQuaternion(
+            Eigen::Quaterniond(
+                R_WI_k *
+                ExpSO3(
+                    0.5 *
+                    omega_mid *
+                    dt)));
+
+    const StateMatrix F =
+        BuildErrorStateJacobian(
+            linearization_state,
+            omega_mid,
+            accel_mid_I);
+
+    const NoiseJacobian G =
+        BuildNoiseJacobian(
+            linearization_state);
+
+    const NoiseMatrix Q_c =
+        BuildContinuousNoiseCovariance();
+
+    if (!F.allFinite() ||
+        !G.allFinite() ||
+        !Q_c.allFinite())
+    {
+        return false;
+    }
+
+    const StateMatrix F2 =
+        F *
+        F;
+
+    const StateMatrix F3 =
+        F2 *
+        F;
+
+    const double dt2 =
+        dt *
+        dt;
+
+    const double dt3 =
+        dt2 *
+        dt;
+
+    const StateMatrix Phi =
+        StateMatrix::Identity() +
+        F * dt +
+        0.5 * F2 * dt2 +
+        (1.0 / 6.0) * F3 * dt3;
+
+    const StateMatrix L =
+        G *
+        Q_c *
+        G.transpose();
+
+    StateMatrix Q_d =
+        L * dt +
+        0.5 *
+            (F * L +
+             L * F.transpose()) *
+            dt2 +
+        (1.0 / 6.0) *
+            (F2 * L +
+             2.0 * F * L * F.transpose() +
+             L * F2.transpose()) *
+            dt3;
+
+    Q_d =
+        0.5 *
+        (Q_d +
+         Q_d.transpose());
+
+    StateMatrix next_covariance =
+        Phi *
+            covariance_before *
+            Phi.transpose() +
+        Q_d;
+
+    next_covariance =
+        0.5 *
+        (next_covariance +
+         next_covariance.transpose());
+
+    if (!CovarianceIsFinite(next_covariance) ||
+        (next_covariance.diagonal().array() <
+         -1.0e-12)
+            .any())
+    {
+        return false;
+    }
+
+    state_ =
+        next_state;
+
+    covariance_ =
+        next_covariance;
+
+    return true;
+}
+
+Eigen::Matrix2d
+Ieskf::BuildGravityTransportJacobian(
+    const Eigen::Vector3d &current_gravity,
+    const Eigen::Vector3d &prior_gravity) const
+{
+    Eigen::Matrix2d jacobian =
+        Eigen::Matrix2d::Zero();
+
+    for (int column = 0;
+         column < 2;
+         ++column)
+    {
+        Eigen::Vector2d positive_increment =
+            Eigen::Vector2d::Zero();
+
+        Eigen::Vector2d negative_increment =
+            Eigen::Vector2d::Zero();
+
+        positive_increment(column) =
+            GRAVITY_TRANSPORT_EPSILON;
+
+        negative_increment(column) =
+            -GRAVITY_TRANSPORT_EPSILON;
+
+        const Eigen::Vector2d delta_positive =
+            GravityBoxMinus(
+                GravityBoxPlus(
+                    current_gravity,
+                    positive_increment),
+                prior_gravity);
+
+        const Eigen::Vector2d delta_negative =
+            GravityBoxMinus(
+                GravityBoxPlus(
+                    current_gravity,
+                    negative_increment),
+                prior_gravity);
+
+        jacobian.col(column) =
+            (delta_positive -
+             delta_negative) /
+            (2.0 *
+             GRAVITY_TRANSPORT_EPSILON);
+    }
+
+    return jacobian;
+}
+
+Ieskf::StateMatrix
+Ieskf::BuildPriorTransportJacobian(
+    const LioState &current_state,
+    const LioState &prior_state) const
+{
+    StateMatrix jacobian =
+        StateMatrix::Identity();
+
+    const StateVector prior_delta =
+        BoxMinus(
+            current_state,
+            prior_state);
+
+    jacobian.block<3, 3>(
+        LioStateIndex::ROTATION,
+        LioStateIndex::ROTATION) =
+        RightJacobianInverseSO3(
+            prior_delta.segment<3>(
+                LioStateIndex::ROTATION));
+
+    jacobian.block<2, 2>(
+        LioStateIndex::GRAVITY,
+        LioStateIndex::GRAVITY) =
+        BuildGravityTransportJacobian(
+            current_state.gravity_W,
+            prior_state.gravity_W);
+
+    jacobian.block<3, 3>(
+        LioStateIndex::EXTRINSIC_ROTATION,
+        LioStateIndex::EXTRINSIC_ROTATION) =
+        RightJacobianInverseSO3(
+            prior_delta.segment<3>(
+                LioStateIndex::EXTRINSIC_ROTATION));
+
+    return jacobian;
+}
+
+void Ieskf::ApplyEstimationMask(
+    StateMatrix &system_matrix,
+    StateVector &right_hand_side) const
+{
+    if (!config_.estimate_gravity)
+    {
+        for (int index =
+                 LioStateIndex::GRAVITY;
+             index <
+             LioStateIndex::GRAVITY + 2;
+             ++index)
+        {
+            system_matrix.row(index).setZero();
+            system_matrix.col(index).setZero();
+            system_matrix(index, index) =
+                1.0;
+
+            right_hand_side(index) =
+                0.0;
+        }
+    }
+
+    if (!config_.estimate_extrinsic)
+    {
+        for (int index =
+                 LioStateIndex::EXTRINSIC_ROTATION;
+             index <
+             LioStateIndex::EXTRINSIC_POSITION + 3;
+             ++index)
+        {
+            system_matrix.row(index).setZero();
+            system_matrix.col(index).setZero();
+            system_matrix(index, index) =
+                1.0;
+
+            right_hand_side(index) =
+                0.0;
+        }
+    }
+}
+
+bool Ieskf::IteratedLidarUpdate(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &deskewed_scan_L,
+    const PreparedLidarTarget &target,
+    const LioMeasurementBuilder &measurement_builder,
+    IeskfLidarUpdateResult &result)
+{
+    result =
+        IeskfLidarUpdateResult();
+
+    if (!initialized_ ||
+        !LidarIterationConfigIsValid(config_) ||
+        !deskewed_scan_L ||
+        deskewed_scan_L->empty() ||
+        !StateIsFinite(state_) ||
+        !CovarianceIsFinite(covariance_))
+    {
+        return false;
+    }
+
+    const LioState prior_state =
+        state_;
+
+    const StateMatrix prior_covariance =
+        0.5 *
+        (covariance_ +
+         covariance_.transpose());
+
+    Eigen::LDLT<StateMatrix> prior_ldlt(
+        prior_covariance);
+
+    if (prior_ldlt.info() != Eigen::Success ||
+        !prior_ldlt.isPositive())
+    {
+        return false;
+    }
+
+    const StateMatrix prior_information =
+        prior_ldlt.solve(
+            StateMatrix::Identity());
+
+    if (!prior_information.allFinite())
+    {
+        return false;
+    }
+
+    LioState current_state =
+        prior_state;
+
+    for (int iteration = 0;
+         iteration <
+         config_.max_lidar_iterations;
+         ++iteration)
+    {
+        LioMeasurementResult measurement;
+
+        if (!measurement_builder.Build(
+                current_state,
+                deskewed_scan_L,
+                target,
+                measurement))
+        {
+            return false;
+        }
+
+        if (iteration == 0)
+        {
+            result.initial_rmse =
+                measurement.rmse;
+
+            result.initial_robust_rmse =
+                measurement.robust_rmse;
+        }
+
+        const StateVector prior_delta =
+            BoxMinus(
+                current_state,
+                prior_state);
+
+        const StateMatrix prior_transport =
+            BuildPriorTransportJacobian(
+                current_state,
+                prior_state);
+
+        if (!prior_delta.allFinite() ||
+            !prior_transport.allFinite())
+        {
+            return false;
+        }
+
+        StateMatrix system_matrix =
+            prior_transport.transpose() *
+                prior_information *
+                prior_transport +
+            measurement.information;
+
+        StateVector right_hand_side =
+            prior_transport.transpose() *
+                prior_information *
+                prior_delta +
+            measurement.gradient;
+
+        system_matrix =
+            0.5 *
+            (system_matrix +
+             system_matrix.transpose());
+
+        if (!system_matrix.allFinite() ||
+            !right_hand_side.allFinite())
+        {
+            return false;
+        }
+
+        ApplyEstimationMask(
+            system_matrix,
+            right_hand_side);
+
+        Eigen::LDLT<StateMatrix> system_ldlt(
+            system_matrix);
+
+        if (system_ldlt.info() != Eigen::Success ||
+            !system_ldlt.isPositive())
+        {
+            return false;
+        }
+
+        const StateVector increment =
+            -system_ldlt.solve(
+                right_hand_side);
+
+        if (!increment.allFinite())
+        {
+            return false;
+        }
+
+
+        // ================================================================
+        // LiDAR observability / state-coupling diagnostics.
+        //
+        // iteration == 0:
+        //
+        //     current_state == prior_state
+        //     prior_delta   == 0
+        //
+        // Therefore the first increment is driven by the LiDAR
+        // measurement through the prior covariance coupling.
+        //
+        // Diagnostic only. No estimator behavior is changed.
+        // ================================================================
+        if (iteration == 0)
+        {
+            constexpr int kRotationX =
+                LioStateIndex::ROTATION;
+
+            constexpr int kPositionX =
+                LioStateIndex::POSITION;
+
+            constexpr int kVelocityZ =
+                LioStateIndex::VELOCITY + 2;
+
+            constexpr int kExtrinsicRotationX =
+                LioStateIndex::EXTRINSIC_ROTATION;
+
+            constexpr int kExtrinsicPositionX =
+                LioStateIndex::EXTRINSIC_POSITION;
+
+            // ------------------------------------------------------------
+            // 1. LiDAR translational information.
+            // ------------------------------------------------------------
+            const Eigen::Matrix3d translation_information =
+                measurement.information.block<3, 3>(
+                    LioStateIndex::POSITION,
+                    LioStateIndex::POSITION);
+
+            const Eigen::Vector3d translation_info_diag =
+                translation_information.diagonal();
+
+            const double translation_info_trace =
+                translation_info_diag.sum();
+
+            const double translation_z_fraction =
+                translation_info_trace > 1.0e-12
+                    ? translation_info_diag.z() /
+                          translation_info_trace
+                    : 0.0;
+
+            Eigen::Vector3d translation_eigenvalues =
+                Eigen::Vector3d::Zero();
+
+            Eigen::Vector3d weakest_translation_direction =
+                Eigen::Vector3d::Zero();
+
+            bool translation_eigen_valid =
+                false;
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                translation_eigen_solver(
+                    translation_information);
+
+            if (translation_eigen_solver.info() ==
+                    Eigen::Success &&
+                translation_eigen_solver
+                    .eigenvalues()
+                    .allFinite() &&
+                translation_eigen_solver
+                    .eigenvectors()
+                    .allFinite())
+            {
+                translation_eigenvalues =
+                    translation_eigen_solver
+                        .eigenvalues();
+
+                weakest_translation_direction =
+                    translation_eigen_solver
+                        .eigenvectors()
+                        .col(0);
+
+                translation_eigen_valid =
+                    true;
+            }
+
+            const double translation_min_relative =
+                translation_eigen_valid &&
+                        translation_eigenvalues.z() >
+                            1.0e-12
+                    ? translation_eigenvalues.x() /
+                          translation_eigenvalues.z()
+                    : 0.0;
+
+            const double weakest_translation_z =
+                translation_eigen_valid
+                    ? std::abs(
+                          weakest_translation_direction.z())
+                    : 0.0;
+
+            // ------------------------------------------------------------
+
+            // ------------------------------------------------------------
+            // 1b. Translation information after marginalizing rotation.
+            //
+            // Pose information:
+            //
+            //     [ L_rr  L_rp ]
+            //     [ L_pr  L_pp ]
+            //
+            // Marginalized translation information:
+            //
+            //     L_p|r = L_pp - L_pr * L_rr^+ * L_rp
+            //
+            // where ^+ is a numerically stable pseudo-inverse.
+            // Diagnostic only.
+            // ------------------------------------------------------------
+            const Eigen::Matrix3d rotation_information =
+                measurement.information.block<3, 3>(
+                    LioStateIndex::ROTATION,
+                    LioStateIndex::ROTATION);
+
+            const Eigen::Matrix3d rotation_translation_information =
+                measurement.information.block<3, 3>(
+                    LioStateIndex::ROTATION,
+                    LioStateIndex::POSITION);
+
+            const Eigen::Matrix3d translation_rotation_information =
+                measurement.information.block<3, 3>(
+                    LioStateIndex::POSITION,
+                    LioStateIndex::ROTATION);
+
+            Eigen::Matrix3d rotation_information_pinv =
+                Eigen::Matrix3d::Zero();
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                rotation_eigen_solver(
+                    rotation_information);
+
+            if (rotation_eigen_solver.info() ==
+                    Eigen::Success &&
+                rotation_eigen_solver.eigenvalues().allFinite() &&
+                rotation_eigen_solver.eigenvectors().allFinite())
+            {
+                const Eigen::Vector3d rotation_eigenvalues =
+                    rotation_eigen_solver.eigenvalues();
+
+                const double rotation_max_eigenvalue =
+                    rotation_eigenvalues
+                        .cwiseAbs()
+                        .maxCoeff();
+
+                if (rotation_max_eigenvalue > 1.0e-12)
+                {
+                    Eigen::Vector3d inverse_rotation_eigenvalues =
+                        Eigen::Vector3d::Zero();
+
+                    constexpr double kRotationEigenThreshold =
+                        1.0e-9;
+
+                    for (int eigen_index = 0;
+                         eigen_index < 3;
+                         ++eigen_index)
+                    {
+                        if (rotation_eigenvalues(eigen_index) >
+                            kRotationEigenThreshold *
+                                rotation_max_eigenvalue)
+                        {
+                            inverse_rotation_eigenvalues(
+                                eigen_index) =
+                                1.0 /
+                                rotation_eigenvalues(
+                                    eigen_index);
+                        }
+                    }
+
+                    rotation_information_pinv =
+                        rotation_eigen_solver.eigenvectors() *
+                        inverse_rotation_eigenvalues.asDiagonal() *
+                        rotation_eigen_solver.eigenvectors().transpose();
+                }
+            }
+
+            Eigen::Matrix3d schur_translation_information =
+                translation_information -
+                translation_rotation_information *
+                    rotation_information_pinv *
+                    rotation_translation_information;
+
+            // Suppress tiny numerical asymmetry.
+            schur_translation_information =
+                0.5 *
+                (schur_translation_information +
+                 schur_translation_information.transpose());
+
+            const Eigen::Vector3d schur_translation_diag =
+                schur_translation_information.diagonal();
+
+            const double schur_translation_trace =
+                schur_translation_diag.sum();
+
+            const double schur_z_fraction =
+                schur_translation_trace > 1.0e-12
+                    ? schur_translation_diag.z() /
+                          schur_translation_trace
+                    : 0.0;
+
+            Eigen::Vector3d schur_translation_eigenvalues =
+                Eigen::Vector3d::Zero();
+
+            Eigen::Vector3d schur_weakest_translation_direction =
+                Eigen::Vector3d::Zero();
+
+            bool schur_eigen_valid =
+                false;
+
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                schur_eigen_solver(
+                    schur_translation_information);
+
+            if (schur_eigen_solver.info() ==
+                    Eigen::Success &&
+                schur_eigen_solver.eigenvalues().allFinite() &&
+                schur_eigen_solver.eigenvectors().allFinite())
+            {
+                schur_translation_eigenvalues =
+                    schur_eigen_solver.eigenvalues();
+
+                schur_weakest_translation_direction =
+                    schur_eigen_solver
+                        .eigenvectors()
+                        .col(0);
+
+                schur_eigen_valid =
+                    true;
+            }
+
+            const double schur_translation_min_relative =
+                schur_eigen_valid &&
+                        std::abs(
+                            schur_translation_eigenvalues.z()) >
+                            1.0e-12
+                    ? schur_translation_eigenvalues.x() /
+                          schur_translation_eigenvalues.z()
+                    : 0.0;
+
+            const double schur_weakest_translation_z =
+                schur_eigen_valid
+                    ? std::abs(
+                          schur_weakest_translation_direction.z())
+                    : 0.0;
+            // 2. LiDAR has no direct velocity measurement.
+            // ------------------------------------------------------------
+            const double measurement_vz_information_norm =
+                measurement.information
+                    .row(kVelocityZ)
+                    .norm();
+
+            const double measurement_vz_gradient =
+                measurement.gradient(
+                    kVelocityZ);
+
+            // ------------------------------------------------------------
+            // 3. Prior covariance correlation between Vz and pose.
+            //
+            // Rotation components are error-state dtheta components,
+            // not Euler angles.
+            // ------------------------------------------------------------
+            const auto covariance_correlation =
+                [&prior_covariance](
+                    int first_index,
+                    int second_index)
+                {
+                    const double first_variance =
+                        prior_covariance(
+                            first_index,
+                            first_index);
+
+                    const double second_variance =
+                        prior_covariance(
+                            second_index,
+                            second_index);
+
+                    const double variance_product =
+                        first_variance *
+                        second_variance;
+
+                    if (!std::isfinite(
+                            variance_product) ||
+                        variance_product <=
+                            1.0e-30)
+                    {
+                        return 0.0;
+                    }
+
+                    return
+                        prior_covariance(
+                            first_index,
+                            second_index) /
+                        std::sqrt(
+                            variance_product);
+                };
+
+            const Eigen::Vector3d corr_vz_rotation(
+                covariance_correlation(
+                    kVelocityZ,
+                    kRotationX + 0),
+                covariance_correlation(
+                    kVelocityZ,
+                    kRotationX + 1),
+                covariance_correlation(
+                    kVelocityZ,
+                    kRotationX + 2));
+
+            const Eigen::Vector3d corr_vz_position(
+                covariance_correlation(
+                    kVelocityZ,
+                    kPositionX + 0),
+                covariance_correlation(
+                    kVelocityZ,
+                    kPositionX + 1),
+                covariance_correlation(
+                    kVelocityZ,
+                    kPositionX + 2));
+
+            // ------------------------------------------------------------
+            // 4. Decompose the first LiDAR-driven Vz increment.
+            //
+            //     delta =
+            //       -A^-1 (
+            //           g_rot +
+            //           g_pos +
+            //           g_ext_rot +
+            //           g_ext_pos)
+            // ------------------------------------------------------------
+            StateVector rotation_rhs =
+                StateVector::Zero();
+
+            StateVector position_rhs =
+                StateVector::Zero();
+
+            StateVector extrinsic_rotation_rhs =
+                StateVector::Zero();
+
+            StateVector extrinsic_position_rhs =
+                StateVector::Zero();
+
+            rotation_rhs.segment<3>(
+                LioStateIndex::ROTATION) =
+                measurement.gradient.segment<3>(
+                    LioStateIndex::ROTATION);
+
+            position_rhs.segment<3>(
+                LioStateIndex::POSITION) =
+                measurement.gradient.segment<3>(
+                    LioStateIndex::POSITION);
+
+            if (config_.estimate_extrinsic)
+            {
+                extrinsic_rotation_rhs.segment<3>(
+                    LioStateIndex::EXTRINSIC_ROTATION) =
+                    measurement.gradient.segment<3>(
+                        LioStateIndex::EXTRINSIC_ROTATION);
+
+                extrinsic_position_rhs.segment<3>(
+                    LioStateIndex::EXTRINSIC_POSITION) =
+                    measurement.gradient.segment<3>(
+                        LioStateIndex::EXTRINSIC_POSITION);
+            }
+
+            const StateVector increment_from_rotation =
+                -system_ldlt.solve(
+                    rotation_rhs);
+
+            const StateVector increment_from_position =
+                -system_ldlt.solve(
+                    position_rhs);
+
+            const StateVector
+                increment_from_extrinsic_rotation =
+                    -system_ldlt.solve(
+                        extrinsic_rotation_rhs);
+
+            const StateVector
+                increment_from_extrinsic_position =
+                    -system_ldlt.solve(
+                        extrinsic_position_rhs);
+
+            const double vz_from_rotation =
+                increment_from_rotation(
+                    kVelocityZ);
+
+            const double vz_from_position =
+                increment_from_position(
+                    kVelocityZ);
+
+            const double vz_from_extrinsic_rotation =
+                increment_from_extrinsic_rotation(
+                    kVelocityZ);
+
+            const double vz_from_extrinsic_position =
+                increment_from_extrinsic_position(
+                    kVelocityZ);
+
+            const double decomposed_vz_increment =
+                vz_from_rotation +
+                vz_from_position +
+                vz_from_extrinsic_rotation +
+                vz_from_extrinsic_position;
+
+            const double vz_source_check =
+                increment(
+                    kVelocityZ) -
+                decomposed_vz_increment;
+
+            std::cerr
+                << "LIO OBS"
+                << " | t="
+                << prior_state.timestamp
+                << " | corr="
+                << measurement.correspondences
+
+                << " | trans_info=["
+                << translation_info_diag.x()
+                << " "
+                << translation_info_diag.y()
+                << " "
+                << translation_info_diag.z()
+                << "]"
+
+                << " | z_frac="
+                << translation_z_fraction
+
+                << " | trans_eig=["
+                << translation_eigenvalues.x()
+                << " "
+                << translation_eigenvalues.y()
+                << " "
+                << translation_eigenvalues.z()
+                << "]"
+
+                << " | trans_min_rel="
+                << translation_min_relative
+
+                << " | weak_dir=["
+                << weakest_translation_direction.x()
+                << " "
+                << weakest_translation_direction.y()
+                << " "
+                << weakest_translation_direction.z()
+                << "]"
+
+                << " | weak_z="
+                << weakest_translation_z
+
+
+                << " | schur_z_frac="
+                << schur_z_fraction
+
+                << " | schur_eig=["
+                << schur_translation_eigenvalues.x()
+                << " "
+                << schur_translation_eigenvalues.y()
+                << " "
+                << schur_translation_eigenvalues.z()
+                << "]"
+
+                << " | schur_min_rel="
+                << schur_translation_min_relative
+
+                << " | schur_weak_dir=["
+                << schur_weakest_translation_direction.x()
+                << " "
+                << schur_weakest_translation_direction.y()
+                << " "
+                << schur_weakest_translation_direction.z()
+                << "]"
+
+                << " | schur_weak_z="
+                << schur_weakest_translation_z
+                << " | meas_vz_info="
+                << measurement_vz_information_norm
+
+                << " | meas_vz_grad="
+                << measurement_vz_gradient
+
+                << " | corr_vz_rot=["
+                << corr_vz_rotation.x()
+                << " "
+                << corr_vz_rotation.y()
+                << " "
+                << corr_vz_rotation.z()
+                << "]"
+
+                << " | corr_vz_pos=["
+                << corr_vz_position.x()
+                << " "
+                << corr_vz_position.y()
+                << " "
+                << corr_vz_position.z()
+                << "]"
+
+                << " | inc0_vz="
+                << increment(
+                    kVelocityZ)
+
+                << " | vz_src=[rot="
+                << vz_from_rotation
+                << " pos="
+                << vz_from_position
+                << " extR="
+                << vz_from_extrinsic_rotation
+                << " extP="
+                << vz_from_extrinsic_position
+                << "]"
+
+                << " | src_check="
+                << vz_source_check
+                << std::endl;
+        }
+        const double rotation_increment =
+            increment.segment<3>(
+                         LioStateIndex::ROTATION)
+                .norm();
+
+        const double position_increment =
+            increment.segment<3>(
+                         LioStateIndex::POSITION)
+                .norm();
+
+        const double extrinsic_rotation_increment =
+            increment.segment<3>(
+                         LioStateIndex::EXTRINSIC_ROTATION)
+                .norm();
+
+        const double extrinsic_position_increment =
+            increment.segment<3>(
+                         LioStateIndex::EXTRINSIC_POSITION)
+                .norm();
+
+        result.final_rotation_increment =
+            rotation_increment;
+
+        result.final_position_increment =
+            position_increment;
+
+        result.final_extrinsic_rotation_increment =
+            extrinsic_rotation_increment;
+
+        result.final_extrinsic_position_increment =
+            extrinsic_position_increment;
+
+        LioState next_state =
+            current_state;
+
+        BoxPlus(
+            next_state,
+            increment);
+
+        if (!StateIsFinite(next_state))
+        {
+            return false;
+        }
+
+        current_state =
+            next_state;
+
+        result.iterations =
+            iteration + 1;
+
+        const bool pose_converged =
+            rotation_increment <=
+                config_.lidar_convergence_rotation_rad &&
+            position_increment <=
+                config_.lidar_convergence_position_m;
+
+        bool extrinsic_converged =
+            true;
+
+        if (config_.estimate_extrinsic)
+        {
+            extrinsic_converged =
+                extrinsic_rotation_increment <=
+                    config_.lidar_convergence_rotation_rad &&
+                extrinsic_position_increment <=
+                    config_.lidar_convergence_position_m;
+        }
+
+        if (pose_converged &&
+            extrinsic_converged)
+        {
+            result.converged =
+                true;
+
+            break;
+        }
+    }
+
+    LioMeasurementResult final_measurement;
+
+    if (!measurement_builder.Build(
+            current_state,
+            deskewed_scan_L,
+            target,
+            final_measurement))
+    {
+        return false;
+    }
+
+    const StateMatrix final_prior_transport =
+        BuildPriorTransportJacobian(
+            current_state,
+            prior_state);
+
+    if (!final_prior_transport.allFinite())
+    {
+        return false;
+    }
+
+    StateMatrix posterior_information =
+        final_prior_transport.transpose() *
+            prior_information *
+            final_prior_transport +
+        final_measurement.information;
+
+    posterior_information =
+        0.5 *
+        (posterior_information +
+         posterior_information.transpose());
+
+    StateVector zero_rhs =
+        StateVector::Zero();
+
+    ApplyEstimationMask(
+        posterior_information,
+        zero_rhs);
+
+    Eigen::LDLT<StateMatrix> posterior_ldlt(
+        posterior_information);
+
+    if (posterior_ldlt.info() != Eigen::Success ||
+        !posterior_ldlt.isPositive())
+    {
+        return false;
+    }
+
+    StateMatrix posterior_covariance =
+        posterior_ldlt.solve(
+            StateMatrix::Identity());
+
+    posterior_covariance =
+        0.5 *
+        (posterior_covariance +
+         posterior_covariance.transpose());
+
+    if (!CovarianceIsFinite(posterior_covariance) ||
+        (posterior_covariance.diagonal().array() <
+         -1.0e-12)
+            .any())
+    {
+        return false;
+    }
+
+    state_ =
+        current_state;
+
+    covariance_ =
+        posterior_covariance;
+
+    result.correspondences =
+        final_measurement.correspondences;
+
+    result.downweighted_correspondences =
+        final_measurement.downweighted_correspondences;
+
+    result.final_rmse =
+        final_measurement.rmse;
+
+    result.final_robust_rmse =
+        final_measurement.robust_rmse;
+
+    result.success =
+        true;
+
+    return true;
+}
+
+bool Ieskf::ConfigIsValid(
+    const IeskfConfig &config) const
+{
+    if (!std::isfinite(config.max_imu_dt) ||
+        config.max_imu_dt <= 0.0)
+    {
+        return false;
+    }
+
+    if (!InitialUncertaintyIsValid(
+            config.initial_uncertainty))
+    {
+        return false;
+    }
+
+    if (!ProcessNoiseIsValid(config))
+    {
+        return false;
+    }
+
+    if (!LidarIterationConfigIsValid(config))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool Ieskf::StateIsFinite(
+    const LioState &state)
+{
+    return std::isfinite(state.timestamp) &&
+
+           state.Q_WI.coeffs().allFinite() &&
+           state.Q_WI.norm() > 1.0e-12 &&
+
+           state.P_WI.allFinite() &&
+           state.V_WI.allFinite() &&
+
+           state.gyro_bias.allFinite() &&
+           state.accel_bias.allFinite() &&
+
+           state.gravity_W.allFinite() &&
+           state.gravity_W.norm() > 1.0e-12 &&
+
+           state.Q_IL.coeffs().allFinite() &&
+           state.Q_IL.norm() > 1.0e-12 &&
+
+           state.P_IL.allFinite();
+}
+
+bool Ieskf::CovarianceIsFinite(
+    const StateMatrix &covariance)
+{
+    return covariance.allFinite();
+}

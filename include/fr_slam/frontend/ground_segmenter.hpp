@@ -189,8 +189,8 @@ struct GroundSegmentationConfig
     // Temporal consistency is intentionally a QUALITY GATE, not a flat-ground
     // assumption. A real slope can be followed as long as the support normal
     // and sensor-to-surface distance evolve continuously.
-    double maximum_support_normal_change_deg = 8.0;
-    double maximum_support_distance_change_m = 0.12;
+    double maximum_support_normal_change_deg = 15.0;
+    double maximum_support_distance_change_m = 0.15;
 
     // ============================================================
     // Ground V4.0: TRUSTED support-constraint gate.
@@ -359,6 +359,85 @@ struct GroundSegmentationResult
     std::size_t support_component_rejected_small = 0;
     std::size_t support_component_rejected_no_center = 0;
     std::size_t support_component_rejected_fit = 0;
+
+    // ------------------------------------------------------------
+    // V3.3 support connectivity diagnostics.
+    //
+    // Diagnostics ONLY. These values must never affect Ground behavior.
+    // They are used to explain support-component fragmentation.
+    // ------------------------------------------------------------
+
+    // Local height-field models built around eligible support cells.
+    //
+    // Sample statistics and XY conditioning statistics refer to
+    // successfully built local models.
+    std::size_t support_local_model_valid_cells = 0;
+    std::size_t support_local_model_invalid_cells = 0;
+
+    std::size_t support_local_model_samples_min = 0;
+    std::size_t support_local_model_samples_max = 0;
+    double support_local_model_samples_mean = 0.0;
+
+    // For each local model, compute the two eigenvalues of the centered
+    // XY sample covariance:
+    //
+    //     lambda_min <= lambda_max
+    //
+    // condition = lambda_max / max(lambda_min, epsilon)
+    //
+    // Large condition means the XY samples are close to collinear and
+    // therefore the estimated surface normal may be poorly constrained.
+    double support_local_model_min_xy_lambda_min = 0.0;
+    double support_local_model_mean_xy_condition = 0.0;
+    double support_local_model_max_xy_condition = 0.0;
+
+    // Among VALID local connectivity models only.
+    std::size_t support_local_model_total_samples = 0;
+    std::size_t support_local_model_outside_corridor_samples = 0;
+    std::size_t support_local_model_models_with_outside_samples = 0;
+
+    double support_local_model_outside_corridor_ratio = 0.0;
+    double support_local_model_max_outside_corridor_ratio = 0.0;
+
+    // Direct 8-neighbor edge diagnostics.
+    std::size_t support_direct_opportunities = 0;
+    std::size_t support_direct_model_path = 0;
+    std::size_t support_direct_fallback_path = 0;
+
+    std::size_t support_direct_model_conversion_reject = 0;
+    std::size_t support_direct_normal_reject = 0;
+    std::size_t support_direct_residual_reject = 0;
+    std::size_t support_direct_height_reject = 0;
+    std::size_t support_direct_slope_reject = 0;
+
+    std::size_t support_direct_accepted = 0;
+
+    double support_direct_normal_reject_mean_deg = 0.0;
+    double support_direct_normal_reject_max_deg = 0.0;
+
+    double support_direct_residual_reject_mean_max_m = 0.0;
+    double support_direct_residual_reject_max_max_m = 0.0;
+
+    // One-cell gap-bridge diagnostics.
+    std::size_t support_gap_opportunities = 0;
+    std::size_t support_gap_midpoint_blocked = 0;
+
+    std::size_t support_gap_model_path = 0;
+    std::size_t support_gap_fallback_path = 0;
+
+    std::size_t support_gap_model_conversion_reject = 0;
+    std::size_t support_gap_normal_reject = 0;
+    std::size_t support_gap_residual_reject = 0;
+    std::size_t support_gap_height_reject = 0;
+    std::size_t support_gap_slope_reject = 0;
+
+    std::size_t support_gap_accepted = 0;
+
+    double support_gap_normal_reject_mean_deg = 0.0;
+    double support_gap_normal_reject_max_deg = 0.0;
+
+    double support_gap_residual_reject_mean_max_m = 0.0;
+    double support_gap_residual_reject_max_max_m = 0.0;
 
     std::size_t support_candidate_count = 0;
     std::size_t support_selected_candidate_index = 0;

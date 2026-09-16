@@ -405,6 +405,9 @@ def _launch_setup(context):
             ground_constraint_override
         )
 
+    if ground_constraint_override is False:
+        parameter_overrides['ground_constraint_mode'] = 'off'
+
     if planar_motion_override is not None:
         parameter_overrides['planar_motion_mode'] = (
             planar_motion_override
@@ -417,7 +420,7 @@ def _launch_setup(context):
 
     slam_node = Node(
         package='fr_slam',
-        executable='lo',
+        executable='lio',
         name='fr_slam',
         output='both',
         parameters=[

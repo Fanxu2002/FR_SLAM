@@ -4136,10 +4136,17 @@ void GroundSegmenter::EvaluateSupportConstraint(
             0.0,
             1.0);
 
-    // Confidence is retained as a continuous Ground-quality diagnostic.
-    // Physical validity is decided only by the hard geometry / support gates.
-    // A low confidence score alone must not reject an otherwise valid Ground
-    // observation.
+    const double confidence_threshold =
+        support_constraint_was_valid_ ?
+            config_.support_constraint_keep_confidence :
+            config_.support_constraint_enter_confidence;
+
+    if (result.support_constraint_confidence <
+        confidence_threshold)
+    {
+        result.support_constraint_rejection_mask |=
+            SUPPORT_CONSTRAINT_REJECT_LOW_CONFIDENCE;
+    }
 
     result.support_constraint_valid =
         result.support_constraint_rejection_mask ==

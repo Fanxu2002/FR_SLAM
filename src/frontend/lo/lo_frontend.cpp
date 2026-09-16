@@ -678,7 +678,6 @@ namespace
 
 } // namespace
 
-
 // ============================================================================
 // Wall Association V3
 //
@@ -819,7 +818,7 @@ namespace
         // V3.1 separates three different identity events that V3 used to
         // report together as "REACQUIRED".
         bool persistent_fallback = false;
-        bool persistent_reacquired = false;  // TRUE long-gap reacquisition.
+        bool persistent_reacquired = false; // TRUE long-gap reacquisition.
         bool persistent_rebound = false;
         bool reid_pending = false;
         std::size_t reid_pending_count = 0;
@@ -1509,9 +1508,8 @@ namespace
                         return true;
                     }
 
-                    return
-                        (frame_index - track.last_seen_frame) >
-                        kMaximumMissedFrames;
+                    return (frame_index - track.last_seen_frame) >
+                           kMaximumMissedFrames;
                 }),
             runtime.tracks.end());
 
@@ -2595,8 +2593,7 @@ namespace
                         *linked_live_track);
 
                 candidate_debug.static_residual_samples =
-                    linked_live_track->
-                        static_residual_samples;
+                    linked_live_track->static_residual_samples;
 
                 candidate_debug.static_normal_rms_deg =
                     StaticNormalRmsDeg(
@@ -3078,7 +3075,6 @@ namespace
 
 } // namespace
 
-
 RegistrationScan2LocalMap::RegistrationScan2LocalMap(
     const LidarRegistrationConfig &registration_config,
     const LocalMapConfig &local_map_config,
@@ -3137,17 +3133,11 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
             registration_config,
             ground_constraint_config);
 
-
-
-
     const LoopDetectorConfig &active_loop_config =
         loop_detector_.GetConfig();
 
-
-
     const LoopConsistencyConfig &active_consistency =
         loop_consistency_checker_.GetConfig();
-
 
     RefreshBackendOutputSnapshot();
     StartBackendWorker();
@@ -3917,7 +3907,6 @@ bool RegistrationScan2LocalMap::AddFrame(
 
         T_WL = T_WL_;
 
-
         frame_timing.accepted = true;
         frame_timing.keyframes_after =
             keyframe_manager_.Size();
@@ -4279,7 +4268,6 @@ bool RegistrationScan2LocalMap::AddFrame(
     {
         frame_timing.recovery_triggered = true;
 
-
         // -----------------------------------------------------------------
         // ROS2 debug block:
         //
@@ -4338,8 +4326,6 @@ bool RegistrationScan2LocalMap::AddFrame(
                       result.T_target_source)
                 : std::numeric_limits<double>::quiet_NaN();
 
-
-
         Eigen::Isometry3d T_WL_coarse =
             initial_guess;
 
@@ -4360,7 +4346,6 @@ bool RegistrationScan2LocalMap::AddFrame(
                 recovery_coarse_start,
                 std::chrono::steady_clock::now());
 
-
         const Eigen::Vector3d coarse_correction =
             T_WL_coarse.translation() -
             initial_guess.translation();
@@ -4369,7 +4354,6 @@ bool RegistrationScan2LocalMap::AddFrame(
             RelativeRotationDeg(
                 initial_guess,
                 T_WL_coarse);
-
 
         if (coarse_success)
         {
@@ -4439,7 +4423,6 @@ bool RegistrationScan2LocalMap::AddFrame(
                     refined_success,
                     refined_result);
 
-
             const Eigen::Vector3d refine_correction =
                 refined_result.T_target_source.translation() -
                 T_WL_coarse.translation();
@@ -4448,7 +4431,6 @@ bool RegistrationScan2LocalMap::AddFrame(
                 RelativeRotationDeg(
                     T_WL_coarse,
                     refined_result.T_target_source);
-
 
             // Keep the refined diagnostics as the final candidate diagnostics.
             //
@@ -4580,7 +4562,6 @@ bool RegistrationScan2LocalMap::AddFrame(
 
         registration_result =
             result;
-
     }
 
     if (used_coarse_recovery)
@@ -4594,7 +4575,6 @@ bool RegistrationScan2LocalMap::AddFrame(
             RelativeRotationDeg(
                 T_WL_previous,
                 result.T_target_source);
-
     }
 
     // Candidate global pose estimated directly by Scan-to-LocalMap.
@@ -5190,6 +5170,301 @@ bool RegistrationScan2LocalMap::AddFrame(
     frame_timing.accepted = true;
     frame_timing.keyframes_after =
         keyframe_manager_.Size();
+
+    return true;
+}
+
+const PreparedLidarTarget *
+RegistrationScan2LocalMap::GetPreparedTrackingTarget() const
+{
+    if (!initialized_ ||
+        !prepared_tracking_target_.ready ||
+        !prepared_tracking_target_.cloud ||
+        prepared_tracking_target_.cloud->empty() ||
+        !prepared_tracking_target_.kdtree)
+    {
+        return nullptr;
+    }
+
+    return &prepared_tracking_target_;
+}
+
+bool RegistrationScan2LocalMap::CommitExternalPoseFrame(
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr &cloud_lidar,
+    double timestamp,
+    const Eigen::Isometry3d &T_WL_external,
+    const Eigen::Matrix<double, 6, 6> *odom_information,
+    bool *is_keyframe)
+{
+    if (is_keyframe != nullptr)
+    {
+        *is_keyframe = false;
+    }
+
+    if (!cloud_lidar || cloud_lidar->empty())
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+            << "input cloud is empty."
+            << std::endl;
+        return false;
+    }
+
+    if (!std::isfinite(timestamp) ||
+        !T_WL_external.matrix().allFinite())
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+            << "timestamp or external pose is invalid."
+            << std::endl;
+        return false;
+    }
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr dense_keyframe_cloud =
+        fr_slam::ConsumeGroundIcpDenseInput();
+
+    if (!dense_keyframe_cloud ||
+        dense_keyframe_cloud->empty())
+    {
+        dense_keyframe_cloud = cloud_lidar;
+    }
+
+    if (!initialized_)
+    {
+        T_WL_ = T_WL_external;
+        last_relative_transform_ = Eigen::Isometry3d::Identity();
+        consecutive_rejected_frames_ = 0;
+
+        const bool first_keyframe_stored =
+            keyframe_manager_.AddKeyframe(
+                timestamp,
+                T_WL_,
+                cloud_lidar,
+                nullptr,
+                dense_keyframe_cloud);
+
+        if (!first_keyframe_stored)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to store first keyframe."
+                << std::endl;
+            return false;
+        }
+
+        const Keyframe *first_keyframe =
+            keyframe_manager_.Latest();
+
+        if (first_keyframe == nullptr)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "first keyframe pointer is null."
+                << std::endl;
+            return false;
+        }
+
+        if (!submap_manager_.AddKeyframe(*first_keyframe))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to initialize Active Submap."
+                << std::endl;
+            return false;
+        }
+
+        PreparedLidarTarget first_target;
+
+        if (!registration_.PrepareTarget(
+                submap_manager_.GetTrackingMap(),
+                first_target))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to prepare first tracking target."
+                << std::endl;
+            return false;
+        }
+
+        prepared_tracking_target_ =
+            std::move(first_target);
+
+        if (!EnqueueBackendKeyframe(
+                *first_keyframe,
+                submap_manager_.ActiveSubmapId()))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "first backend enqueue failed"
+                << " | keyframe=" << first_keyframe->id
+                << std::endl;
+        }
+
+        keyframe_detector_.SetLastKeyframePose(T_WL_);
+        initialized_ = true;
+
+        if (is_keyframe != nullptr)
+        {
+            *is_keyframe = true;
+        }
+
+        return true;
+    }
+
+    const Eigen::Isometry3d T_previous_current =
+        T_WL_.inverse() * T_WL_external;
+
+    if (!T_previous_current.matrix().allFinite())
+    {
+        std::cerr
+            << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+            << "relative transform contains NaN/Inf."
+            << std::endl;
+        return false;
+    }
+
+    double keyframe_translation = 0.0;
+    double keyframe_rotation_deg = 0.0;
+
+    const bool create_keyframe =
+        keyframe_detector_.ShouldCreateKeyframe(
+            T_WL_external,
+            keyframe_translation,
+            keyframe_rotation_deg);
+
+    if (create_keyframe)
+    {
+        Eigen::Matrix<double, 6, 6> validated_information =
+            Eigen::Matrix<double, 6, 6>::Identity();
+
+        const Eigen::Matrix<double, 6, 6> *information_ptr =
+            nullptr;
+
+        if (odom_information != nullptr &&
+            odom_information->allFinite())
+        {
+            validated_information =
+                0.5 *
+                ((*odom_information) +
+                 odom_information->transpose());
+
+            bool information_valid = true;
+
+            for (int index = 0;
+                 index < 6;
+                 ++index)
+            {
+                if (!std::isfinite(
+                        validated_information(index, index)) ||
+                    validated_information(index, index) <= 0.0)
+                {
+                    information_valid = false;
+                    break;
+                }
+            }
+
+            if (information_valid)
+            {
+                information_ptr = &validated_information;
+            }
+        }
+
+        if (!keyframe_manager_.AddKeyframe(
+                timestamp,
+                T_WL_external,
+                cloud_lidar,
+                information_ptr,
+                dense_keyframe_cloud))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to store historical keyframe."
+                << std::endl;
+            return false;
+        }
+
+        const Keyframe *new_keyframe =
+            keyframe_manager_.Latest();
+
+        if (new_keyframe == nullptr)
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "latest keyframe pointer is null."
+                << std::endl;
+            return false;
+        }
+
+        const Submap *current_owner_before_add =
+            submap_manager_.ActiveSubmap();
+
+        if (current_owner_before_add == nullptr ||
+            !current_owner_before_add->has_origin_pose ||
+            !current_owner_before_add->T_WS.matrix().allFinite())
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "current Active Submap is invalid."
+                << std::endl;
+            return false;
+        }
+
+        const std::size_t current_owner_submap_id =
+            current_owner_before_add->id;
+
+        if (!submap_manager_.AddKeyframe(*new_keyframe))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to update SubmapManager."
+                << std::endl;
+            return false;
+        }
+
+        PreparedLidarTarget new_target;
+
+        if (!registration_.PrepareTarget(
+                submap_manager_.GetTrackingMap(),
+                new_target))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "failed to prepare updated tracking target."
+                << std::endl;
+            return false;
+        }
+
+        prepared_tracking_target_ =
+            std::move(new_target);
+
+        if (!EnqueueBackendKeyframe(
+                *new_keyframe,
+                current_owner_submap_id))
+        {
+            std::cerr
+                << "RegistrationScan2LocalMap::CommitExternalPoseFrame(): "
+                << "backend enqueue failed"
+                << " | keyframe=" << new_keyframe->id
+                << std::endl;
+        }
+
+        keyframe_detector_.SetLastKeyframePose(
+            T_WL_external);
+    }
+
+    last_relative_transform_ =
+        T_previous_current;
+
+    T_WL_ =
+        T_WL_external;
+
+    consecutive_rejected_frames_ =
+        0;
+
+    if (is_keyframe != nullptr)
+    {
+        *is_keyframe = create_keyframe;
+    }
 
     return true;
 }
