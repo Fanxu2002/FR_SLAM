@@ -880,7 +880,12 @@ bool Ieskf::IteratedLidarUpdate(
         bool(
             const LioState &,
             Ieskf::StateMatrix &,
-            Ieskf::StateVector &)> *joint_observation_builder)
+            Ieskf::StateVector &)> *joint_observation_builder,
+    // FR_PERSISTENT_GROUND_OWNERSHIP_V4
+    const std::function<
+        bool(
+            const LioState &,
+            Ieskf::StateMatrix &)> *structural_ownership_builder)
 {
     result =
         IeskfLidarUpdateResult();
@@ -974,6 +979,55 @@ bool Ieskf::IteratedLidarUpdate(
             }
 
             // ============================================================
+            // FR_PERSISTENT_GROUND_OWNERSHIP_V4
+            //
+            // Measurement validity != ownership validity.
+            //
+            // joint_information:
+            //     current valid Ground / Wall measurement.
+            //
+            // persistent_ownership_information:
+            //     ownership only; NEVER added as a measurement.
+            // ============================================================
+            StateMatrix structural_ownership_information =
+                joint_information;
+
+            if (structural_ownership_builder != nullptr)
+            {
+                StateMatrix persistent_ownership_information =
+                    StateMatrix::Zero();
+
+                if (!(*structural_ownership_builder)(
+                        current_state,
+                        persistent_ownership_information))
+                {
+                    return false;
+                }
+
+                persistent_ownership_information =
+                    0.5 *
+                    (
+                        persistent_ownership_information +
+                        persistent_ownership_information.transpose()
+                    );
+
+                if (!persistent_ownership_information.allFinite())
+                {
+                    return false;
+                }
+
+                structural_ownership_information +=
+                    persistent_ownership_information;
+            }
+
+            structural_ownership_information =
+                0.5 *
+                (
+                    structural_ownership_information +
+                    structural_ownership_information.transpose()
+                );
+
+            // ============================================================
             // FR_STRUCTURAL_SUBSPACE_OWNERSHIP_ITERATION
             //
             // Structural observations own their observable subspace.
@@ -987,11 +1041,7 @@ bool Ieskf::IteratedLidarUpdate(
             // ============================================================
             {
                 const StateMatrix structural_information =
-                    0.5 *
-                    (
-                        joint_information +
-                        joint_information.transpose()
-                    );
+                    structural_ownership_information;
 
                 Eigen::SelfAdjointEigenSolver<StateMatrix>
                     ownership_solver(
@@ -1821,6 +1871,50 @@ bool Ieskf::IteratedLidarUpdate(
         }
 
         // ================================================================
+        // FR_PERSISTENT_GROUND_OWNERSHIP_V4
+        //
+        // Posterior covariance must use the SAME persistent ownership
+        // subspace used during the iterative solve.
+        // ================================================================
+        StateMatrix final_structural_ownership_information =
+            final_joint_information;
+
+        if (structural_ownership_builder != nullptr)
+        {
+            StateMatrix persistent_ownership_information =
+                StateMatrix::Zero();
+
+            if (!(*structural_ownership_builder)(
+                    current_state,
+                    persistent_ownership_information))
+            {
+                return false;
+            }
+
+            persistent_ownership_information =
+                0.5 *
+                (
+                    persistent_ownership_information +
+                    persistent_ownership_information.transpose()
+                );
+
+            if (!persistent_ownership_information.allFinite())
+            {
+                return false;
+            }
+
+            final_structural_ownership_information +=
+                persistent_ownership_information;
+        }
+
+        final_structural_ownership_information =
+            0.5 *
+            (
+                final_structural_ownership_information +
+                final_structural_ownership_information.transpose()
+            );
+
+        // ================================================================
         // FR_STRUCTURAL_SUBSPACE_OWNERSHIP_FINAL
         //
         // Posterior covariance must use exactly the same ownership rule
@@ -1828,11 +1922,7 @@ bool Ieskf::IteratedLidarUpdate(
         // ================================================================
         {
             const StateMatrix structural_information =
-                0.5 *
-                (
-                    final_joint_information +
-                    final_joint_information.transpose()
-                );
+                final_structural_ownership_information;
 
             Eigen::SelfAdjointEigenSolver<StateMatrix>
                 ownership_solver(

@@ -517,6 +517,36 @@ bool LioFrontend::PropagateFilterToTime(
                         interval_dt /
                         max_imu_dt)));
 
+        // ============================================================
+        // FR_IMU_GAP_CV_BRIDGE_V1
+        //
+        // Real IMU interval:
+        //
+        //   interval_dt <= max_imu_dt
+        //       -> normal IMU propagation, unchanged.
+        //
+        //   interval_dt > max_imu_dt
+        //       -> degraded dropout recovery:
+        //          preserve gyro propagation,
+        //          suppress invented translational acceleration.
+        //
+        // During the missing interval we impose the propagation model:
+        //
+        //       dV/dt = 0
+        //
+        // by synthesizing accelerometer samples satisfying:
+        //
+        //       R_WI * (a_m - b_a) + g_W = 0
+        //
+        // No Ground / LiDAR / measurement code is modified here.
+        // ============================================================
+        const bool use_constant_velocity_gap_bridge =
+            interval_dt > max_imu_dt;
+
+        const Eigen::Vector3d gap_velocity_before =
+            trial_filter.State().V_WI;
+
+
         if (substep_count > 1)
         {
             std::cerr
@@ -589,6 +619,122 @@ bool LioFrontend::PropagateFilterToTime(
                     imu_begin.accelerometer +
                 alpha1 *
                     imu_end.accelerometer;
+
+            // --------------------------------------------------------
+            // FR_IMU_GAP_CV_BRIDGE_V1
+            //
+            // For a real dropout, the interpolated accelerometer above
+            // is NOT treated as measured dynamics.
+            //
+            // Gyro remains the interpolated gyro.
+            //
+            // Synthetic accelerometer:
+            //
+            //     a_m = b_a + R_IW * (-g_W)
+            //
+            // so nominal world linear acceleration is approximately 0.
+            // --------------------------------------------------------
+            if (use_constant_velocity_gap_bridge)
+            {
+                const LioState bridge_state =
+                    trial_filter.State();
+
+                if (!bridge_state.Q_WI.coeffs().allFinite() ||
+                    bridge_state.Q_WI.norm() <= 1.0e-12 ||
+                    !bridge_state.gyro_bias.allFinite() ||
+                    !bridge_state.accel_bias.allFinite() ||
+                    !bridge_state.gravity_W.allFinite())
+                {
+                    std::cerr
+                        << "LIO_PROPAGATE_CV_BRIDGE_INVALID_STATE"
+                        << " | interval=" << index
+                        << " | substep=" << step
+                        << std::endl;
+
+                    return false;
+                }
+
+                const double bridge_substep_dt =
+                    imu1.timestamp -
+                    imu0.timestamp;
+
+                if (!std::isfinite(bridge_substep_dt) ||
+                    bridge_substep_dt <= 0.0)
+                {
+                    std::cerr
+                        << "LIO_PROPAGATE_CV_BRIDGE_INVALID_DT"
+                        << " | interval=" << index
+                        << " | substep=" << step
+                        << " | dt=" << bridge_substep_dt
+                        << std::endl;
+
+                    return false;
+                }
+
+                const Eigen::Matrix3d R_WI_begin =
+                    bridge_state.Q_WI
+                        .normalized()
+                        .toRotationMatrix();
+
+                const Eigen::Vector3d omega_mid_I =
+                    0.5 *
+                        (
+                            imu0.gyro +
+                            imu1.gyro
+                        ) -
+                    bridge_state.gyro_bias;
+
+                if (!omega_mid_I.allFinite())
+                {
+                    return false;
+                }
+
+                Eigen::Matrix3d R_WI_end =
+                    R_WI_begin;
+
+                const double omega_norm =
+                    omega_mid_I.norm();
+
+                if (omega_norm > 1.0e-12)
+                {
+                    const double angle =
+                        omega_norm *
+                        bridge_substep_dt;
+
+                    R_WI_end =
+                        R_WI_begin *
+                        Eigen::AngleAxisd(
+                            angle,
+                            omega_mid_I /
+                                omega_norm)
+                            .toRotationMatrix();
+                }
+
+                const Eigen::Vector3d
+                    specific_force_begin_I =
+                        R_WI_begin.transpose() *
+                        (-bridge_state.gravity_W);
+
+                const Eigen::Vector3d
+                    specific_force_end_I =
+                        R_WI_end.transpose() *
+                        (-bridge_state.gravity_W);
+
+                imu0.accelerometer =
+                    bridge_state.accel_bias +
+                    specific_force_begin_I;
+
+                imu1.accelerometer =
+                    bridge_state.accel_bias +
+                    specific_force_end_I;
+
+                if (!imu0.accelerometer.allFinite() ||
+                    !imu1.accelerometer.allFinite())
+                {
+                    return false;
+                }
+            }
+
 
             const LioState substep_state_before =
                 trial_filter.State();
@@ -688,10 +834,36 @@ bool LioFrontend::PropagateFilterToTime(
 
             propagation_diagnostic_dt +=
                 substep_dt;
+                }
+
+        if (use_constant_velocity_gap_bridge)
+        {
+            const Eigen::Vector3d gap_velocity_after =
+                trial_filter.State().V_WI;
+
+            std::cerr
+                << "LIO_PROPAGATE_CV_BRIDGE"
+                << " | index=" << index
+                << " | dt=" << interval_dt
+                << " | substeps=" << substep_count
+                << " | v_before=["
+                << gap_velocity_before.transpose()
+                << "]"
+                << " | v_after=["
+                << gap_velocity_after.transpose()
+                << "]"
+                << " | dv=["
+                << (
+                    gap_velocity_after -
+                    gap_velocity_before
+                ).transpose()
+                << "]"
+                << std::endl;
         }
     }
 
     const double propagated_time =
+
         trial_filter.State().timestamp;
 
     if (!std::isfinite(propagated_time) ||
@@ -1213,11 +1385,90 @@ bool LioFrontend::ProcessGroundMeasurement(
             return true;
         }
 
+        // ================================================================
+        // FR_GROUND_FLAT_REFERENCE_V1
+        //
+        // Flat-floor operating mode:
+        //
+        // The bootstrap Ground estimate is still used for:
+        //   - normal consistency validation
+        //   - plane-distance consistency validation
+        //   - initial vertical anchor
+        //
+        // But its small world-frame tilt is NOT frozen permanently.
+        //
+        // Old bootstrap plane:
+        //
+        //     mean_normal^T p_W + mean_d = 0
+        //
+        // At world x=y=0:
+        //
+        //     z0 = -mean_d / mean_normal.z()
+        //
+        // Freeze a horizontal plane through exactly the same z-intercept:
+        //
+        //     UnitZ^T p_W + flat_d = 0
+        //
+        //     flat_d = mean_d / mean_normal.z()
+        //
+        // Therefore this change removes ONLY the bootstrap tilt while
+        // preserving its initial vertical anchor.
+        // ================================================================
+
+        const double bootstrap_normal_z =
+            mean_normal.z();
+
+        if (!std::isfinite(bootstrap_normal_z) ||
+            bootstrap_normal_z <= 1.0e-6)
+        {
+            return true;
+        }
+
+        const double flat_reference_plane_d_W =
+            mean_d /
+            bootstrap_normal_z;
+
+        if (!std::isfinite(
+                flat_reference_plane_d_W))
+        {
+            return true;
+        }
+
+        const Eigen::Vector3d
+            bootstrap_reference_normal_W =
+                mean_normal;
+
+        const double
+            bootstrap_reference_plane_d_W =
+                mean_d;
+
         ground_reference_normal_W_ =
-            mean_normal;
+            Eigen::Vector3d::UnitZ();
 
         ground_reference_plane_d_W_ =
-            mean_d;
+            flat_reference_plane_d_W;
+
+        std::cout
+            << "LIO_GROUND_FLAT_REFERENCE"
+            << " | bootstrap_n_W=["
+            << bootstrap_reference_normal_W.transpose()
+            << "]"
+            << " | bootstrap_d_W="
+            << bootstrap_reference_plane_d_W
+            << " | flat_n_W=["
+            << ground_reference_normal_W_.transpose()
+            << "]"
+            << " | flat_d_W="
+            << ground_reference_plane_d_W_
+            << " | dz_origin="
+            << (
+                -ground_reference_plane_d_W_ -
+                (
+                    -bootstrap_reference_plane_d_W /
+                    bootstrap_reference_normal_W.z()
+                )
+            )
+            << std::endl;
 
         ground_reference_frozen_ =
             true;
@@ -5202,6 +5453,45 @@ const bool joint_ground_ready =
         std::isfinite(
             ground_reference_plane_d_W_);
 
+    // ========================================================================
+    // FR_GROUND_DEGRADED_HEIGHT_V1
+    //
+    // If HIGH_RMSE is the ONLY failed support gate, retain a WEAK
+    // height-only Ground observation.
+    //
+    // We deliberately do NOT trust the noisy normal:
+    //
+    //     normal measurement = OFF
+    //     height measurement = weak ON
+    //
+    // All other rejection masks remain measurement OFF.
+    // Persistent Ground ownership remains responsible for rank-3 ownership.
+    // ========================================================================
+    const bool joint_ground_degraded_height_ready =
+        ground_joint_measurement_allowed &&
+        config_.ground.enabled &&
+        config_.ground.mode != "off" &&
+        config_.ground.mode != "disabled" &&
+        last_ground_segmentation_valid_ &&
+        ground_reference_frozen_ &&
+        last_ground_segmentation_result_.success &&
+        last_ground_segmentation_result_.support_plane_valid &&
+        !last_ground_segmentation_result_.support_constraint_valid &&
+        last_ground_segmentation_result_
+                .support_constraint_rejection_mask ==
+            fr_slam::SUPPORT_CONSTRAINT_REJECT_HIGH_RMSE &&
+        last_ground_segmentation_result_.support_ground_cloud &&
+        !last_ground_segmentation_result_.support_ground_cloud->empty() &&
+        last_ground_segmentation_result_
+            .support_ground_normal_L.allFinite() &&
+        std::isfinite(
+            last_ground_segmentation_result_
+                .support_ground_plane_d) &&
+        ground_reference_normal_W_.allFinite() &&
+        ground_reference_normal_W_.norm() > 1.0e-12 &&
+        std::isfinite(
+            ground_reference_plane_d_W_);
+
     const auto joint_ground_result =
         last_ground_segmentation_result_;
 
@@ -5211,7 +5501,8 @@ const bool joint_ground_ready =
     double joint_ground_reference_plane_d_W =
         0.0;
 
-    if (joint_ground_ready)
+    if (joint_ground_ready ||
+        joint_ground_degraded_height_ready)
     {
         joint_ground_reference_normal_W =
             ground_reference_normal_W_.normalized();
@@ -5219,6 +5510,318 @@ const bool joint_ground_ready =
         joint_ground_reference_plane_d_W =
             ground_reference_plane_d_W_;
     }
+
+    if (joint_ground_degraded_height_ready)
+    {
+        std::cout
+            << "LIO_GROUND_DEGRADED_HEIGHT"
+            << " | mask="
+            << last_ground_segmentation_result_
+                   .support_constraint_rejection_mask
+            << " | rmse="
+            << last_ground_segmentation_result_
+                   .support_plane_rmse_m
+            << " | sigma=0.05"
+            << std::endl;
+    }
+
+    // ========================================================================
+    // FR_PERSISTENT_HEIGHT_HOLD_V1
+    //
+    // Cache ONLY trusted Ground geometry.
+    //
+    // During a short Ground dropout we reuse this trusted height target.
+    // Rejected current Ground geometry is NEVER used by this hold.
+    // ========================================================================
+    static bool
+        persistent_height_hold_valid =
+            false;
+
+    static double
+        persistent_height_hold_target_lidar_normal_W =
+            0.0;
+
+    static double
+        persistent_height_hold_timestamp =
+            0.0;
+
+    if (!ground_reference_frozen_)
+    {
+        persistent_height_hold_valid =
+            false;
+    }
+
+    if (joint_ground_ready)
+    {
+        const LioState hold_source_state =
+            ieskf_.State();
+
+        const Eigen::Isometry3d hold_T_WL =
+            StateToLidarPose(
+                hold_source_state);
+
+        Eigen::Vector3d hold_normal_L =
+            joint_ground_result
+                .support_ground_normal_L;
+
+        const double hold_normal_norm =
+            hold_normal_L.norm();
+
+        if (hold_T_WL.matrix().allFinite() &&
+            hold_normal_L.allFinite() &&
+            std::isfinite(hold_normal_norm) &&
+            hold_normal_norm > 1.0e-12 &&
+            std::isfinite(
+                joint_ground_result
+                    .support_ground_plane_d))
+        {
+            double hold_plane_d_L =
+                joint_ground_result
+                    .support_ground_plane_d /
+                hold_normal_norm;
+
+            hold_normal_L /=
+                hold_normal_norm;
+
+            Eigen::Vector3d hold_reference_normal_W =
+                ground_reference_normal_W_.normalized();
+
+            const Eigen::Vector3d
+                hold_reference_normal_L =
+                    hold_T_WL.rotation().transpose() *
+                    hold_reference_normal_W;
+
+            const double hold_denominator =
+                hold_normal_L.dot(
+                    hold_reference_normal_L);
+
+            if (std::isfinite(hold_denominator) &&
+                std::abs(hold_denominator) >
+                    0.50)
+            {
+                const double hold_clearance_m =
+                    hold_plane_d_L /
+                    hold_denominator;
+
+                const double hold_target =
+                    -ground_reference_plane_d_W_ +
+                    hold_clearance_m;
+
+                if (std::isfinite(hold_clearance_m) &&
+                    std::isfinite(hold_target) &&
+                    hold_clearance_m > 0.05 &&
+                    hold_clearance_m < 2.0)
+                {
+                    persistent_height_hold_target_lidar_normal_W =
+                        hold_target;
+
+                    persistent_height_hold_timestamp =
+                        hold_source_state.timestamp;
+
+                    persistent_height_hold_valid =
+                        true;
+                }
+            }
+        }
+    }
+
+    const double persistent_height_hold_age_s =
+        persistent_height_hold_valid
+            ? ieskf_.State().timestamp -
+                  persistent_height_hold_timestamp
+            : 1.0e9;
+
+    constexpr double
+        kPersistentHeightHoldMaximumAgeS =
+            1.0;
+
+    const bool joint_ground_persistent_height_hold_ready =
+        !joint_ground_ready &&
+        ground_reference_frozen_ &&
+        persistent_height_hold_valid &&
+        std::isfinite(
+            persistent_height_hold_age_s) &&
+        persistent_height_hold_age_s >= 0.0 &&
+        persistent_height_hold_age_s <=
+            kPersistentHeightHoldMaximumAgeS;
+
+    Eigen::Vector3d persistent_height_hold_normal_W =
+        Eigen::Vector3d::UnitZ();
+
+    if (ground_reference_frozen_ &&
+        ground_reference_normal_W_.allFinite() &&
+        ground_reference_normal_W_.norm() >
+            1.0e-12)
+    {
+        persistent_height_hold_normal_W =
+            ground_reference_normal_W_.normalized();
+    }
+
+    if (joint_ground_persistent_height_hold_ready)
+    {
+        std::cout
+            << "LIO_GROUND_PERSISTENT_HEIGHT_HOLD"
+            << " | age="
+            << persistent_height_hold_age_s
+            << " | target="
+            << persistent_height_hold_target_lidar_normal_W
+            << " | sigma=0.03"
+            << std::endl;
+    }
+
+    // ========================================================================
+    // FR_GROUND_TRACE_V1
+    //
+    // DIAGNOSTICS ONLY.
+    //
+    // Record the exact local support-plane measurement used by Joint Ground
+    // together with its local/world anchor and frozen-plane height residual.
+    //
+    // This block MUST NOT modify segmentation, state, covariance, Ground
+    // ownership or the IESKF measurement.
+    // ========================================================================
+    if (joint_ground_ready)
+    {
+        const LioState ground_trace_state =
+            ieskf_.State();
+
+        const Eigen::Isometry3d ground_trace_T_WL =
+            StateToLidarPose(
+                ground_trace_state);
+
+        Eigen::Vector3d ground_trace_normal_L =
+            joint_ground_result
+                .support_ground_normal_L;
+
+        const double ground_trace_normal_norm =
+            ground_trace_normal_L.norm();
+
+        if (ground_trace_T_WL.matrix().allFinite() &&
+            ground_trace_normal_L.allFinite() &&
+            std::isfinite(ground_trace_normal_norm) &&
+            ground_trace_normal_norm > 1.0e-12)
+        {
+            ground_trace_normal_L /=
+                ground_trace_normal_norm;
+
+            const double ground_trace_plane_d_L =
+                joint_ground_result
+                    .support_ground_plane_d /
+                ground_trace_normal_norm;
+
+            if (std::isfinite(
+                    ground_trace_plane_d_L))
+            {
+                // Plane:
+                //
+                //     n_L^T p_L + d_L = 0
+                //
+                // Closest point to LiDAR origin:
+                //
+                //     p0_L = -d_L n_L
+                const Eigen::Vector3d
+                    ground_trace_anchor_L =
+                        -ground_trace_plane_d_L *
+                        ground_trace_normal_L;
+
+                const Eigen::Vector3d
+                    ground_trace_anchor_W =
+                        ground_trace_T_WL *
+                        ground_trace_anchor_L;
+
+                Eigen::Vector3d ground_trace_normal_W =
+                    ground_trace_T_WL.rotation() *
+                    ground_trace_normal_L;
+
+                const double ground_trace_normal_W_norm =
+                    ground_trace_normal_W.norm();
+
+                if (ground_trace_anchor_L.allFinite() &&
+                    ground_trace_anchor_W.allFinite() &&
+                    ground_trace_normal_W.allFinite() &&
+                    std::isfinite(
+                        ground_trace_normal_W_norm) &&
+                    ground_trace_normal_W_norm >
+                        1.0e-12)
+                {
+                    ground_trace_normal_W /=
+                        ground_trace_normal_W_norm;
+
+                    if (ground_trace_normal_W.dot(
+                            joint_ground_reference_normal_W) <
+                        0.0)
+                    {
+                        ground_trace_normal_W =
+                            -ground_trace_normal_W;
+                    }
+
+                    const double ground_trace_height_residual =
+                        -(
+                            joint_ground_reference_normal_W.dot(
+                                ground_trace_anchor_W) +
+                            joint_ground_reference_plane_d_W);
+
+                    const double ground_trace_normal_cos =
+                        std::clamp(
+                            ground_trace_normal_W.dot(
+                                joint_ground_reference_normal_W),
+                            -1.0,
+                            1.0);
+
+                    const double
+                        ground_trace_normal_error_deg =
+                            std::acos(
+                                ground_trace_normal_cos) *
+                            57.29577951308232;
+
+                    std::cout
+                        << "LIO_GROUND_TRACE_V1"
+                        << " | t="
+                        << ground_trace_state.timestamp
+                        << " | state_pz="
+                        << ground_trace_state.P_WI.z()
+                        << " | lidar_z="
+                        << ground_trace_T_WL
+                               .translation()
+                               .z()
+                        << " | plane_d_raw="
+                        << joint_ground_result
+                               .support_ground_plane_d
+                        << " | plane_d_L="
+                        << ground_trace_plane_d_L
+                        << " | distance="
+                        << joint_ground_result
+                               .support_ground_distance_m
+                        << " | normal_L=["
+                        << ground_trace_normal_L.transpose()
+                        << "]"
+                        << " | anchor_L=["
+                        << ground_trace_anchor_L.transpose()
+                        << "]"
+                        << " | anchor_W=["
+                        << ground_trace_anchor_W.transpose()
+                        << "]"
+                        << " | height_res="
+                        << ground_trace_height_residual
+                        << " | normal_err_deg="
+                        << ground_trace_normal_error_deg
+                        << " | rmse="
+                        << joint_ground_result
+                               .support_plane_rmse_m
+                        << " | inlier="
+                        << joint_ground_result
+                               .support_plane_inlier_ratio
+                        << " | tilt="
+                        << joint_ground_result
+                               .support_ground_tilt_deg
+                        << " | ref_d="
+                        << joint_ground_reference_plane_d_W
+                        << std::endl;
+                }
+            }
+        }
+    }
+
 
     
     std::function<
@@ -5232,6 +5835,10 @@ const bool joint_ground_ready =
 
         [this,
          joint_ground_ready,
+         joint_ground_degraded_height_ready,
+         joint_ground_persistent_height_hold_ready,
+         persistent_height_hold_target_lidar_normal_W,
+         persistent_height_hold_normal_W,
          joint_ground_result,
          joint_ground_reference_normal_W,
          joint_ground_reference_plane_d_W](
@@ -5242,10 +5849,81 @@ const bool joint_ground_ready =
             joint_information.setZero();
             joint_gradient.setZero();
 
-            // Invalid / unavailable Ground simply means LiDAR-only update.
+            // ============================================================
+            // FR_PERSISTENT_HEIGHT_HOLD_V1
+            //
+            // Invalid current Ground must NEVER directly drive the state.
+            //
+            // For a short dropout, use the LAST TRUSTED Ground height target.
+            // ============================================================
             if (!joint_ground_ready)
             {
-                return true;
+                if (joint_ground_persistent_height_hold_ready)
+                {
+                    const Eigen::Isometry3d hold_T_WL =
+                        StateToLidarPose(
+                            linearization_state);
+
+                    if (!hold_T_WL.matrix().allFinite())
+                    {
+                        return false;
+                    }
+
+                    const double current_lidar_normal_position =
+                        persistent_height_hold_normal_W.dot(
+                            hold_T_WL.translation());
+
+                    const double hold_residual =
+                        persistent_height_hold_target_lidar_normal_W -
+                        current_lidar_normal_position;
+
+                    if (!std::isfinite(
+                            current_lidar_normal_position) ||
+                        !std::isfinite(
+                            hold_residual))
+                    {
+                        return false;
+                    }
+
+                    Ieskf::StateVector hold_jacobian =
+                        Ieskf::StateVector::Zero();
+
+                    hold_jacobian.segment<3>(
+                        LioStateIndex::POSITION) =
+                        -persistent_height_hold_normal_W;
+
+                    constexpr double
+                        kPersistentHeightHoldSigmaM =
+                            0.03;
+
+                    const double hold_information =
+                        1.0 /
+                        (
+                            kPersistentHeightHoldSigmaM *
+                            kPersistentHeightHoldSigmaM
+                        );
+
+                    joint_information.noalias() +=
+                        hold_information *
+                        hold_jacobian *
+                        hold_jacobian.transpose();
+
+                    joint_gradient.noalias() +=
+                        hold_information *
+                        hold_jacobian *
+                        hold_residual;
+
+                    return
+                        joint_information.allFinite() &&
+                        joint_gradient.allFinite();
+                }
+
+                // Keep the previous HIGH_RMSE degraded fallback only if the
+                // trusted-height hold has expired / is unavailable.
+                if (!joint_ground_degraded_height_ready)
+                {
+                    return true;
+                }
             }
 
             // ------------------------------------------------------------
@@ -5481,14 +6159,30 @@ const bool joint_ground_ready =
             }
 
             // HARD validity gate.
-            if (normal_error_deg >
-                    config_.ground
-                        .maximum_normal_residual_deg ||
-                height_error_m >
+            if (joint_ground_ready)
+            {
+                if (normal_error_deg >
+                        config_.ground
+                            .maximum_normal_residual_deg ||
+                    height_error_m >
+                        config_.ground
+                            .maximum_height_residual_m)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                // FR_GROUND_DEGRADED_HEIGHT_V1
+                //
+                // No normal observation is used in degraded mode.
+                // Height safety gate remains mandatory.
+                if (height_error_m >
                     config_.ground
                         .maximum_height_residual_m)
-            {
-                return true;
+                {
+                    return true;
+                }
             }
 
             const double normal_sigma_rad =
@@ -5523,6 +6217,33 @@ const bool joint_ground_ready =
                 1.0 /
                 (height_sigma_m *
                  height_sigma_m);
+
+            if (joint_ground_degraded_height_ready)
+            {
+                constexpr double
+                    kDegradedHeightSigmaM =
+                        0.05;
+
+                information_R(0, 0) =
+                    0.0;
+
+                information_R(1, 1) =
+                    0.0;
+
+                information_R(2, 2) =
+                    1.0 /
+                    (
+                        kDegradedHeightSigmaM *
+                        kDegradedHeightSigmaM
+                    );
+
+                // Normal residual is explicitly inactive.
+                residual(0) =
+                    0.0;
+
+                residual(1) =
+                    0.0;
+            }
 
             // ------------------------------------------------------------
             // Numerical Jacobian in the EXACT project error-state convention.
@@ -5645,10 +6366,7 @@ const bool joint_ground_ready =
             // The 1-cm height observation MUST NOT create artificial
             // roll/pitch information through a geometric lever arm.
             //
-            // Ground normal velocity is added separately below as one
-            // direct VELOCITY scalar observation.
-            //
-            // Bias / gravity still change only INDIRECTLY through
+            // V / bias / gravity may still change INDIRECTLY through
             // IESKF covariance coupling; they have no direct Ground row.
             // ================================================================
             for (int axis = 0;
@@ -5686,9 +6404,99 @@ const bool joint_ground_ready =
                         axis);
             }
 
-if (!ground_jacobian.allFinite())
+            if (joint_ground_degraded_height_ready)
+            {
+                ground_jacobian.row(0).setZero();
+                ground_jacobian.row(1).setZero();
+            }
+
+            if (!ground_jacobian.allFinite())
             {
                 return true;
+            }
+
+            // ============================================================
+            // FR_GROUND_HEIGHT_ROBUST_INNOVATION_V1
+            //
+            // Ground height directly observes POSITION only.
+            // Vz may still change through the legitimate prior covariance
+            // P(z,vz).  When a VALID Ground frame arrives with a very large
+            // height innovation, however, the full 1-cm information can
+            // create a violent one-frame Z/Vz correction.
+            //
+            // Use a Huber M-estimator ONLY on the VALID Ground height row:
+            //
+            //     delta_h = 3 * sigma_h
+            //
+            //     w = 1                         |r_h| <= delta_h
+            //         delta_h / |r_h|           otherwise
+            //
+            // Both information and gradient therefore receive the same
+            // IRLS weight.  Small residuals are EXACTLY unchanged.
+            //
+            // IMPORTANT:
+            //   - ownership is unchanged
+            //   - Dense LiDAR still cannot reclaim Ground Z
+            //   - no direct velocity measurement is introduced
+            //   - covariance coupling remains intact
+            //   - Persistent Height Hold is unchanged
+            // ============================================================
+            double ground_height_robust_weight =
+                1.0;
+
+            if (joint_ground_ready)
+            {
+                constexpr double
+                    kGroundHeightHuberSigma =
+                        3.0;
+
+                const double height_huber_delta_m =
+                    kGroundHeightHuberSigma *
+                    height_sigma_m;
+
+                const double absolute_height_residual_m =
+                    std::abs(
+                        residual(2));
+
+                if (std::isfinite(
+                        height_huber_delta_m) &&
+                    std::isfinite(
+                        absolute_height_residual_m) &&
+                    height_huber_delta_m > 0.0 &&
+                    absolute_height_residual_m >
+                        height_huber_delta_m)
+                {
+                    ground_height_robust_weight =
+                        height_huber_delta_m /
+                        absolute_height_residual_m;
+
+                    information_R(2, 2) *=
+                        ground_height_robust_weight;
+
+                    static std::size_t
+                        ground_height_robust_counter =
+                            0U;
+
+                    ++ground_height_robust_counter;
+
+                    if ((ground_height_robust_counter %
+                         20U) == 1U)
+                    {
+                        std::cout
+                            << "LIO_GROUND_HEIGHT_ROBUST"
+                            << " | r_h="
+                            << residual(2)
+                            << " | sigma="
+                            << height_sigma_m
+                            << " | delta="
+                            << height_huber_delta_m
+                            << " | weight="
+                            << ground_height_robust_weight
+                            << " | info_z="
+                            << information_R(2, 2)
+                            << std::endl;
+                    }
+                }
             }
 
             // Information-form contribution:
@@ -5709,84 +6517,6 @@ if (!ground_jacobian.allFinite())
                 ground_jacobian.transpose() *
                 information_R *
                 residual;
-
-            // ================================================================
-            // FR_GROUND_NORMAL_VELOCITY_V1
-            //
-            // Wheeled-ground kinematic observation:
-            //
-            //     r_vn = n_G^T V_WI
-            //
-            // On a locally rigid traversable surface the platform may move
-            // tangentially, but should not acquire large velocity through
-            // the trusted Ground normal.
-            //
-            // This is a DIRECT velocity observation only.
-            // It does NOT directly observe position / bias / gravity.
-            // ================================================================
-            constexpr double kGroundNormalVelocitySigmaMps =
-                0.05;
-
-            const double ground_normal_velocity_residual =
-                joint_ground_reference_normal_W.dot(
-                    linearization_state.V_WI);
-
-            if (std::isfinite(
-                    ground_normal_velocity_residual))
-            {
-                Ieskf::StateVector
-                    ground_velocity_jacobian =
-                        Ieskf::StateVector::Zero();
-
-                for (int axis = 0;
-                     axis < 3;
-                     ++axis)
-                {
-                    ground_velocity_jacobian(
-                        LioStateIndex::VELOCITY +
-                        axis) =
-                        joint_ground_reference_normal_W(
-                            axis);
-                }
-
-                const double
-                    ground_velocity_information =
-                        1.0 /
-                        (
-                            kGroundNormalVelocitySigmaMps *
-                            kGroundNormalVelocitySigmaMps
-                        );
-
-                joint_information.noalias() +=
-                    ground_velocity_information *
-                    ground_velocity_jacobian *
-                    ground_velocity_jacobian.transpose();
-
-                joint_gradient.noalias() +=
-                    ground_velocity_information *
-                    ground_velocity_jacobian *
-                    ground_normal_velocity_residual;
-
-                static std::size_t
-                    joint_ground_velocity_counter =
-                        0U;
-
-                ++joint_ground_velocity_counter;
-
-                if ((joint_ground_velocity_counter %
-                     100U) == 0U)
-                {
-                    std::cout
-                        << "LIO_JOINT_GROUND_VELOCITY"
-                        << " | vn="
-                        << ground_normal_velocity_residual
-                        << " | sigma="
-                        << kGroundNormalVelocitySigmaMps
-                        << " | info="
-                        << ground_velocity_information
-                        << std::endl;
-                }
-            }
 
             static std::size_t
                 joint_ground_counter = 0;
@@ -7085,12 +7815,167 @@ if (!ground_jacobian.allFinite())
                 return true;
             };
 
+
+    // ========================================================================
+    // FR_PERSISTENT_GROUND_OWNERSHIP_V4
+    //
+    // Once Ground reference is frozen:
+    //
+    //   current Ground VALID:
+    //       Ground measurement supplies its own rank-3 ownership.
+    //
+    //   current Ground INVALID:
+    //       no Ground residual is injected,
+    //       but Dense LiDAR still cannot reclaim tilt + vertical position.
+    //
+    // This block creates OWNERSHIP ONLY.
+    // It contains no residual and no gradient.
+    // ========================================================================
+    const bool persistent_ground_owner_active =
+        config_.ground.enabled &&
+        config_.ground.mode != "off" &&
+        config_.ground.mode != "disabled" &&
+        ground_reference_frozen_ &&
+        ground_reference_normal_W_.allFinite() &&
+        ground_reference_normal_W_.norm() > 1.0e-12;
+
+    Eigen::Vector3d persistent_ground_normal_W =
+        Eigen::Vector3d::UnitZ();
+
+    if (ground_reference_frozen_ &&
+        ground_reference_normal_W_.allFinite() &&
+        ground_reference_normal_W_.norm() > 1.0e-12)
+    {
+        persistent_ground_normal_W =
+            ground_reference_normal_W_.normalized();
+    }
+
+    std::function<
+        bool(
+            const LioState &,
+            Ieskf::StateMatrix &)>
+        structural_ownership_builder =
+            [persistent_ground_owner_active,
+             persistent_ground_normal_W](
+                const LioState &linearization_state,
+                Ieskf::StateMatrix &ownership_information)
+            {
+                ownership_information.setZero();
+
+                if (!persistent_ground_owner_active)
+                {
+                    return true;
+                }
+
+                if (!linearization_state.Q_WI.coeffs().allFinite())
+                {
+                    return false;
+                }
+
+                const double quaternion_norm =
+                    linearization_state.Q_WI.norm();
+
+                if (!std::isfinite(quaternion_norm) ||
+                    quaternion_norm <= 1.0e-12)
+                {
+                    return false;
+                }
+
+                const Eigen::Matrix3d R_WI =
+                    linearization_state.Q_WI
+                        .normalized()
+                        .toRotationMatrix();
+
+                // State rotation uses RIGHT perturbation:
+                //
+                //     R_new = R * Exp(delta_theta)
+                //
+                // Therefore a world Ground direction must be expressed
+                // in the IMU tangent frame for ROTATION ownership.
+                Eigen::Vector3d ground_normal_I =
+                    R_WI.transpose() *
+                    persistent_ground_normal_W;
+
+                const double ground_normal_I_norm =
+                    ground_normal_I.norm();
+
+                if (!ground_normal_I.allFinite() ||
+                    !std::isfinite(ground_normal_I_norm) ||
+                    ground_normal_I_norm <= 1.0e-12)
+                {
+                    return false;
+                }
+
+                ground_normal_I /=
+                    ground_normal_I_norm;
+
+                constexpr double kOwnershipWeight =
+                    10000.0;
+
+                // --------------------------------------------------------
+                // ROTATION:
+                //
+                // Ground owns the two directions perpendicular to
+                // Ground normal. Rotation about Ground normal = yaw,
+                // therefore it remains available to Dense LiDAR.
+                // --------------------------------------------------------
+                const Eigen::Matrix3d ground_tilt_projector_I =
+                    Eigen::Matrix3d::Identity() -
+                    ground_normal_I *
+                    ground_normal_I.transpose();
+
+                ownership_information.block<3, 3>(
+                    LioStateIndex::ROTATION,
+                    LioStateIndex::ROTATION) =
+                    kOwnershipWeight *
+                    ground_tilt_projector_I;
+
+                // --------------------------------------------------------
+                // POSITION:
+                //
+                // Position error is represented in WORLD coordinates.
+                // Ground owns translation along frozen Ground normal.
+                // --------------------------------------------------------
+                ownership_information.block<3, 3>(
+                    LioStateIndex::POSITION,
+                    LioStateIndex::POSITION) =
+                    kOwnershipWeight *
+                    (
+                        persistent_ground_normal_W *
+                        persistent_ground_normal_W.transpose()
+                    );
+
+                ownership_information =
+                    0.5 *
+                    (
+                        ownership_information +
+                        ownership_information.transpose()
+                    );
+
+                return ownership_information.allFinite();
+            };
+
+    // One line per degraded frame -- NOT per IEKF iteration.
+    if (persistent_ground_owner_active &&
+        !joint_ground_ready)
+    {
+        std::cout
+            << "LIO_PERSISTENT_GROUND_OWNERSHIP"
+            << " | measurement=0"
+            << " | ownership_rank=3"
+            << " | n_W=["
+            << persistent_ground_normal_W.transpose()
+            << "]"
+            << std::endl;
+    }
+
 if (!ieskf_.IteratedLidarUpdate(
             result.processed_frame.cloud,
             *prepared_target,
             measurement_builder_,
             result.lidar_update,
-            &joint_observation_builder_final))
+            &joint_observation_builder_final,
+            &structural_ownership_builder))
     {
         std::cerr
             << "LIO_REJECT | stage=JOINT_LIDAR_GROUND_UPDATE"
