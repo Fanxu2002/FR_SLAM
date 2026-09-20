@@ -5765,6 +5765,62 @@ private:
         return config;
     }
 
+    struct SensorInputConfig
+    {
+        std::string lidar_type =
+            "mid360s";
+
+        std::string lidar_topic =
+            "/livox/lidar";
+
+        std::string imu_topic =
+            "/livox/imu";
+
+        double imu_acceleration_scale =
+            9.80665;
+    };
+
+    SensorInputConfig LoadSensorInputConfig()
+    {
+        SensorInputConfig config;
+
+        config.lidar_type =
+            this->declare_parameter<std::string>(
+                "lidar_type",
+                "mid360s");
+
+        config.lidar_topic =
+            this->declare_parameter<std::string>(
+                "lidar_topic",
+                "/livox/lidar");
+
+        config.imu_topic =
+            this->declare_parameter<std::string>(
+                "imu_topic",
+                "/livox/imu");
+
+        config.imu_acceleration_scale =
+            this->declare_parameter<double>(
+                "imu_acceleration_scale",
+                9.80665);
+
+        if (!std::isfinite(
+                config.imu_acceleration_scale) ||
+            config.imu_acceleration_scale <= 0.0)
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Invalid imu_acceleration_scale=%.9f. "
+                "The value must be finite and positive.",
+                config.imu_acceleration_scale);
+
+            throw std::runtime_error(
+                "Invalid imu_acceleration_scale");
+        }
+
+        return config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -5784,10 +5840,11 @@ public:
         //
         // Everything after LIDAR_FRAME is sensor-independent.
         // ========================================================
+        const SensorInputConfig sensor_input =
+            LoadSensorInputConfig();
+
         lidar_type_ =
-            this->declare_parameter<std::string>(
-                "lidar_type",
-                "mid360s");
+            sensor_input.lidar_type;
 
         std::transform(
             lidar_type_.begin(),
@@ -5800,33 +5857,13 @@ public:
             });
 
         lidar_topic_ =
-            this->declare_parameter<std::string>(
-                "lidar_topic",
-                "/livox/lidar");
+            sensor_input.lidar_topic;
 
         imu_topic_ =
-            this->declare_parameter<std::string>(
-                "imu_topic",
-                "/livox/imu");
+            sensor_input.imu_topic;
 
         imu_acceleration_scale_ =
-            this->declare_parameter<double>(
-                "imu_acceleration_scale",
-                9.80665);
-
-        if (!std::isfinite(
-                imu_acceleration_scale_) ||
-            imu_acceleration_scale_ <= 0.0)
-        {
-            RCLCPP_FATAL(
-                this->get_logger(),
-                "Invalid imu_acceleration_scale=%.9f. "
-                "The value must be finite and positive.",
-                imu_acceleration_scale_);
-
-            throw std::runtime_error(
-                "Invalid imu_acceleration_scale");
-        }
+            sensor_input.imu_acceleration_scale;
 
         imu_adapter_.setAccelerationScale(
             imu_acceleration_scale_);
