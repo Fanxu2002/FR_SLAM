@@ -12,7 +12,7 @@ import os
 import yaml
 
 
-SUPPORTED_SENSORS = ('livox', 'hesai')
+SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022')
 SUPPORTED_PROFILES = ('outdoor', 'indoor')
 
 
@@ -239,6 +239,10 @@ def _launch_setup(context):
         context,
         'backend_loop_closure_enable'
     )
+    wall_constraint_override = _optional_boolean(
+        context,
+        'wall_constraint_enable'
+    )
     ground_constraint_override = _optional_boolean(
         context,
         'ground_constraint_enable'
@@ -338,12 +342,22 @@ def _launch_setup(context):
         sensor
     )
 
-    calibration_file = _select_calibration_file(
-        calibration_directory,
-        sensor,
-        legacy_calibration_directory
-    )
-    q_il = _load_q_il(calibration_file)
+    # Hilti 2022 already provides a calibrated PandarXT-32 -> IMU
+    # extrinsic in config/fr_slam_hilti2022.yaml.
+    #
+    # Keep the original FR-SLAM offline calibration workflow for
+    # Livox / Hesai profiles, but do not override the official Hilti
+    # calibration.
+    if sensor == 'hilti2022':
+        calibration_file = None
+        q_il = None
+    else:
+        calibration_file = _select_calibration_file(
+            calibration_directory,
+            sensor,
+            legacy_calibration_directory
+        )
+        q_il = _load_q_il(calibration_file)
 
     # Each sensor keeps an independent run history.
     run_id = datetime.now().strftime(
@@ -388,18 +402,29 @@ def _launch_setup(context):
     parameter_overrides = {
         'save_root_directory': str(saves_directory),
         'enable_lidar_imu_rotation_pair_export': False,
-        'calibration_use_imu_initial_guess': True,
-        'imu_extrinsic_q_il_x': q_il[0],
-        'imu_extrinsic_q_il_y': q_il[1],
-        'imu_extrinsic_q_il_z': q_il[2],
-        'imu_extrinsic_q_il_w': q_il[3]
+        'calibration_use_imu_initial_guess': True
     }
+
+    # For normal Livox / Hesai operation, use the solved offline
+    # rotation calibration exactly as before.
+    #
+    # For Hilti 2022, leave q_IL untouched here so the complete
+    # calibrated R_IL / P_IL comes directly from the sensor YAML.
+    if q_il is not None:
+        parameter_overrides['imu_extrinsic_q_il_x'] = q_il[0]
+        parameter_overrides['imu_extrinsic_q_il_y'] = q_il[1]
+        parameter_overrides['imu_extrinsic_q_il_z'] = q_il[2]
+        parameter_overrides['imu_extrinsic_q_il_w'] = q_il[3]
 
     if backend_loop_closure_override is not None:
         parameter_overrides['backend_loop_closure_enable'] = (
             backend_loop_closure_override
         )
 
+    if wall_constraint_override is not None:
+        parameter_overrides['wall_constraint_enable'] = (
+            wall_constraint_override
+        )
     if ground_constraint_override is not None:
         parameter_overrides['ground_constraint_enable'] = (
             ground_constraint_override
@@ -525,6 +550,14 @@ def generate_launch_description():
             description=(
                 'Optional loop-closure override: true/false; '
                 'empty uses the sensor YAML value'
+            )
+        ),
+        DeclareLaunchArgument(
+            'wall_constraint_enable',
+            default_value='',
+            description=(
+                'Optional Wall-constraint override: true/false; '
+                'empty uses the node default (false)'
             )
         ),
         DeclareLaunchArgument(

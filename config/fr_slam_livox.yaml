@@ -1,5 +1,8 @@
 fr_slam:
   ros__parameters:
+    # Joint Ground observation noise
+    ground_height_sigma_m: 0.01
+    ground_normal_sigma_deg: 2.0
     # ============================================================
     # Livox Mid-360 + 内置 IMU / Livox Mid-360 + internal IMU
     # ============================================================
@@ -99,7 +102,7 @@ fr_slam:
     # 它们会进入 LoopDetectorConfig，不再是无效的 YAML 配置项。 / into LoopDetectorConfig.  They are no longer dead YAML entries.
     # 设置为 false 时保留后端里程计/地图更新，但关闭完整的回环链路。 / false keeps backend odometry/map updates, but disables the complete
     # 即关闭 Scan Context → 回环 ICP → Loop Edge → 回环触发 PGO 的完整流程。 / Scan Context -> loop ICP -> Loop Edge -> loop-triggered PGO chain.
-    backend_loop_closure_enable: true
+    backend_loop_closure_enable: false
 
     # ============================================================
     # 回环一致性 / 回环边稀疏化 / Loop closure consistency / edge sparsification
@@ -186,13 +189,15 @@ fr_slam:
     # LiDAR → IMU 外参备用值 / LiDAR -> IMU extrinsic fallback
     # ============================================================
     # 正常启动时会自动加载最新有效的 Livox q_IL 标定结果。 / Normal launch loads the newest valid Livox q_IL automatically.
+    # Fixed physical LiDAR-IMU extrinsic for ablation
+    lio_estimate_extrinsic: false
     imu_extrinsic_q_il_x: 0.0
     imu_extrinsic_q_il_y: 0.0
     imu_extrinsic_q_il_z: 0.0
     imu_extrinsic_q_il_w: 1.0
 
-    imu_extrinsic_p_il_x: 0.0
-    imu_extrinsic_p_il_y: 0.0
-    imu_extrinsic_p_il_z: 0.0
+    imu_extrinsic_p_il_x: -0.01133142
+    imu_extrinsic_p_il_y: -0.02396263
+    imu_extrinsic_p_il_z: 0.04367367
     # fr_slam_livox.yaml
     imu_acceleration_scale: 9.80665
