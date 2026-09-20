@@ -381,6 +381,13 @@ private:
         last_accepted_Q_WI_ =
             Eigen::Quaterniond::Identity();
 
+    // IMU position associated with the previous ACCEPTED LiDAR pose.
+    //
+    // Required by full SE(3) LiDAR-IMU hand-eye calibration.
+    Eigen::Vector3d
+        last_accepted_P_WI_ =
+            Eigen::Vector3d::Zero();
+
     bool
         has_last_accepted_imu_orientation_ =
             false;
@@ -1146,14 +1153,26 @@ private:
         }
 
         // ========================================================
-        // Rotation-only mode
+        // Normal LO keeps the historical rotation-only IMU chain.
+        //
+        // Full LiDAR-IMU extrinsic calibration is different:
+        // translation is required by the SE(3) hand-eye equation,
+        //
+        //     A X = X B
+        //
+        // therefore calibration mode must preserve the continuously
+        // integrated IMU P_WI / V_WI.
+        //
+        // Regular LO behavior remains unchanged.
         // ========================================================
-        state_at_scan_start.P_WI =
-            Eigen::Vector3d::Zero();
+        if (!enable_lidar_imu_rotation_pair_export_)
+        {
+            state_at_scan_start.P_WI =
+                Eigen::Vector3d::Zero();
 
-        state_at_scan_start.V_WI =
-            Eigen::Vector3d::Zero();
-
+            state_at_scan_start.V_WI =
+                Eigen::Vector3d::Zero();
+        }
 
         return ImuBuildStatus::SUCCESS;
     }
@@ -1169,7 +1188,8 @@ private:
     bool AppendLidarImuRotationPair(
         const double current_lidar_timestamp,
         const Eigen::Isometry3d &T_WL_current,
-        const Eigen::Quaterniond &current_Q_WI)
+        const Eigen::Quaterniond &current_Q_WI,
+        const Eigen::Vector3d &current_P_WI)
     {
         if (!enable_lidar_imu_rotation_pair_export_)
         {
@@ -1189,7 +1209,9 @@ private:
             !last_accepted_Q_WI_.coeffs().allFinite() ||
             last_accepted_Q_WI_.norm() <= 1.0e-12 ||
             !current_Q_WI.coeffs().allFinite() ||
-            current_Q_WI.norm() <= 1.0e-12)
+            current_Q_WI.norm() <= 1.0e-12 ||
+            !last_accepted_P_WI_.allFinite() ||
+            !current_P_WI.allFinite())
         {
             RCLCPP_WARN(
                 this->get_logger(),
@@ -1198,10 +1220,24 @@ private:
             return false;
         }
 
+        // ========================================================
         // Current LiDAR -> previous accepted LiDAR.
+        //
+        //     T_Lprev_Lcurr
+        //         =
+        //     T_WL_prev^{-1} * T_WL_curr
+        //
+        // Full SE(3), not rotation only.
+        // ========================================================
+        const Eigen::Isometry3d T_Lprev_Lcurr =
+            T_WL_.inverse() *
+            T_WL_current;
+
         const Eigen::Matrix3d delta_R_lidar =
-            T_WL_.rotation().transpose() *
-            T_WL_current.rotation();
+            T_Lprev_Lcurr.rotation();
+
+        const Eigen::Vector3d delta_t_lidar =
+            T_Lprev_Lcurr.translation();
 
         Eigen::Quaterniond previous_Q_WI =
             last_accepted_Q_WI_;
@@ -1211,6 +1247,21 @@ private:
 
         previous_Q_WI.normalize();
         current_Q_WI_normalized.normalize();
+
+        // ========================================================
+        // Current IMU origin expressed in previous IMU coordinates.
+        //
+        //     t_Iprev_Icurr
+        //       =
+        //     R_WI_prev^T *
+        //     (P_WI_curr - P_WI_prev)
+        // ========================================================
+        const Eigen::Matrix3d R_WI_previous =
+            previous_Q_WI.toRotationMatrix();
+
+        const Eigen::Vector3d delta_t_imu =
+            R_WI_previous.transpose() *
+            (current_P_WI - last_accepted_P_WI_);
 
         // Current IMU -> previous accepted IMU over the SAME interval.
         Eigen::Quaterniond delta_Q_imu =
@@ -1238,10 +1289,20 @@ private:
             << std::setprecision(17)
             << last_accepted_lidar_timestamp_ << ","
             << current_lidar_timestamp << ","
+
+            << delta_t_lidar.x() << ","
+            << delta_t_lidar.y() << ","
+            << delta_t_lidar.z() << ","
+
             << delta_Q_lidar.x() << ","
             << delta_Q_lidar.y() << ","
             << delta_Q_lidar.z() << ","
             << delta_Q_lidar.w() << ","
+
+            << delta_t_imu.x() << ","
+            << delta_t_imu.y() << ","
+            << delta_t_imu.z() << ","
+
             << delta_Q_imu.x() << ","
             << delta_Q_imu.y() << ","
             << delta_Q_imu.z() << ","
@@ -3624,7 +3685,8 @@ private:
         AppendLidarImuRotationPair(
             raw_frame.scan_start_time,
             T_WL_current,
-            state_at_scan_start.Q_WI);
+            state_at_scan_start.Q_WI,
+            state_at_scan_start.P_WI);
 
         // ========================================================
         // 6. Accept current global LiDAR pose.
@@ -3637,6 +3699,9 @@ private:
         // ========================================================
         last_accepted_Q_WI_ =
             state_at_scan_start.Q_WI;
+
+        last_accepted_P_WI_ =
+            state_at_scan_start.P_WI;
 
         if (last_accepted_Q_WI_.coeffs().allFinite() &&
             last_accepted_Q_WI_.norm() > 1.0e-12)
@@ -5132,7 +5197,9 @@ public:
 
             lidar_imu_rotation_pairs_stream_
                 << "start_timestamp,end_timestamp,"
+                << "lidar_tx,lidar_ty,lidar_tz,"
                 << "lidar_qx,lidar_qy,lidar_qz,lidar_qw,"
+                << "imu_tx,imu_ty,imu_tz,"
                 << "imu_qx,imu_qy,imu_qz,imu_qw\n";
 
             lidar_imu_rotation_pairs_stream_.flush();

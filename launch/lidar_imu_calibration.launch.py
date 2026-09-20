@@ -1,5 +1,17 @@
+import signal
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown, matches_action
+from launch.events.process import SignalProcess
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    ExecuteProcess,
+    LogInfo,
+    OpaqueFunction,
+    RegisterEventHandler,
+)
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -41,7 +53,7 @@ def _launch_setup(context):
     rviz_config_path = (
         package_share_directory /
         'config' /
-        'FR_SLAM.rviz'
+        'lidar_imu_calibration.rviz'
     )
     sensor_config_path = (
         package_share_directory /
@@ -85,11 +97,11 @@ def _launch_setup(context):
     )
     rotation_pairs_path = (
         session_directory /
-        'lidar_imu_rotation_pairs.csv'
+        'lidar_imu_motion_pairs.csv'
     )
     calibration_result_path = (
         session_directory /
-        'lidar_imu_rotation_calibration.yaml'
+        'lidar_imu_extrinsic_calibration.yaml'
     )
     log_directory = (
         workspace_directory /
@@ -111,7 +123,7 @@ def _launch_setup(context):
 
     collector_node = Node(
         package='fr_slam',
-        executable='lo_node',
+        executable='lo',
         name='fr_slam',
         output='both',
         parameters=[
@@ -149,32 +161,156 @@ def _launch_setup(context):
         ]
     )
 
-    solver_command = (
-        'ros2 run fr_slam lidar_imu_rotation_calibration '
-        '--input ' + str(rotation_pairs_path) + ' '
-        '--output ' + str(calibration_result_path) + ' '
-        '--min-angle-deg 0.2'
+    # ========================================================
+    # Offline SE(3) calibration solver.
+    #
+    # IMPORTANT:
+    # Do NOT add solver_process directly to the returned action list.
+    # It must run only AFTER the collector has completely stopped,
+    # so that the motion-pair CSV has been flushed and closed.
+    # ========================================================
+    solver_process = ExecuteProcess(
+        cmd=[
+            'ros2',
+            'run',
+            'fr_slam',
+            'lidar_imu_rotation_calibration',
+            '--input',
+            str(rotation_pairs_path),
+            '--output',
+            str(calibration_result_path),
+            '--min-angle-deg',
+            '0.2'
+        ],
+        output='screen',
+        emulate_tty=True
+    )
+
+    # ========================================================
+    # Calibration lifecycle:
+    #
+    #   close RViz
+    #       ->
+    #   SIGINT collector
+    #       ->
+    #   collector exits / CSV is closed
+    #       ->
+    #   run calibration solver
+    #       ->
+    #   solver exits
+    #       ->
+    #   shutdown launch
+    #
+    # Closing RViz is therefore the normal "finish collection"
+    # operation. Do not use Ctrl+C during normal calibration.
+    # ========================================================
+
+    stop_collector_when_rviz_closes = RegisterEventHandler(
+        OnProcessExit(
+            target_action=rviz_node,
+            on_exit=[
+                LogInfo(
+                    msg=(
+                        'RViz closed. Finishing LiDAR-IMU '
+                        'calibration data collection...'
+                    )
+                ),
+                EmitEvent(
+                    event=SignalProcess(
+                        signal_number=signal.SIGINT,
+                        process_matcher=matches_action(
+                            collector_node
+                        )
+                    )
+                )
+            ]
+        )
+    )
+
+    solve_when_collector_exits = RegisterEventHandler(
+        OnProcessExit(
+            target_action=collector_node,
+            on_exit=[
+                LogInfo(
+                    msg=(
+                        'Calibration collector stopped. '
+                        'Running LiDAR-IMU SE(3) solver...'
+                    )
+                ),
+                solver_process
+            ]
+        )
+    )
+
+    shutdown_when_solver_exits = RegisterEventHandler(
+        OnProcessExit(
+            target_action=solver_process,
+            on_exit=[
+                LogInfo(
+                    msg=(
+                        'LiDAR-IMU calibration solver exited. '
+                        'Inspect PASS/FAIL diagnostics above.'
+                    )
+                ),
+                LogInfo(
+                    msg=(
+                        'Calibration result: '
+                        + str(calibration_result_path)
+                    )
+                ),
+                EmitEvent(
+                    event=Shutdown(
+                        reason='LiDAR-IMU calibration session complete'
+                    )
+                )
+            ]
+        )
     )
 
     return [
         LogInfo(
-            msg='FR-SLAM LIDAR-IMU CALIBRATION MODE | sensor='
+            msg=(
+                'FR-SLAM LIDAR-IMU SE3 EXTRINSIC CALIBRATION'
+                ' | sensor='
                 + sensor
+            )
         ),
         LogInfo(
             msg='Sensor profile: ' + str(sensor_config_path)
         ),
         LogInfo(
-            msg='This session cannot overwrite another sensor/session: '
+            msg=(
+                'Calibration session: '
                 + str(session_directory)
+            )
         ),
         LogInfo(
-            msg='After collecting data and stopping this launch, run: '
-                + solver_command
+            msg=(
+                'Motion-pair CSV: '
+                + str(rotation_pairs_path)
+            )
         ),
+        LogInfo(
+            msg=(
+                'Calibration result: '
+                + str(calibration_result_path)
+            )
+        ),
+        LogInfo(
+            msg=(
+                'Collect calibration motion, then CLOSE RViz. '
+                'The solver will run automatically.'
+            )
+        ),
+
+        stop_collector_when_rviz_closes,
+        solve_when_collector_exits,
+        shutdown_when_solver_exits,
+
         collector_node,
         rviz_node
     ]
+
 
 
 def generate_launch_description():
