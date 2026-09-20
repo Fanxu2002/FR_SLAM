@@ -5325,6 +5325,165 @@ private:
         return ground_constraint_config;
     }
 
+    PreprocessorConfig LoadPreprocessorConfig()
+    {
+        PreprocessorConfig preprocessor_config;
+
+
+        preprocessor_config.range_min =
+            this->declare_parameter<double>(
+                "preprocessor_range_min",
+                1.0);
+
+        preprocessor_config.range_max =
+            this->declare_parameter<double>(
+                "preprocessor_range_max",
+                30.0);
+
+        preprocessor_config.enable_ROI =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_range_filter",
+                true);
+
+        preprocessor_config.enable_passthrough =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_passthrough",
+                true);
+
+        preprocessor_config.ROI_min_x =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_x",
+                -30.0);
+
+        preprocessor_config.ROI_max_x =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_x",
+                30.0);
+
+        preprocessor_config.ROI_min_y =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_y",
+                -15.0);
+
+        preprocessor_config.ROI_max_y =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_y",
+                15.0);
+
+        preprocessor_config.ROI_min_z =
+            this->declare_parameter<double>(
+                "preprocessor_roi_min_z",
+                -2.0);
+
+        preprocessor_config.ROI_max_z =
+            this->declare_parameter<double>(
+                "preprocessor_roi_max_z",
+                10.0);
+
+        preprocessor_config.enable_cropbox =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_cropbox",
+                true);
+
+        preprocessor_config.cropbox_min_x =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_x",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_x =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_x",
+                    0.15));
+
+        preprocessor_config.cropbox_min_y =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_y",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_y =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_y",
+                    0.15));
+
+        preprocessor_config.cropbox_min_z =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_min_z",
+                    -0.15));
+
+        preprocessor_config.cropbox_max_z =
+            static_cast<float>(
+                this->declare_parameter<double>(
+                    "preprocessor_cropbox_max_z",
+                    0.15));
+
+        preprocessor_config.enable_voxel =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_voxel",
+                true);
+
+        preprocessor_config.voxel_leaf_size =
+            static_cast<float>(
+                std::max(
+                    0.01,
+                    this->declare_parameter<double>(
+                        "preprocessor_voxel_leaf_size",
+                        0.30)));
+
+        const std::int64_t configured_voxel_min_points =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_voxel_min_points",
+                1);
+
+        preprocessor_config.voxel_min_points =
+            static_cast<unsigned int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_voxel_min_points));
+
+        const std::int64_t configured_sor_mean_k =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_sor_mean_k",
+                50);
+
+        preprocessor_config.sor_mean_k =
+            static_cast<int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_sor_mean_k));
+
+        preprocessor_config.sor_stddev_mul_thresh =
+            std::max(
+                0.01,
+                this->declare_parameter<double>(
+                    "preprocessor_sor_stddev_mul_thresh",
+                    1.0));
+
+        preprocessor_config.ror_RadiusSearch =
+            std::max(
+                0.01,
+                this->declare_parameter<double>(
+                    "preprocessor_ror_radius",
+                    0.30));
+
+        const std::int64_t configured_ror_min_neighbors =
+            this->declare_parameter<std::int64_t>(
+                "preprocessor_ror_min_neighbors",
+                1);
+
+        preprocessor_config.ror_MinNeighborsInRadius =
+            static_cast<int>(
+                std::max<std::int64_t>(
+                    1,
+                    configured_ror_min_neighbors));
+
+        return preprocessor_config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -5882,159 +6041,8 @@ public:
         // ========================================================
         // 3.1 LiDAR preprocessing parameters from YAML.
         // ========================================================
-        PreprocessorConfig
-            preprocessor_config;
-
-        preprocessor_config.range_min =
-            this->declare_parameter<double>(
-                "preprocessor_range_min",
-                1.0);
-
-        preprocessor_config.range_max =
-            this->declare_parameter<double>(
-                "preprocessor_range_max",
-                30.0);
-
-        preprocessor_config.enable_ROI =
-            this->declare_parameter<bool>(
-                "preprocessor_enable_range_filter",
-                true);
-
-        preprocessor_config.enable_passthrough =
-            this->declare_parameter<bool>(
-                "preprocessor_enable_passthrough",
-                true);
-
-        preprocessor_config.ROI_min_x =
-            this->declare_parameter<double>(
-                "preprocessor_roi_min_x",
-                -30.0);
-
-        preprocessor_config.ROI_max_x =
-            this->declare_parameter<double>(
-                "preprocessor_roi_max_x",
-                30.0);
-
-        preprocessor_config.ROI_min_y =
-            this->declare_parameter<double>(
-                "preprocessor_roi_min_y",
-                -15.0);
-
-        preprocessor_config.ROI_max_y =
-            this->declare_parameter<double>(
-                "preprocessor_roi_max_y",
-                15.0);
-
-        preprocessor_config.ROI_min_z =
-            this->declare_parameter<double>(
-                "preprocessor_roi_min_z",
-                -2.0);
-
-        preprocessor_config.ROI_max_z =
-            this->declare_parameter<double>(
-                "preprocessor_roi_max_z",
-                10.0);
-
-        preprocessor_config.enable_cropbox =
-            this->declare_parameter<bool>(
-                "preprocessor_enable_cropbox",
-                true);
-
-        preprocessor_config.cropbox_min_x =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_min_x",
-                    -0.15));
-
-        preprocessor_config.cropbox_max_x =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_max_x",
-                    0.15));
-
-        preprocessor_config.cropbox_min_y =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_min_y",
-                    -0.15));
-
-        preprocessor_config.cropbox_max_y =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_max_y",
-                    0.15));
-
-        preprocessor_config.cropbox_min_z =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_min_z",
-                    -0.15));
-
-        preprocessor_config.cropbox_max_z =
-            static_cast<float>(
-                this->declare_parameter<double>(
-                    "preprocessor_cropbox_max_z",
-                    0.15));
-
-        preprocessor_config.enable_voxel =
-            this->declare_parameter<bool>(
-                "preprocessor_enable_voxel",
-                true);
-
-        preprocessor_config.voxel_leaf_size =
-            static_cast<float>(
-                std::max(
-                    0.01,
-                    this->declare_parameter<double>(
-                        "preprocessor_voxel_leaf_size",
-                        0.30)));
-
-        const std::int64_t configured_voxel_min_points =
-            this->declare_parameter<std::int64_t>(
-                "preprocessor_voxel_min_points",
-                1);
-
-        preprocessor_config.voxel_min_points =
-            static_cast<unsigned int>(
-                std::max<std::int64_t>(
-                    1,
-                    configured_voxel_min_points));
-
-        const std::int64_t configured_sor_mean_k =
-            this->declare_parameter<std::int64_t>(
-                "preprocessor_sor_mean_k",
-                50);
-
-        preprocessor_config.sor_mean_k =
-            static_cast<int>(
-                std::max<std::int64_t>(
-                    1,
-                    configured_sor_mean_k));
-
-        preprocessor_config.sor_stddev_mul_thresh =
-            std::max(
-                0.01,
-                this->declare_parameter<double>(
-                    "preprocessor_sor_stddev_mul_thresh",
-                    1.0));
-
-        preprocessor_config.ror_RadiusSearch =
-            std::max(
-                0.01,
-                this->declare_parameter<double>(
-                    "preprocessor_ror_radius",
-                    0.30));
-
-        const std::int64_t configured_ror_min_neighbors =
-            this->declare_parameter<std::int64_t>(
-                "preprocessor_ror_min_neighbors",
-                1);
-
-        preprocessor_config.ror_MinNeighborsInRadius =
-            static_cast<int>(
-                std::max<std::int64_t>(
-                    1,
-                    configured_ror_min_neighbors));
+        PreprocessorConfig preprocessor_config =
+            LoadPreprocessorConfig();
 
         preprocessor_.SetConfig(
             preprocessor_config);
