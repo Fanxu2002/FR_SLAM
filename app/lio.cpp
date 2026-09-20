@@ -5484,6 +5484,96 @@ private:
         return preprocessor_config;
     }
 
+    struct PreprocessorRuntimeConfig
+    {
+        PreprocessorConfig config;
+
+        std::string sor_mode_name =
+            "always";
+
+        PreprocessorSorMode sor_mode =
+            PreprocessorSorMode::ALWAYS;
+
+        std::size_t sor_adaptive_max_points =
+            6000;
+
+        bool enable_ror =
+            false;
+    };
+
+    PreprocessorRuntimeConfig LoadPreprocessorRuntimeConfig()
+    {
+        PreprocessorRuntimeConfig runtime_config;
+
+        runtime_config.config =
+            LoadPreprocessorConfig();
+
+        runtime_config.sor_mode_name =
+            this->declare_parameter<std::string>(
+                "preprocessor_sor_mode",
+                "always");
+
+        std::transform(
+            runtime_config.sor_mode_name.begin(),
+            runtime_config.sor_mode_name.end(),
+            runtime_config.sor_mode_name.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(
+                    std::tolower(character));
+            });
+
+        runtime_config.sor_mode =
+            PreprocessorSorMode::ALWAYS;
+
+        if (runtime_config.sor_mode_name ==
+            "off")
+        {
+            runtime_config.sor_mode =
+                PreprocessorSorMode::OFF;
+        }
+        else if (runtime_config.sor_mode_name ==
+                 "adaptive")
+        {
+            runtime_config.sor_mode =
+                PreprocessorSorMode::ADAPTIVE;
+        }
+        else if (runtime_config.sor_mode_name !=
+                 "always")
+        {
+            RCLCPP_WARN(
+                this->get_logger(),
+                "Unknown preprocessor_sor_mode='%s'. "
+                "Falling back to 'always'. "
+                "Valid modes: always, off, adaptive.",
+                runtime_config.sor_mode_name.c_str());
+
+            runtime_config.sor_mode_name =
+                "always";
+
+            runtime_config.sor_mode =
+                PreprocessorSorMode::ALWAYS;
+        }
+
+        const int configured_sor_adaptive_max_points =
+            this->declare_parameter<int>(
+                "preprocessor_sor_adaptive_max_points",
+                6000);
+
+        runtime_config.sor_adaptive_max_points =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_sor_adaptive_max_points));
+
+        runtime_config.enable_ror =
+            this->declare_parameter<bool>(
+                "preprocessor_enable_ror",
+                false);
+
+        return runtime_config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -6041,78 +6131,30 @@ public:
         // ========================================================
         // 3.1 LiDAR preprocessing parameters from YAML.
         // ========================================================
-        PreprocessorConfig preprocessor_config =
-            LoadPreprocessorConfig();
+        const PreprocessorRuntimeConfig preprocessing =
+            LoadPreprocessorRuntimeConfig();
+
+        const PreprocessorConfig &preprocessor_config =
+            preprocessing.config;
+
+        // Keep the existing node members synchronized so this
+        // refactor does not change any downstream runtime behavior.
+        preprocessor_sor_mode_ =
+            preprocessing.sor_mode_name;
+
+        preprocessor_sor_adaptive_max_points_ =
+            preprocessing.sor_adaptive_max_points;
+
+        preprocessor_enable_ror_ =
+            preprocessing.enable_ror;
 
         preprocessor_.SetConfig(
             preprocessor_config);
 
-        preprocessor_sor_mode_ =
-            this->declare_parameter<std::string>(
-                "preprocessor_sor_mode",
-                "always");
-
-        std::transform(
-            preprocessor_sor_mode_.begin(),
-            preprocessor_sor_mode_.end(),
-            preprocessor_sor_mode_.begin(),
-            [](unsigned char character)
-            {
-                return static_cast<char>(
-                    std::tolower(character));
-            });
-
-        PreprocessorSorMode preprocessor_sor_mode =
-            PreprocessorSorMode::ALWAYS;
-
-        if (preprocessor_sor_mode_ ==
-            "off")
-        {
-            preprocessor_sor_mode =
-                PreprocessorSorMode::OFF;
-        }
-        else if (preprocessor_sor_mode_ ==
-                 "adaptive")
-        {
-            preprocessor_sor_mode =
-                PreprocessorSorMode::ADAPTIVE;
-        }
-        else if (preprocessor_sor_mode_ !=
-                 "always")
-        {
-            RCLCPP_WARN(
-                this->get_logger(),
-                "Unknown preprocessor_sor_mode='%s'. "
-                "Falling back to 'always'. Valid modes: always, off, adaptive.",
-                preprocessor_sor_mode_.c_str());
-
-            preprocessor_sor_mode_ =
-                "always";
-
-            preprocessor_sor_mode =
-                PreprocessorSorMode::ALWAYS;
-        }
-
-        const int configured_sor_adaptive_max_points =
-            this->declare_parameter<int>(
-                "preprocessor_sor_adaptive_max_points",
-                6000);
-
-        preprocessor_sor_adaptive_max_points_ =
-            static_cast<std::size_t>(
-                std::max(
-                    1,
-                    configured_sor_adaptive_max_points));
-
-        preprocessor_enable_ror_ =
-            this->declare_parameter<bool>(
-                "preprocessor_enable_ror",
-                false);
-
         preprocessor_.SetOutlierFilterPolicy(
-            preprocessor_sor_mode,
-            preprocessor_enable_ror_,
-            preprocessor_sor_adaptive_max_points_);
+            preprocessing.sor_mode,
+            preprocessing.enable_ror,
+            preprocessing.sor_adaptive_max_points);
 
         // ========================================================
         // 3.2 Tightly-coupled LIO frontend configuration.
@@ -6212,13 +6254,13 @@ public:
             preprocessor_config;
 
         lio_config.preprocessor_sor_mode =
-            preprocessor_sor_mode;
+            preprocessing.sor_mode;
 
         lio_config.preprocessor_sor_adaptive_max_points =
-            preprocessor_sor_adaptive_max_points_;
+            preprocessing.sor_adaptive_max_points;
 
         lio_config.preprocessor_enable_ror =
-            preprocessor_enable_ror_;
+            preprocessing.enable_ror;
 
         // IESKF state timestamp / LiDAR scan reference tolerance.
         lio_config.time_epsilon =
