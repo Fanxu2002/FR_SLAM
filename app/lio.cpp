@@ -5893,6 +5893,289 @@ private:
         return config;
     }
 
+    struct FrameRuntimeConfig
+    {
+        std::string world_frame = "world";
+        std::string odom_frame = "odom";
+    };
+
+    FrameRuntimeConfig LoadFrameRuntimeConfig()
+    {
+        FrameRuntimeConfig config;
+
+        config.world_frame =
+            this->declare_parameter<std::string>(
+                "world_frame",
+                "world");
+
+        config.odom_frame =
+            this->declare_parameter<std::string>(
+                "odom_frame",
+                "odom");
+
+        return config;
+    }
+
+    double LoadWallConstraintMinimumRadius()
+    {
+        return std::max(
+            0.05,
+            this->declare_parameter<double>(
+                "wall_constraint_minimum_radius_m",
+                0.80));
+    }
+
+    bool LoadWallConstraintEnable()
+    {
+        return this->declare_parameter<bool>(
+            "wall_constraint_enable",
+            false);
+    }
+
+    LoopDetectorConfig LoadLoopDetectorConfig()
+    {
+        LoopDetectorConfig config;
+
+        config.enabled =
+            this->declare_parameter<bool>(
+                "backend_loop_closure_enable",
+                true);
+
+        const int configured_loop_min_keyframe_gap =
+            this->declare_parameter<int>(
+                "loop_min_keyframe_id_separation",
+                30);
+
+        config.min_keyframe_id_separation =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_loop_min_keyframe_gap));
+
+        config.min_time_separation_sec =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "loop_min_time_separation_sec",
+                    10.0));
+
+        return config;
+    }
+
+    LocalMapConfig LoadLocalMapConfig()
+    {
+        LocalMapConfig config;
+
+        const int configured_local_map_max_frames =
+            this->declare_parameter<int>(
+                "local_map_max_frames",
+                10);
+
+        config.max_frames =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_local_map_max_frames));
+
+        config.voxel_leaf_size =
+            static_cast<float>(
+                std::max(
+                    0.01,
+                    this->declare_parameter<double>(
+                        "local_map_voxel_leaf_size",
+                        0.30)));
+
+        return config;
+    }
+
+    LoopRuntimeConfig LoadLoopRuntimeConfig()
+    {
+        LoopRuntimeConfig config;
+
+        config.consistency.use_temporal_consistency =
+            this->declare_parameter<bool>(
+                "loop_use_temporal_consistency",
+                false);
+
+        config.consistency.temporal_max_current_gap =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_temporal_max_current_gap",
+                        12)));
+
+        config.consistency.temporal_max_historical_gap =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_temporal_max_historical_gap",
+                        15)));
+
+        config.consistency.temporal_min_consistent_proposals =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_temporal_min_consistent_proposals",
+                        2)));
+
+        config.consistency.use_cycle_consistency =
+            this->declare_parameter<bool>(
+                "loop_use_cycle_consistency",
+                false);
+
+        config.consistency.max_cycle_translation_error =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "loop_max_cycle_translation_error_m",
+                    2.0));
+
+        config.consistency.max_cycle_rotation_error_deg =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "loop_max_cycle_rotation_error_deg",
+                    10.0));
+
+        config.consistency.max_history_size =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_consistency_max_history_size",
+                        20)));
+
+        config.min_online_loop_edge_current_keyframe_spacing =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_edge_current_keyframe_spacing",
+                        4)));
+
+        config.min_online_loop_edge_historical_keyframe_spacing =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    this->declare_parameter<std::int64_t>(
+                        "loop_edge_historical_keyframe_spacing",
+                        2)));
+
+        config.btc_config_profile =
+            this->declare_parameter<std::string>(
+                "btc_config_profile",
+                "outdoor");
+
+        const std::int64_t configured_btc_skip_near_num =
+            this->declare_parameter<std::int64_t>(
+                "btc_skip_near_num",
+                30);
+
+        config.btc_skip_near_num =
+            static_cast<int>(
+                std::max(
+                    std::int64_t{0},
+                    configured_btc_skip_near_num));
+
+        const std::int64_t configured_btc_proj_plane_num =
+            this->declare_parameter<std::int64_t>(
+                "btc_proj_plane_num",
+                3);
+
+        config.btc_proj_plane_num =
+            static_cast<int>(
+                std::max(
+                    std::int64_t{1},
+                    configured_btc_proj_plane_num));
+
+        const std::int64_t configured_btc_window_size =
+            this->declare_parameter<std::int64_t>(
+                "btc_window_size",
+                7);
+
+        config.btc_window_size =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    configured_btc_window_size));
+
+        const std::int64_t configured_btc_window_stride =
+            this->declare_parameter<std::int64_t>(
+                "btc_window_stride",
+                4);
+
+        config.btc_window_stride =
+            std::min(
+                config.btc_window_size,
+                static_cast<std::size_t>(
+                    std::max(
+                        std::int64_t{1},
+                        configured_btc_window_stride)));
+
+        const std::int64_t configured_btc_min_valid_dense_keyframes =
+            this->declare_parameter<std::int64_t>(
+                "btc_min_valid_dense_keyframes",
+                5);
+
+        config.btc_min_valid_dense_keyframes =
+            std::min(
+                config.btc_window_size,
+                static_cast<std::size_t>(
+                    std::max(
+                        std::int64_t{1},
+                        configured_btc_min_valid_dense_keyframes)));
+
+        return config;
+    }
+
+    bool LoadPlanarMotionMode()
+    {
+        return this->declare_parameter<bool>(
+            "planar_motion_mode",
+            false);
+    }
+
+    std::string LoadSaveRootDirectory(
+        const std::string &default_save_root_directory)
+    {
+        return this->declare_parameter<std::string>(
+            "save_root_directory",
+            default_save_root_directory);
+    }
+
+    struct CalibrationExportConfig
+    {
+        bool enabled = false;
+        bool use_imu_initial_guess = false;
+        std::string rotation_pairs_path;
+    };
+
+    CalibrationExportConfig LoadCalibrationExportConfig(
+        const std::string &default_rotation_pairs_path)
+    {
+        CalibrationExportConfig config;
+
+        config.enabled =
+            this->declare_parameter<bool>(
+                "enable_lidar_imu_rotation_pair_export",
+                false);
+
+        config.use_imu_initial_guess =
+            this->declare_parameter<bool>(
+                "calibration_use_imu_initial_guess",
+                false);
+
+        config.rotation_pairs_path =
+            this->declare_parameter<std::string>(
+                "lidar_imu_rotation_pairs_path",
+                default_rotation_pairs_path);
+
+        return config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -5940,15 +6223,14 @@ public:
         imu_adapter_.setAccelerationScale(
             imu_acceleration_scale_);
 
+        const FrameRuntimeConfig frame_runtime =
+            LoadFrameRuntimeConfig();
+
         world_frame_ =
-            this->declare_parameter<std::string>(
-                "world_frame",
-                "world");
+            frame_runtime.world_frame;
 
         odom_frame_ =
-            this->declare_parameter<std::string>(
-                "odom_frame",
-                "odom");
+            frame_runtime.odom_frame;
 
         if (lidar_type_ == "mid360s" ||
             lidar_type_ == "mid360" ||
@@ -5990,11 +6272,7 @@ public:
             registration_config;
 
         const double wall_constraint_minimum_radius_m =
-            std::max(
-                0.05,
-                this->declare_parameter<double>(
-                    "wall_constraint_minimum_radius_m",
-                    0.80));
+            LoadWallConstraintMinimumRadius();
 
         fr_slam::SetDefaultMultiPlaneWallConstraintMinimumRadius(
             wall_constraint_minimum_radius_m);
@@ -6004,8 +6282,8 @@ public:
             "MultiPlane Wall radius gate | minimum_radius=%.3f m",
             wall_constraint_minimum_radius_m);
 
-        LocalMapConfig
-            local_map_config;
+        LocalMapConfig local_map_config =
+            LoadLocalMapConfig();
 
         GroundConstraintConfig
             ground_constraint_config;
@@ -6013,50 +6291,9 @@ public:
         // ========================================================
         // BTC-only backend loop configuration.
         // ========================================================
-        LoopDetectorConfig
-            loop_detector_config;
+        LoopDetectorConfig loop_detector_config =
+            LoadLoopDetectorConfig();
 
-        loop_detector_config.enabled =
-            this->declare_parameter<bool>(
-                "backend_loop_closure_enable",
-                true);
-
-        const int configured_loop_min_keyframe_gap =
-            this->declare_parameter<int>(
-                "loop_min_keyframe_id_separation",
-                30);
-
-        loop_detector_config.min_keyframe_id_separation =
-            static_cast<std::size_t>(
-                std::max(
-                    1,
-                    configured_loop_min_keyframe_gap));
-
-        loop_detector_config.min_time_separation_sec =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "loop_min_time_separation_sec",
-                    10.0));
-
-        const int configured_local_map_max_frames =
-            this->declare_parameter<int>(
-                "local_map_max_frames",
-                10);
-
-        local_map_config.max_frames =
-            static_cast<std::size_t>(
-                std::max(
-                    1,
-                    configured_local_map_max_frames));
-
-        local_map_config.voxel_leaf_size =
-            static_cast<float>(
-                std::max(
-                    0.01,
-                    this->declare_parameter<double>(
-                        "local_map_voxel_leaf_size",
-                        0.30)));
 
         ground_constraint_config =
             LoadGroundConstraintConfig();
@@ -6065,158 +6302,11 @@ public:
         // Loop consistency / loop-edge sparsification parameters.
         // Values come from the active sensor YAML.
         // ========================================================
-        LoopRuntimeConfig loop_runtime_config;
-
-        loop_runtime_config.consistency.use_temporal_consistency =
-            this->declare_parameter<bool>(
-                "loop_use_temporal_consistency",
-                false);
-
-        loop_runtime_config.consistency.temporal_max_current_gap =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_temporal_max_current_gap",
-                        12)));
-
-        loop_runtime_config.consistency.temporal_max_historical_gap =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_temporal_max_historical_gap",
-                        15)));
-
-        loop_runtime_config.consistency.temporal_min_consistent_proposals =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_temporal_min_consistent_proposals",
-                        2)));
-
-        loop_runtime_config.consistency.use_cycle_consistency =
-            this->declare_parameter<bool>(
-                "loop_use_cycle_consistency",
-                false);
-
-        loop_runtime_config.consistency.max_cycle_translation_error =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "loop_max_cycle_translation_error_m",
-                    2.0));
-
-        loop_runtime_config.consistency.max_cycle_rotation_error_deg =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "loop_max_cycle_rotation_error_deg",
-                    10.0));
-
-        loop_runtime_config.consistency.max_history_size =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_consistency_max_history_size",
-                        20)));
-
-        loop_runtime_config.min_online_loop_edge_current_keyframe_spacing =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_edge_current_keyframe_spacing",
-                        4)));
-
-        loop_runtime_config.min_online_loop_edge_historical_keyframe_spacing =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    this->declare_parameter<std::int64_t>(
-                        "loop_edge_historical_keyframe_spacing",
-                        2)));
-
-        // ========================================================
-        // BTC runtime parameters.
-        //
-        // Official BTC profile selection:
-        //   indoor  -> config_indoor.yaml
-        //   outdoor -> config_outdoor.yaml
-        //
-        // The remaining values are FR-SLAM/BTC integration parameters.
-        // They can be changed from YAML without rebuilding the package.
-        // ========================================================
-        loop_runtime_config.btc_config_profile =
-            this->declare_parameter<std::string>(
-                "btc_config_profile",
-                "outdoor");
-
-        const std::int64_t configured_btc_skip_near_num =
-            this->declare_parameter<std::int64_t>(
-                "btc_skip_near_num",
-                30);
-
-        loop_runtime_config.btc_skip_near_num =
-            static_cast<int>(
-                std::max(
-                    std::int64_t{0},
-                    configured_btc_skip_near_num));
-
-        const std::int64_t configured_btc_proj_plane_num =
-            this->declare_parameter<std::int64_t>(
-                "btc_proj_plane_num",
-                3);
-
-        loop_runtime_config.btc_proj_plane_num =
-            static_cast<int>(
-                std::max(
-                    std::int64_t{1},
-                    configured_btc_proj_plane_num));
-
-        const std::int64_t configured_btc_window_size =
-            this->declare_parameter<std::int64_t>(
-                "btc_window_size",
-                7);
-
-        loop_runtime_config.btc_window_size =
-            static_cast<std::size_t>(
-                std::max(
-                    std::int64_t{1},
-                    configured_btc_window_size));
-
-        const std::int64_t configured_btc_window_stride =
-            this->declare_parameter<std::int64_t>(
-                "btc_window_stride",
-                4);
-
-        loop_runtime_config.btc_window_stride =
-            std::min(
-                loop_runtime_config.btc_window_size,
-                static_cast<std::size_t>(
-                    std::max(
-                        std::int64_t{1},
-                        configured_btc_window_stride)));
-
-        const std::int64_t configured_btc_min_valid_dense_keyframes =
-            this->declare_parameter<std::int64_t>(
-                "btc_min_valid_dense_keyframes",
-                5);
-
-        loop_runtime_config.btc_min_valid_dense_keyframes =
-            std::min(
-                loop_runtime_config.btc_window_size,
-                static_cast<std::size_t>(
-                    std::max(
-                        std::int64_t{1},
-                        configured_btc_min_valid_dense_keyframes)));
+        LoopRuntimeConfig loop_runtime_config =
+            LoadLoopRuntimeConfig();
 
         const bool planar_motion_mode =
-            this->declare_parameter<bool>(
-                "planar_motion_mode",
-                false);
+            LoadPlanarMotionMode();
         // ========================================================
         // 3. Create Scan-to-LocalMap module
         // ========================================================
@@ -6253,8 +6343,7 @@ public:
                 .string();
 
         save_root_directory_ =
-            this->declare_parameter<std::string>(
-                "save_root_directory",
+            LoadSaveRootDirectory(
                 default_save_root_directory);
         // ========================================================
         // LIO / IESKF per-frame diagnostics.
@@ -6301,25 +6390,23 @@ public:
         // LiDAR-IMU rotation calibration pair export.
         // lidar_imu_calibration.launch.py overrides these in calibration mode.
         // ========================================================
-        enable_lidar_imu_rotation_pair_export_ =
-            this->declare_parameter<bool>(
-                "enable_lidar_imu_rotation_pair_export",
-                false);
-
-        calibration_use_imu_initial_guess_ =
-            this->declare_parameter<bool>(
-                "calibration_use_imu_initial_guess",
-                false);
-
         const std::string default_rotation_pairs_path =
             (default_output_directory /
              "lidar_imu_rotation_pairs.csv")
                 .string();
 
-        lidar_imu_rotation_pairs_path_ =
-            this->declare_parameter<std::string>(
-                "lidar_imu_rotation_pairs_path",
+        const CalibrationExportConfig calibration_export =
+            LoadCalibrationExportConfig(
                 default_rotation_pairs_path);
+
+        enable_lidar_imu_rotation_pair_export_ =
+            calibration_export.enabled;
+
+        calibration_use_imu_initial_guess_ =
+            calibration_export.use_imu_initial_guess;
+
+        lidar_imu_rotation_pairs_path_ =
+            calibration_export.rotation_pairs_path;
 
         if (enable_lidar_imu_rotation_pair_export_)
         {
@@ -6446,9 +6533,7 @@ public:
         // and Wall pose injection run only when explicitly enabled.
         // --------------------------------------------------------
         lio_config.wall_constraint_enable =
-            this->declare_parameter<bool>(
-                "wall_constraint_enable",
-                false);
+            LoadWallConstraintEnable();
 
         lio_frontend_ =
             std::make_unique<LioFrontend>(
