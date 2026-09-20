@@ -5080,189 +5080,9 @@ private:
         }
     }
 
-public:
-    // ============================================================
-    // Constructor
-    // ============================================================
-    lidar_registration_scan2localmap()
-        : rclcpp::Node(
-              "scan2local_map")
+    GroundConstraintConfig LoadGroundConstraintConfig()
     {
-        // ========================================================
-        // 1. Sensor configuration
-        //
-        // Sensor-specific ROS data is normalized by the adapter layer:
-        //
-        //   Mid360 PointCloud2 -> Mid360s_Adapter --+
-        //                                           +-> LIDAR_FRAME
-        //   Hesai PointCloud2  -> HESAI_Adapter ----+
-        //
-        // Everything after LIDAR_FRAME is sensor-independent.
-        // ========================================================
-        lidar_type_ =
-            this->declare_parameter<std::string>(
-                "lidar_type",
-                "mid360s");
-
-        std::transform(
-            lidar_type_.begin(),
-            lidar_type_.end(),
-            lidar_type_.begin(),
-            [](unsigned char character)
-            {
-                return static_cast<char>(
-                    std::tolower(character));
-            });
-
-        lidar_topic_ =
-            this->declare_parameter<std::string>(
-                "lidar_topic",
-                "/livox/lidar");
-
-        imu_topic_ =
-            this->declare_parameter<std::string>(
-                "imu_topic",
-                "/livox/imu");
-
-        imu_acceleration_scale_ =
-            this->declare_parameter<double>(
-                "imu_acceleration_scale",
-                9.80665);
-
-        if (!std::isfinite(
-                imu_acceleration_scale_) ||
-            imu_acceleration_scale_ <= 0.0)
-        {
-            RCLCPP_FATAL(
-                this->get_logger(),
-                "Invalid imu_acceleration_scale=%.9f. "
-                "The value must be finite and positive.",
-                imu_acceleration_scale_);
-
-            throw std::runtime_error(
-                "Invalid imu_acceleration_scale");
-        }
-
-        imu_adapter_.setAccelerationScale(
-            imu_acceleration_scale_);
-
-        world_frame_ =
-            this->declare_parameter<std::string>(
-                "world_frame",
-                "world");
-
-        odom_frame_ =
-            this->declare_parameter<std::string>(
-                "odom_frame",
-                "odom");
-
-        if (lidar_type_ == "mid360s" ||
-            lidar_type_ == "mid360" ||
-            lidar_type_ == "livox_mid360")
-        {
-            lidar_type_ =
-                "mid360s";
-
-            lidar_adapter_ =
-                &mid360s_adapter_;
-        }
-        else if (lidar_type_ == "hesai")
-        {
-            lidar_adapter_ =
-                &hesai_adapter_;
-        }
-        else if (lidar_type_ == "velodyne")
-        {
-            lidar_adapter_ =
-                &velodyne_adapter_;
-        }
-        else
-        {
-            RCLCPP_FATAL(
-                this->get_logger(),
-                "Unsupported lidar_type='%s'. "
-                "Valid values: mid360s, hesai, velodyne.",
-                lidar_type_.c_str());
-
-            throw std::runtime_error(
-                "Unsupported lidar_type: " +
-                lidar_type_);
-        }
-
-        // ========================================================
-        // 2. Scan-to-LocalMap configuration
-        // ========================================================
-        LidarRegistrationConfig
-            registration_config;
-
-        const double wall_constraint_minimum_radius_m =
-            std::max(
-                0.05,
-                this->declare_parameter<double>(
-                    "wall_constraint_minimum_radius_m",
-                    0.80));
-
-        fr_slam::SetDefaultMultiPlaneWallConstraintMinimumRadius(
-            wall_constraint_minimum_radius_m);
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "MultiPlane Wall radius gate | minimum_radius=%.3f m",
-            wall_constraint_minimum_radius_m);
-
-        LocalMapConfig
-            local_map_config;
-
-        GroundConstraintConfig
-            ground_constraint_config;
-
-        // ========================================================
-        // BTC-only backend loop configuration.
-        // ========================================================
-        LoopDetectorConfig
-            loop_detector_config;
-
-        loop_detector_config.enabled =
-            this->declare_parameter<bool>(
-                "backend_loop_closure_enable",
-                true);
-
-        const int configured_loop_min_keyframe_gap =
-            this->declare_parameter<int>(
-                "loop_min_keyframe_id_separation",
-                30);
-
-        loop_detector_config.min_keyframe_id_separation =
-            static_cast<std::size_t>(
-                std::max(
-                    1,
-                    configured_loop_min_keyframe_gap));
-
-        loop_detector_config.min_time_separation_sec =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "loop_min_time_separation_sec",
-                    10.0));
-
-        const int configured_local_map_max_frames =
-            this->declare_parameter<int>(
-                "local_map_max_frames",
-                10);
-
-        local_map_config.max_frames =
-            static_cast<std::size_t>(
-                std::max(
-                    1,
-                    configured_local_map_max_frames));
-
-        local_map_config.voxel_leaf_size =
-            static_cast<float>(
-                std::max(
-                    0.01,
-                    this->declare_parameter<double>(
-                        "local_map_voxel_leaf_size",
-                        0.30)));
+        GroundConstraintConfig ground_constraint_config;
 
         // ========================================================
         // Ground V1.4 frozen world-plane anchor.
@@ -5295,7 +5115,7 @@ public:
             RCLCPP_FATAL(
                 this->get_logger(),
                 "Invalid ground_constraint_mode='%s'. "
-                "Valid values: flat_anchor, off.",
+                "Valid values: piecewise_frozen, flat_anchor, off, disabled.",
                 ground_constraint_config.mode.c_str());
 
             throw std::runtime_error(
@@ -5501,6 +5321,196 @@ public:
                     this->declare_parameter<int>(
                         "ground_clearance_bootstrap_samples",
                         8)));
+
+        return ground_constraint_config;
+    }
+
+public:
+    // ============================================================
+    // Constructor
+    // ============================================================
+    lidar_registration_scan2localmap()
+        : rclcpp::Node(
+              "scan2local_map")
+    {
+        // ========================================================
+        // 1. Sensor configuration
+        //
+        // Sensor-specific ROS data is normalized by the adapter layer:
+        //
+        //   Mid360 PointCloud2 -> Mid360s_Adapter --+
+        //                                           +-> LIDAR_FRAME
+        //   Hesai PointCloud2  -> HESAI_Adapter ----+
+        //
+        // Everything after LIDAR_FRAME is sensor-independent.
+        // ========================================================
+        lidar_type_ =
+            this->declare_parameter<std::string>(
+                "lidar_type",
+                "mid360s");
+
+        std::transform(
+            lidar_type_.begin(),
+            lidar_type_.end(),
+            lidar_type_.begin(),
+            [](unsigned char character)
+            {
+                return static_cast<char>(
+                    std::tolower(character));
+            });
+
+        lidar_topic_ =
+            this->declare_parameter<std::string>(
+                "lidar_topic",
+                "/livox/lidar");
+
+        imu_topic_ =
+            this->declare_parameter<std::string>(
+                "imu_topic",
+                "/livox/imu");
+
+        imu_acceleration_scale_ =
+            this->declare_parameter<double>(
+                "imu_acceleration_scale",
+                9.80665);
+
+        if (!std::isfinite(
+                imu_acceleration_scale_) ||
+            imu_acceleration_scale_ <= 0.0)
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Invalid imu_acceleration_scale=%.9f. "
+                "The value must be finite and positive.",
+                imu_acceleration_scale_);
+
+            throw std::runtime_error(
+                "Invalid imu_acceleration_scale");
+        }
+
+        imu_adapter_.setAccelerationScale(
+            imu_acceleration_scale_);
+
+        world_frame_ =
+            this->declare_parameter<std::string>(
+                "world_frame",
+                "world");
+
+        odom_frame_ =
+            this->declare_parameter<std::string>(
+                "odom_frame",
+                "odom");
+
+        if (lidar_type_ == "mid360s" ||
+            lidar_type_ == "mid360" ||
+            lidar_type_ == "livox_mid360")
+        {
+            lidar_type_ =
+                "mid360s";
+
+            lidar_adapter_ =
+                &mid360s_adapter_;
+        }
+        else if (lidar_type_ == "hesai")
+        {
+            lidar_adapter_ =
+                &hesai_adapter_;
+        }
+        else if (lidar_type_ == "velodyne")
+        {
+            lidar_adapter_ =
+                &velodyne_adapter_;
+        }
+        else
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Unsupported lidar_type='%s'. "
+                "Valid values: mid360s, hesai, velodyne.",
+                lidar_type_.c_str());
+
+            throw std::runtime_error(
+                "Unsupported lidar_type: " +
+                lidar_type_);
+        }
+
+        // ========================================================
+        // 2. Scan-to-LocalMap configuration
+        // ========================================================
+        LidarRegistrationConfig
+            registration_config;
+
+        const double wall_constraint_minimum_radius_m =
+            std::max(
+                0.05,
+                this->declare_parameter<double>(
+                    "wall_constraint_minimum_radius_m",
+                    0.80));
+
+        fr_slam::SetDefaultMultiPlaneWallConstraintMinimumRadius(
+            wall_constraint_minimum_radius_m);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "MultiPlane Wall radius gate | minimum_radius=%.3f m",
+            wall_constraint_minimum_radius_m);
+
+        LocalMapConfig
+            local_map_config;
+
+        GroundConstraintConfig
+            ground_constraint_config;
+
+        // ========================================================
+        // BTC-only backend loop configuration.
+        // ========================================================
+        LoopDetectorConfig
+            loop_detector_config;
+
+        loop_detector_config.enabled =
+            this->declare_parameter<bool>(
+                "backend_loop_closure_enable",
+                true);
+
+        const int configured_loop_min_keyframe_gap =
+            this->declare_parameter<int>(
+                "loop_min_keyframe_id_separation",
+                30);
+
+        loop_detector_config.min_keyframe_id_separation =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_loop_min_keyframe_gap));
+
+        loop_detector_config.min_time_separation_sec =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "loop_min_time_separation_sec",
+                    10.0));
+
+        const int configured_local_map_max_frames =
+            this->declare_parameter<int>(
+                "local_map_max_frames",
+                10);
+
+        local_map_config.max_frames =
+            static_cast<std::size_t>(
+                std::max(
+                    1,
+                    configured_local_map_max_frames));
+
+        local_map_config.voxel_leaf_size =
+            static_cast<float>(
+                std::max(
+                    0.01,
+                    this->declare_parameter<double>(
+                        "local_map_voxel_leaf_size",
+                        0.30)));
+
+        ground_constraint_config =
+            LoadGroundConstraintConfig();
 
         // ========================================================
         // Loop consistency / loop-edge sparsification parameters.
