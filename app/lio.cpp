@@ -5574,6 +5574,118 @@ private:
         return runtime_config;
     }
 
+    LioFrontendConfig LoadLioFrontendConfig(
+        const LidarRegistrationConfig &registration_config,
+        const PreprocessorRuntimeConfig &preprocessing,
+        const GroundConstraintConfig &ground_constraint_config)
+    {
+        LioFrontendConfig lio_config;
+
+        // --------------------------------------------------------
+        // IMU continuous-time process noise.
+        //
+        // Keep the original ROS parameter names, defaults and
+        // clamping semantics unchanged.
+        // --------------------------------------------------------
+        lio_config.ieskf.gyro_noise_std =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "lio_gyro_noise_std",
+                    0.01));
+
+        lio_config.ieskf.accel_noise_std =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "lio_accel_noise_std",
+                    0.10));
+
+        lio_config.ieskf.gyro_bias_random_walk_std =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "lio_gyro_bias_random_walk_std",
+                    1.0e-4));
+
+        lio_config.ieskf.accel_bias_random_walk_std =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "lio_accel_bias_random_walk_std",
+                    1.0e-3));
+
+        // --------------------------------------------------------
+        // IESKF state estimation switches.
+        // --------------------------------------------------------
+        lio_config.ieskf.estimate_gravity =
+            this->declare_parameter<bool>(
+                "lio_estimate_gravity",
+                true);
+
+        lio_config.ieskf.estimate_extrinsic =
+            this->declare_parameter<bool>(
+                "lio_estimate_extrinsic",
+                true);
+
+        // --------------------------------------------------------
+        // LiDAR measurement association.
+        //
+        // Reuse exactly the same geometry gates as the existing
+        // scan-to-local-map registration frontend.
+        // --------------------------------------------------------
+        lio_config.lidar_measurement.knn =
+            registration_config.knn;
+
+        lio_config.lidar_measurement.max_correspondence_distance =
+            registration_config.max_correspondence_distance;
+
+        lio_config.lidar_measurement.max_point_to_plane_distance =
+            registration_config.max_point_to_plane_distance;
+
+        lio_config.lidar_measurement.min_correspondences =
+            registration_config.min_correspondences;
+
+        lio_config.lidar_measurement.enable_huber_loss =
+            registration_config.enable_huber_loss;
+
+        lio_config.lidar_measurement.huber_delta =
+            registration_config.huber_delta;
+
+        lio_config.lidar_measurement.point_to_plane_noise_std =
+            std::max(
+                1.0e-4,
+                this->declare_parameter<double>(
+                    "lio_point_to_plane_noise_std",
+                    0.10));
+
+        // --------------------------------------------------------
+        // Reuse exactly the same preprocessing policy as the
+        // node-side LiDAR pipeline.
+        // --------------------------------------------------------
+        lio_config.preprocessor =
+            preprocessing.config;
+
+        lio_config.preprocessor_sor_mode =
+            preprocessing.sor_mode;
+
+        lio_config.preprocessor_sor_adaptive_max_points =
+            preprocessing.sor_adaptive_max_points;
+
+        lio_config.preprocessor_enable_ror =
+            preprocessing.enable_ror;
+
+        // IESKF state timestamp / LiDAR scan reference tolerance.
+        lio_config.time_epsilon =
+            1.0e-6;
+
+        // Ground remains the same Piecewise-Frozen configuration.
+        lio_config.ground =
+            ground_constraint_config;
+
+        return lio_config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -6163,111 +6275,11 @@ public:
         // but the actual LIO runtime will use the PreProcessor owned by
         // LioFrontend.  Both receive exactly the same preprocessing policy.
         // ========================================================
-        LioFrontendConfig
-            lio_config;
-
-        // --------------------------------------------------------
-        // IMU continuous-time process noise.
-        //
-        // These are initial engineering values and are exposed as ROS
-        // parameters so they can later be replaced by sensor-specific
-        // Allan-variance / datasheet values without changing code.
-        // --------------------------------------------------------
-        lio_config.ieskf.gyro_noise_std =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "lio_gyro_noise_std",
-                    0.01));
-
-        lio_config.ieskf.accel_noise_std =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "lio_accel_noise_std",
-                    0.10));
-
-        lio_config.ieskf.gyro_bias_random_walk_std =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "lio_gyro_bias_random_walk_std",
-                    1.0e-4));
-
-        lio_config.ieskf.accel_bias_random_walk_std =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "lio_accel_bias_random_walk_std",
-                    1.0e-3));
-
-        // --------------------------------------------------------
-        // --------------------------------------------------------
-        // LiDAR-IMU extrinsic online estimation switch.
-        // --------------------------------------------------------
-        lio_config.ieskf.estimate_gravity =
-            this->declare_parameter<bool>(
-                "lio_estimate_gravity",
-                true);
-
-        lio_config.ieskf.estimate_extrinsic =
-            this->declare_parameter<bool>(
-                "lio_estimate_extrinsic",
-                true);
-
-        // LiDAR measurement association.
-        //
-        // Reuse the SAME geometry gates as the existing registration
-        // frontend so PreparedLidarTarget and IESKF measurement semantics
-        // remain consistent.
-        // --------------------------------------------------------
-        lio_config.lidar_measurement.knn =
-            registration_config.knn;
-
-        lio_config.lidar_measurement.max_correspondence_distance =
-            registration_config.max_correspondence_distance;
-
-        lio_config.lidar_measurement.max_point_to_plane_distance =
-            registration_config.max_point_to_plane_distance;
-
-        lio_config.lidar_measurement.min_correspondences =
-            registration_config.min_correspondences;
-
-        lio_config.lidar_measurement.enable_huber_loss =
-            registration_config.enable_huber_loss;
-
-        lio_config.lidar_measurement.huber_delta =
-            registration_config.huber_delta;
-
-        lio_config.lidar_measurement.point_to_plane_noise_std =
-            std::max(
-                1.0e-4,
-                this->declare_parameter<double>(
-                    "lio_point_to_plane_noise_std",
-                    0.10));
-
-        // --------------------------------------------------------
-        // Exactly the same LiDAR preprocessing configuration used by
-        // the current LO pipeline.
-        // --------------------------------------------------------
-        lio_config.preprocessor =
-            preprocessor_config;
-
-        lio_config.preprocessor_sor_mode =
-            preprocessing.sor_mode;
-
-        lio_config.preprocessor_sor_adaptive_max_points =
-            preprocessing.sor_adaptive_max_points;
-
-        lio_config.preprocessor_enable_ror =
-            preprocessing.enable_ror;
-
-        // IESKF state timestamp / LiDAR scan reference tolerance.
-        lio_config.time_epsilon =
-            1.0e-6;
-
-        lio_config.ground =
-            ground_constraint_config;
+        LioFrontendConfig lio_config =
+            LoadLioFrontendConfig(
+                registration_config,
+                preprocessing,
+                ground_constraint_config);
 
         // --------------------------------------------------------
         // Wall constraint master switch.
