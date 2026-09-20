@@ -4,9 +4,9 @@ fr_slam:
     # ============================================================
     # LIO / IESKF
     lio_estimate_gravity: true
-    lio_estimate_extrinsic: true
+    lio_estimate_extrinsic: false
     # ============================================================
-    backend_loop_closure_enable: false
+    backend_loop_closure_enable: true
     planar_motion_mode: false
 
     # ============================================================

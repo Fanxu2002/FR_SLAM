@@ -45,7 +45,7 @@ struct GroundConstraintConfig
     // They are retained only so the shared GroundConstraintConfig remains
     // source-compatible with the current LIO development target.
     // ------------------------------------------------------------------
-    double height_sigma_m = 0.05;
+    double height_sigma_m = 0.005;
     double normal_sigma_deg = 2.0;
     double height_huber_delta_m = 0.05;
     double normal_huber_delta_deg = 2.0;

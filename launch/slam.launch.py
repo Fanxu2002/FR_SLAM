@@ -12,7 +12,7 @@ import os
 import yaml
 
 
-SUPPORTED_SENSORS = ('livox', 'hesai')
+SUPPORTED_SENSORS = ('livox', 'hesai', 'velodyne')
 SUPPORTED_PROFILES = ('outdoor', 'indoor')
 
 
@@ -241,7 +241,7 @@ def _launch_setup(context):
     ground_mode = LaunchConfiguration('ground').perform(context).strip().lower()
     if ground_mode not in ('off', 'flat_anchor', 'piecewise_frozen'):
         raise RuntimeError("Invalid ground='" + ground_mode + "'.")
-    if mode == 'lio' and ground_mode == 'piecewise_frozen':
+    if False and mode == 'lio' and ground_mode == 'piecewise_frozen':
         raise RuntimeError('LIO + piecewise_frozen is not supported yet.')
     package_share_directory = Path(
         get_package_share_directory('fr_slam')
@@ -354,12 +354,16 @@ def _launch_setup(context):
         sensor
     )
 
-    calibration_file = _select_calibration_file(
-        calibration_directory,
-        sensor,
-        legacy_calibration_directory
-    )
-    q_il = _load_q_il(calibration_file)
+    if sensor == 'velodyne':
+        calibration_file = None
+        q_il = None
+    else:
+        calibration_file = _select_calibration_file(
+            calibration_directory,
+            sensor,
+            legacy_calibration_directory
+        )
+        q_il = _load_q_il(calibration_file)
 
     # Each sensor keeps an independent run history.
     run_id = datetime.now().strftime(
@@ -404,12 +408,14 @@ def _launch_setup(context):
     parameter_overrides = {
         'save_root_directory': str(saves_directory),
         'enable_lidar_imu_rotation_pair_export': False,
-        'calibration_use_imu_initial_guess': True,
-        'imu_extrinsic_q_il_x': q_il[0],
-        'imu_extrinsic_q_il_y': q_il[1],
-        'imu_extrinsic_q_il_z': q_il[2],
-        'imu_extrinsic_q_il_w': q_il[3]
+        'calibration_use_imu_initial_guess': True
     }
+
+    if q_il is not None:
+        parameter_overrides['imu_extrinsic_q_il_x'] = q_il[0]
+        parameter_overrides['imu_extrinsic_q_il_y'] = q_il[1]
+        parameter_overrides['imu_extrinsic_q_il_z'] = q_il[2]
+        parameter_overrides['imu_extrinsic_q_il_w'] = q_il[3]
 
     parameter_overrides['btc_config_profile'] = profile
     parameter_overrides['ground_constraint_enable'] = (ground_mode != 'off')
@@ -458,8 +464,11 @@ def _launch_setup(context):
                 + str(wall_profile_config_path)
         ),
         LogInfo(
-            msg='Calibration loaded from: '
-                + str(calibration_file)
+            msg=(
+                'Calibration source: sensor YAML fixed extrinsic'
+                if calibration_file is None
+                else 'Calibration loaded from: ' + str(calibration_file)
+            )
         ),
         LogInfo(
             msg='This run will be preserved under: '
@@ -475,7 +484,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sensor',
             default_value='livox',
-            description='LiDAR sensor: livox or hesai'
+            description='LiDAR sensor: livox, hesai, or velodyne'
         ),
         DeclareLaunchArgument(
             'mode',

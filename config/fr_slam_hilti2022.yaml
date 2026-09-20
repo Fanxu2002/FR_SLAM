@@ -1,11 +1,15 @@
 fr_slam:
   ros__parameters:
     # ============================================================
-    # Livox Mid-360 + 内置 IMU / Livox Mid-360 + internal IMU
+    # Hesai XT32 + Fixposition POI IMU
     # ============================================================
-    lidar_type: "mid360s"
-    lidar_topic: "/livox/lidar"
-    imu_topic: "/livox/imu"
+    lidar_type: "hesai"
+    lidar_topic: "/hesai/pandar"
+    imu_topic: "/alphasense/imu"
+
+    # 已从现有 rosbag 中确认： / Verified from existing bags:
+    #   /lidar_points       sensor_msgs/msg/PointCloud2
+    #   /fixposition/poiimu sensor_msgs/msg/Imu
 
     # ============================================================
     # 坐标系 / Frames
@@ -16,13 +20,10 @@ fr_slam:
     # ============================================================
     # 实时处理 / 时间同步 / Realtime / synchronization
     # ============================================================
-
-    lidar_queue_hard_limit: 200
-    lidar_qos_depth: 200
-    
+    max_lidar_queue_size: 3
     imu_qos_depth: 1000
     imu_initialization_sample_count: 200
-    imu_history_duration: 60.0
+    imu_history_duration: 0.5
 
     # LiDAR→IMU 等待几毫秒属于正常的异步到达现象。 / A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
     # 只有等待/滞后达到或超过该阈值时才输出 WARN。 / Only waits/lag at or above this threshold are emitted as WARN.
@@ -32,68 +33,43 @@ fr_slam:
     # 局部地图 LocalMap / LocalMap
     # ============================================================
     local_map_max_frames: 10
-    local_map_voxel_leaf_size: 0.4
+    local_map_voxel_leaf_size: 0.30
 
     # ============================================================
-    # Final Ground V1：Ground-only tilt/Z correction
-    # S² normal + tangent heading + piecewise-frozen reference
+    # Ground V1.4：冻结世界平面的横滚/俯仰/Z 方向锚定 / Ground V1.4: frozen world-plane roll/pitch/Z anchor
     # ============================================================
+    # 在坡道、多层地面或无法用单一固定支撑平面描述的地形中，请使用 "off"。 / Use "off" for ramps, multi-level floors, or terrain where one fixed
+    # 此时固定支撑平面不再是有效的世界模型。 / support plane is not a valid world model.
     ground_constraint_enable: true
-    ground_constraint_mode: "piecewise_frozen"
+    ground_constraint_mode: "flat_anchor"
     ground_analysis_voxel_leaf_size: 0.15
 
-    # 只有连续获得若干相互一致且高质量的支撑平面观测后，才冻结参考平面。 / The reference is frozen only after several mutually consistent,
-    # 这些观测需要具有较高质量。 / high-quality support-plane observations.
     ground_anchor_bootstrap_frames: 8
     ground_anchor_max_normal_spread_deg: 2.0
     ground_anchor_max_plane_d_spread_m: 0.08
 
-    # Ground measurement quality / gross sanity.
-    # Residuals never trigger reference switching by themselves.
-
     ground_plane_information_scale: 1.0
-    ground_height_sigma_m: 0.01
+    ground_height_sigma_m: 0.05
     ground_normal_sigma_deg: 2.0
-    ground_max_height_residual_m: 5.00
+    ground_height_huber_delta_m: 0.05
+    ground_normal_huber_delta_deg: 2.0
+    ground_max_height_residual_m: 0.30
     ground_max_normal_residual_deg: 10.0
 
-    # Ground-only trust region.
-    ground_max_tilt_correction_deg: 0.25
-    ground_max_z_correction_m: 0.030
-
-    # Candidate construction guards.
-    ground_min_reference_normal_z: 0.50
-    ground_min_heading_projection_norm: 0.0001
-    ground_sanity_height_tolerance_m: 0.005
-    ground_sanity_normal_tolerance_deg: 0.000001
-
-    # LiDAR-frame forward axis used for tangent-heading reconstruction.
-    ground_forward_axis_x: 1.0
-    ground_forward_axis_y: 0.0
-    ground_forward_axis_z: 0.0
-
-    # Largest safe candidate is tried first.
-    ground_line_search_alpha_1: 1.0
-    ground_line_search_alpha_2: 0.5
-    ground_line_search_alpha_3: 0.25
-
-    # Piecewise-frozen lifecycle.  A future pose-invariant TerrainChangeDetector
-    # may request PENDING_SWITCH; residual alone never switches the reference.
-    ground_reference_switch_confirmation_frames: 8
-
-    # General geometry is a safety evaluator only, never a Ground optimizer.
+    ground_max_translation_correction_m: 0.05
+    ground_max_rotation_correction_deg: 0.50
     ground_max_general_rmse_ratio: 1.03
     ground_max_general_rmse_absolute_increase_m: 0.003
     ground_min_general_correspondence_ratio: 0.85
+    ground_max_refinement_iterations: 2
 
-    # 可信支撑面门限与逐帧审计 CSV。 / Trusted-support gate and per-frame audit CSV.
     ground_support_constraint_minimum_points: 120
     ground_support_constraint_minimum_cells: 35
     ground_support_constraint_minimum_center_cells: 3
     ground_support_constraint_minimum_inlier_ratio: 0.90
     ground_support_constraint_maximum_rmse_m: 0.030
     ground_support_constraint_minimum_score: 8.5
-    ground_support_constraint_enter_confidence: 0.62
+    ground_support_constraint_enter_confidence: 0.72
     ground_support_constraint_keep_confidence: 0.62
     ground_clearance_bootstrap_samples: 8
     ground_diagnostics_enable: true
@@ -145,6 +121,8 @@ fr_slam:
     # ============================================================
     # LiDAR 预处理 / LiDAR preprocessing
     # ============================================================
+    # 初始使用与 Livox 相同的保守前端参数。 / Start with the same conservative front-end settings as Livox.
+    # XT32 的 ROI 与机体裁剪框可在首次实机运行后再调节。 / The XT32 ROI and self-body box can be tuned after the first live run.
     preprocessor_enable_range_filter: true
     preprocessor_range_min: 1.0
     preprocessor_range_max: 30.0
@@ -189,16 +167,18 @@ fr_slam:
     lidar_imu_rotation_pairs_path: "lidar_imu_rotation_pairs.csv"
 
     # ============================================================
-    # LiDAR → IMU 外参备用值 / LiDAR -> IMU extrinsic fallback
+    # LiDAR → Fixposition IMU 外参备用值 / LiDAR -> Fixposition IMU extrinsic fallback
     # ============================================================
-    # 正常启动时会自动加载最新有效的 Livox q_IL 标定结果。 / Normal launch loads the newest valid Livox q_IL automatically.
-    imu_extrinsic_q_il_x: 0.0
-    imu_extrinsic_q_il_y: 0.0
+    # 这里绝不能复用 Livox 标定结果；正常 Hesai 启动只会加载 Hesai 自己的标定。 / Never reuse the Livox calibration here.  Normal Hesai launch will only
+    # 标定结果应存放在 output/calibration/hesai/ 下。 / load results stored below output/calibration/hesai/.
+    imu_extrinsic_q_il_x: 0.7071067811865476
+    imu_extrinsic_q_il_y: -0.7071067811865476
     imu_extrinsic_q_il_z: 0.0
-    imu_extrinsic_q_il_w: 1.0
+    imu_extrinsic_q_il_w: 0.0
 
-    imu_extrinsic_p_il_x: -0.01133142
-    imu_extrinsic_p_il_y: -0.02396263
-    imu_extrinsic_p_il_z: 0.04367367
-    # fr_slam_livox.yaml
-    imu_acceleration_scale: 9.80665
+    imu_extrinsic_p_il_x: -0.001
+    imu_extrinsic_p_il_y: -0.00855
+    imu_extrinsic_p_il_z: 0.055
+    # fr_slam_hesai.yaml
+    imu_acceleration_scale: 1.0
+    lio_estimate_extrinsic: false

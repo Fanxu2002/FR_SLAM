@@ -316,7 +316,7 @@ std::size_t SubmapManager::ActivePointCount() const
         ActiveSubmap();
 
     return primary != nullptr &&
-           primary->cloud_O
+                   primary->cloud_O
                ? primary->cloud_O->size()
                : 0;
 }
@@ -456,6 +456,17 @@ bool SubmapManager::CreateGrowing(
 
     last_add_started_new_submap_ =
         true;
+
+    std::cout
+        << "[SUBMAP_AUDIT] CREATE_GROWING"
+        << " timestamp=" << keyframe.timestamp
+        << " growing_id=" << growing.id
+        << " primary_id=" << submaps_[active_index_].id
+        << " primary_count="
+        << submaps_[active_index_].keyframe_ids.size()
+        << " anchor_z="
+        << growing.T_O_S_creation.translation().z()
+        << std::endl;
 
     return true;
 }
@@ -739,6 +750,18 @@ bool SubmapManager::FinishPrimaryAndPromoteGrowing()
 
     last_add_started_new_submap_ =
         true;
+
+    std::cout
+        << "[SUBMAP_AUDIT] PROMOTE"
+        << " finished_id=" << finished.id
+        << " finished_count=" << finished.keyframe_ids.size()
+        << " new_primary_id=" << new_primary.id
+        << " new_primary_count=" << new_primary.keyframe_ids.size()
+        << " finished_anchor_z="
+        << finished.T_O_S_creation.translation().z()
+        << " new_primary_anchor_z="
+        << new_primary.T_O_S_creation.translation().z()
+        << std::endl;
 
     return true;
 }

@@ -6,6 +6,8 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
+        - /Grid1
+        - /Front End1
         - /Front End1/Local Map1
         - /Maps1/Optimized Map1
         - /Maps1/Optimized Map1/Topic1
@@ -17,7 +19,7 @@ Panels:
         - /Loop1/loop_icp_final_aligned1/Topic1
         - /Loop1/loop_retrieval_current_window1
         - /Loop1/loop_retrieval_historical_window1
-      Splitter Ratio: 0.6029411554336548
+      Splitter Ratio: 0.5970588326454163
     Tree Height: 719
   - Class: rviz_common/Selection
     Name: Selection
@@ -40,27 +42,27 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 0.5
+    - Alpha: 1
       Cell Size: 1
       Class: rviz_default_plugins/Grid
-      Color: 160; 160; 164
+      Color: 165; 29; 45
       Enabled: true
       Line Style:
         Line Width: 0.029999999329447746
-        Value: Lines
+        Value: Billboards
       Name: Grid
-      Normal Cell Count: 0
+      Normal Cell Count: 18
       Offset:
         X: 0
         Y: 0
         Z: 0
       Plane: XY
-      Plane Cell Count: 10
+      Plane Cell Count: 1
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_common/Group
       Displays:
-        - Alpha: 1
+        - Alpha: 0.800000011920929
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
             Max Value: 9.987906455993652
@@ -81,7 +83,7 @@ Visualization Manager:
           Name: Local Map
           Position Transformer: XYZ
           Selectable: true
-          Size (Pixels): 3
+          Size (Pixels): 2
           Size (m): 0.009999999776482582
           Style: Points
           Topic:
@@ -165,12 +167,7 @@ Visualization Manager:
           Enabled: true
           Name: MarkerArray
           Namespaces:
-            constraint_ground_label: true
-            constraint_ground_normal: true
-            constraint_ground_surface: true
-            constraint_wall_label: true
-            constraint_wall_normal: true
-            constraint_wall_surface: true
+            {}
           Topic:
             Depth: 5
             Durability Policy: Volatile
@@ -303,8 +300,8 @@ Visualization Manager:
         - Alpha: 0.800000011920929
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
-            Max Value: 3.00791597366333
-            Min Value: -0.3604460060596466
+            Max Value: 10.956270217895508
+            Min Value: -0.3032349646091461
             Value: true
           Axis: Z
           Channel Name: intensity
@@ -556,25 +553,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/XYOrbit
-      Distance: 7.448663711547852
+      Distance: 74.05355072021484
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -2.5519866943359375
-        Y: -0.5914275646209717
-        Z: -7.360991730820388e-06
+        X: 7.1793365478515625
+        Y: -5.379161357879639
+        Z: -1.4693177945446223e-05
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.9603977203369141
+      Pitch: 1.439796805381775
       Target Frame: ""
       Value: XYOrbit (rviz_default_plugins)
-      Yaw: 3.745405673980713
+      Yaw: 3.245408773422241
     Saved: ~
 Window Geometry:
   Displays:

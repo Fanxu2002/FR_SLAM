@@ -14,6 +14,7 @@
 #include "fr_slam/sensor/lidar_adapter.hpp"
 #include "fr_slam/sensor/mid360s_adapter.hpp"
 #include "fr_slam/sensor/hesai_adapter.hpp"
+#include "fr_slam/sensor/velodyne_adapter.hpp"
 #include "fr_slam/sensor/imu_adapter.hpp"
 
 #include "fr_slam/imu/imu_buffer.hpp"
@@ -292,6 +293,9 @@ private:
 
     HESAI_Adapter
         hesai_adapter_;
+
+    Velodyne_Adapter
+        velodyne_adapter_;
 
     Lidar_Adapt *
         lidar_adapter_ =
@@ -1771,8 +1775,7 @@ private:
         }
 
         const std::size_t revision =
-            scan_to_local_map_->
-                MapOdomRevision();
+            scan_to_local_map_->MapOdomRevision();
 
         if (revision == 0 ||
             revision ==
@@ -1782,8 +1785,7 @@ private:
         }
 
         const Eigen::Isometry3d T_map_odom =
-            scan_to_local_map_->
-                GetMapOdomCorrection();
+            scan_to_local_map_->GetMapOdomCorrection();
 
         if (!lio_map_odom_bridge_.Update(
                 T_map_odom,
@@ -2145,7 +2147,6 @@ private:
 
         corrected_odom_pub_->publish(
             corrected_odom_msg);
-
     }
 
     // ============================================================
@@ -3647,8 +3648,40 @@ private:
         //     Previous + Active Submap tracking target.
         // ========================================================
         const PreparedLidarTarget *tracking_target =
-            scan_to_local_map_->
-                GetPreparedTrackingTarget();
+            scan_to_local_map_->GetPreparedTrackingTarget();
+
+
+        // ========================================================
+        // Current PRIMARY Submap context for structural Wall
+        // association.
+        //
+        // IMPORTANT:
+        // This is sampled BEFORE ProcessFrame() and BEFORE the
+        // current frame can create/promote a Submap during commit.
+        // Therefore it exactly matches the tracking target used by
+        // this LiDAR update.
+        // ========================================================
+        LioSubmapContext
+            lio_submap_context;
+
+        const Submap *lio_primary_submap =
+            scan_to_local_map_->GetActiveSubmap();
+
+        if (lio_primary_submap != nullptr &&
+            lio_primary_submap->has_origin_pose &&
+            lio_primary_submap
+                ->T_O_S_creation
+                .matrix()
+                .allFinite())
+        {
+            lio_submap_context.valid = true;
+
+            lio_submap_context.primary_submap_id =
+                lio_primary_submap->id;
+
+            lio_submap_context.T_O_S_creation =
+                lio_primary_submap->T_O_S_creation;
+        }
 
         // ========================================================
         // LIO-only PRE-update tracking-target Z diagnostic.
@@ -3680,79 +3713,79 @@ private:
                     double &mean_z,
                     double &minimum_z,
                     double &maximum_z)
+            {
+                valid_count = 0;
+                first_z = 0.0;
+                last_z = 0.0;
+                mean_z = 0.0;
+                minimum_z = 0.0;
+                maximum_z = 0.0;
+
+                if (submap == nullptr)
                 {
-                    valid_count = 0;
-                    first_z = 0.0;
-                    last_z = 0.0;
-                    mean_z = 0.0;
-                    minimum_z = 0.0;
-                    maximum_z = 0.0;
+                    return;
+                }
 
-                    if (submap == nullptr)
+                double sum_z = 0.0;
+                bool first_valid = true;
+
+                for (const std::size_t keyframe_id :
+                     submap->keyframe_ids)
+                {
+                    if (keyframe_id >= pre_keyframes.size())
                     {
-                        return;
+                        continue;
                     }
 
-                    double sum_z = 0.0;
-                    bool first_valid = true;
+                    const Keyframe &keyframe =
+                        pre_keyframes[keyframe_id];
 
-                    for (const std::size_t keyframe_id :
-                         submap->keyframe_ids)
+                    if (keyframe.id != keyframe_id ||
+                        !keyframe.T_WL.matrix().allFinite())
                     {
-                        if (keyframe_id >= pre_keyframes.size())
-                        {
-                            continue;
-                        }
-
-                        const Keyframe &keyframe =
-                            pre_keyframes[keyframe_id];
-
-                        if (keyframe.id != keyframe_id ||
-                            !keyframe.T_WL.matrix().allFinite())
-                        {
-                            continue;
-                        }
-
-                        const double z =
-                            keyframe.T_WL.translation().z();
-
-                        if (!std::isfinite(z))
-                        {
-                            continue;
-                        }
-
-                        if (first_valid)
-                        {
-                            first_z = z;
-                            minimum_z = z;
-                            maximum_z = z;
-                            first_valid = false;
-                        }
-
-                        last_z = z;
-                        sum_z += z;
-
-                        minimum_z =
-                            std::min(
-                                minimum_z,
-                                z);
-
-                        maximum_z =
-                            std::max(
-                                maximum_z,
-                                z);
-
-                        ++valid_count;
+                        continue;
                     }
 
-                    if (valid_count > 0)
+                    const double z =
+                        keyframe.T_WL.translation().z();
+
+                    if (!std::isfinite(z))
                     {
-                        mean_z =
-                            sum_z /
-                            static_cast<double>(
-                                valid_count);
+                        continue;
                     }
-                };
+
+                    if (first_valid)
+                    {
+                        first_z = z;
+                        minimum_z = z;
+                        maximum_z = z;
+                        first_valid = false;
+                    }
+
+                    last_z = z;
+                    sum_z += z;
+
+                    minimum_z =
+                        std::min(
+                            minimum_z,
+                            z);
+
+                    maximum_z =
+                        std::max(
+                            maximum_z,
+                            z);
+
+                    ++valid_count;
+                }
+
+                if (valid_count > 0)
+                {
+                    mean_z =
+                        sum_z /
+                        static_cast<double>(
+                            valid_count);
+                }
+            };
 
             std::size_t pre_active_count = 0;
             double pre_active_first_z = 0.0;
@@ -3854,6 +3887,7 @@ private:
                 raw_frame,
                 imu_data,
                 tracking_target,
+                lio_submap_context,
                 lio_result);
 
         const std::chrono::steady_clock::time_point lio_end =
@@ -4040,13 +4074,12 @@ private:
             std::chrono::steady_clock::now();
 
         const bool commit_success =
-            scan_to_local_map_->
-                CommitExternalPoseFrame(
-                    lio_result.processed_frame.cloud,
-                    raw_frame.scan_start_time,
-                    lio_result.T_WL,
-                    nullptr,
-                    &is_keyframe);
+            scan_to_local_map_->CommitExternalPoseFrame(
+                lio_result.processed_frame.cloud,
+                raw_frame.scan_start_time,
+                lio_result.T_WL,
+                nullptr,
+                &is_keyframe);
 
         const std::chrono::steady_clock::time_point commit_end =
             std::chrono::steady_clock::now();
@@ -4103,82 +4136,82 @@ private:
                     double &mean_z,
                     double &minimum_z,
                     double &maximum_z)
+            {
+                valid_count = 0;
+                first_z = 0.0;
+                last_z = 0.0;
+                mean_z = 0.0;
+                minimum_z =
+                    std::numeric_limits<double>::infinity();
+                maximum_z =
+                    -std::numeric_limits<double>::infinity();
+
+                if (submap == nullptr)
                 {
-                    valid_count = 0;
-                    first_z = 0.0;
-                    last_z = 0.0;
-                    mean_z = 0.0;
+                    return;
+                }
+
+                double sum_z = 0.0;
+
+                for (const std::size_t keyframe_id :
+                     submap->keyframe_ids)
+                {
+                    if (keyframe_id >= all_keyframes.size())
+                    {
+                        continue;
+                    }
+
+                    const Keyframe &keyframe =
+                        all_keyframes[keyframe_id];
+
+                    if (keyframe.id != keyframe_id ||
+                        !keyframe.T_WL.matrix().allFinite())
+                    {
+                        continue;
+                    }
+
+                    const double z =
+                        keyframe.T_WL.translation().z();
+
+                    if (!std::isfinite(z))
+                    {
+                        continue;
+                    }
+
+                    if (valid_count == 0)
+                    {
+                        first_z = z;
+                    }
+
+                    last_z = z;
+                    sum_z += z;
+
                     minimum_z =
-                        std::numeric_limits<double>::infinity();
+                        std::min(
+                            minimum_z,
+                            z);
+
                     maximum_z =
-                        -std::numeric_limits<double>::infinity();
+                        std::max(
+                            maximum_z,
+                            z);
 
-                    if (submap == nullptr)
-                    {
-                        return;
-                    }
+                    ++valid_count;
+                }
 
-                    double sum_z = 0.0;
-
-                    for (const std::size_t keyframe_id :
-                         submap->keyframe_ids)
-                    {
-                        if (keyframe_id >= all_keyframes.size())
-                        {
-                            continue;
-                        }
-
-                        const Keyframe &keyframe =
-                            all_keyframes[keyframe_id];
-
-                        if (keyframe.id != keyframe_id ||
-                            !keyframe.T_WL.matrix().allFinite())
-                        {
-                            continue;
-                        }
-
-                        const double z =
-                            keyframe.T_WL.translation().z();
-
-                        if (!std::isfinite(z))
-                        {
-                            continue;
-                        }
-
-                        if (valid_count == 0)
-                        {
-                            first_z = z;
-                        }
-
-                        last_z = z;
-                        sum_z += z;
-
-                        minimum_z =
-                            std::min(
-                                minimum_z,
-                                z);
-
-                        maximum_z =
-                            std::max(
-                                maximum_z,
-                                z);
-
-                        ++valid_count;
-                    }
-
-                    if (valid_count > 0)
-                    {
-                        mean_z =
-                            sum_z /
-                            static_cast<double>(
-                                valid_count);
-                    }
-                    else
-                    {
-                        minimum_z = 0.0;
-                        maximum_z = 0.0;
-                    }
-                };
+                if (valid_count > 0)
+                {
+                    mean_z =
+                        sum_z /
+                        static_cast<double>(
+                            valid_count);
+                }
+                else
+                {
+                    minimum_z = 0.0;
+                    maximum_z = 0.0;
+                }
+            };
 
             std::size_t active_count = 0;
             double active_first_z = 0.0;
@@ -5138,12 +5171,17 @@ public:
             lidar_adapter_ =
                 &hesai_adapter_;
         }
+        else if (lidar_type_ == "velodyne")
+        {
+            lidar_adapter_ =
+                &velodyne_adapter_;
+        }
         else
         {
             RCLCPP_FATAL(
                 this->get_logger(),
                 "Unsupported lidar_type='%s'. "
-                "Valid values: mid360s, hesai.",
+                "Valid values: mid360s, hesai, velodyne.",
                 lidar_type_.c_str());
 
             throw std::runtime_error(
@@ -5249,7 +5287,8 @@ public:
                     std::tolower(character));
             });
 
-        if (ground_constraint_config.mode != "flat_anchor" &&
+        if (ground_constraint_config.mode != "piecewise_frozen" &&
+            ground_constraint_config.mode != "flat_anchor" &&
             ground_constraint_config.mode != "off" &&
             ground_constraint_config.mode != "disabled")
         {
@@ -5698,7 +5737,6 @@ public:
             << "extrinsic_q_x,extrinsic_q_y,extrinsic_q_z,extrinsic_q_w\n";
 
         lio_diagnostics_stream_.flush();
-
 
         // ========================================================
         // LiDAR-IMU rotation calibration pair export.
@@ -6167,6 +6205,19 @@ public:
         // IESKF state timestamp / LiDAR scan reference tolerance.
         lio_config.time_epsilon =
             1.0e-6;
+
+        lio_config.ground =
+            ground_constraint_config;
+
+        // --------------------------------------------------------
+        // Wall constraint master switch.
+        // Disabled by default. Wall association, temporal filtering
+        // and Wall pose injection run only when explicitly enabled.
+        // --------------------------------------------------------
+        lio_config.wall_constraint_enable =
+            this->declare_parameter<bool>(
+                "wall_constraint_enable",
+                false);
 
         lio_frontend_ =
             std::make_unique<LioFrontend>(

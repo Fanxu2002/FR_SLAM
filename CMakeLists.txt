@@ -150,6 +150,7 @@ set(FR_SLAM_SENSOR_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/imu_adapter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/mid360s_adapter.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/hesai_adapter.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/velodyne_adapter.cpp
 )
 
 # --------------------------------------------------------------------------
@@ -177,6 +178,7 @@ set(FR_SLAM_LO_FRONTEND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lo/lo_frontend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lo/lo_frontend_ground.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/constraints/plane/multi_plane_extractor.cpp
+    src/frontend/constraints/plane/wall_association.cpp
 )
 
 # --------------------------------------------------------------------------
