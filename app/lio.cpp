@@ -5686,6 +5686,85 @@ private:
         return lio_config;
     }
 
+    struct LidarImuExtrinsicConfig
+    {
+        Eigen::Quaterniond Q_IL =
+            Eigen::Quaterniond::Identity();
+
+        Eigen::Vector3d P_IL =
+            Eigen::Vector3d::Zero();
+    };
+
+    LidarImuExtrinsicConfig LoadLidarImuExtrinsicConfig()
+    {
+        LidarImuExtrinsicConfig config;
+
+        const double q_il_x =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_x",
+                0.0);
+
+        const double q_il_y =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_y",
+                0.0);
+
+        const double q_il_z =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_z",
+                0.0);
+
+        const double q_il_w =
+            this->declare_parameter<double>(
+                "imu_extrinsic_q_il_w",
+                1.0);
+
+        const double p_il_x =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_x",
+                0.0);
+
+        const double p_il_y =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_y",
+                0.0);
+
+        const double p_il_z =
+            this->declare_parameter<double>(
+                "imu_extrinsic_p_il_z",
+                0.0);
+
+        config.Q_IL =
+            Eigen::Quaterniond(
+                q_il_w,
+                q_il_x,
+                q_il_y,
+                q_il_z);
+
+        if (!config.Q_IL.coeffs().allFinite() ||
+            config.Q_IL.norm() <= 1.0e-12)
+        {
+            throw std::runtime_error(
+                "Invalid LiDAR-IMU rotation extrinsic.");
+        }
+
+        config.Q_IL.normalize();
+
+        config.P_IL =
+            Eigen::Vector3d(
+                p_il_x,
+                p_il_y,
+                p_il_z);
+
+        if (!config.P_IL.allFinite())
+        {
+            throw std::runtime_error(
+                "Invalid LiDAR-IMU translation extrinsic.");
+        }
+
+        return config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -6316,68 +6395,14 @@ public:
         // Current test uses Identity. Replace with calibrated
         // extrinsic later.
         // ========================================================
-        const double q_il_x =
-            this->declare_parameter<double>(
-                "imu_extrinsic_q_il_x",
-                0.0);
-
-        const double q_il_y =
-            this->declare_parameter<double>(
-                "imu_extrinsic_q_il_y",
-                0.0);
-
-        const double q_il_z =
-            this->declare_parameter<double>(
-                "imu_extrinsic_q_il_z",
-                0.0);
-
-        const double q_il_w =
-            this->declare_parameter<double>(
-                "imu_extrinsic_q_il_w",
-                1.0);
-
-        const double p_il_x =
-            this->declare_parameter<double>(
-                "imu_extrinsic_p_il_x",
-                0.0);
-
-        const double p_il_y =
-            this->declare_parameter<double>(
-                "imu_extrinsic_p_il_y",
-                0.0);
-
-        const double p_il_z =
-            this->declare_parameter<double>(
-                "imu_extrinsic_p_il_z",
-                0.0);
+        const LidarImuExtrinsicConfig extrinsic =
+            LoadLidarImuExtrinsicConfig();
 
         Q_IL_ =
-            Eigen::Quaterniond(
-                q_il_w,
-                q_il_x,
-                q_il_y,
-                q_il_z);
-
-        if (!Q_IL_.coeffs().allFinite() ||
-            Q_IL_.norm() <= 1.0e-12)
-        {
-            throw std::runtime_error(
-                "Invalid LiDAR-IMU rotation extrinsic.");
-        }
-
-        Q_IL_.normalize();
+            extrinsic.Q_IL;
 
         P_IL_ =
-            Eigen::Vector3d(
-                p_il_x,
-                p_il_y,
-                p_il_z);
-
-        if (!P_IL_.allFinite())
-        {
-            throw std::runtime_error(
-                "Invalid LiDAR-IMU translation extrinsic.");
-        }
+            extrinsic.P_IL;
 
         RCLCPP_INFO(
             this->get_logger(),
