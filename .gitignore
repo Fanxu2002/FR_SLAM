@@ -52,3 +52,9 @@ second
 *.rank4_*
 *.structural_ownership_baseline_*
 *.skeleton_*
+
+# Additional local backup artifacts
+cleanup_backup/
+*.backup
+*.orig
+*.rej
