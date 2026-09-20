@@ -36,3 +36,19 @@ v15_*.txt
 wall_assoc_*_summary.txt
 trajectory_visualization.py
 second
+
+# ------------------------------------------------------------
+# Local source snapshots / experiment backups
+# Use Git for version history instead.
+# ------------------------------------------------------------
+*.before_*
+*.bak
+*.bak_*
+*.pre_*
+*.bad_*
+*.final_*
+*.ground_v2a_*
+*.ground_cov_reset_*
+*.rank4_*
+*.structural_ownership_baseline_*
+*.skeleton_*
