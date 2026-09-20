@@ -9,7 +9,7 @@ fr_slam:
 
     # ============================================================
     # Ground
-    # Ground enable/mode are selected by slam.launch.py.
+    # Ground enable/mode may be overridden by the active launch file.
     # ============================================================
     # Final Ground V1：Ground-only tilt/Z correction
     # S² normal + tangent heading + piecewise-frozen reference

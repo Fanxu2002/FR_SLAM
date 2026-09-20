@@ -12,7 +12,7 @@ import os
 import yaml
 
 
-SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022')
+SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022', 'velodyne')
 SUPPORTED_PROFILES = ('outdoor', 'indoor')
 
 
@@ -269,18 +269,25 @@ def _launch_setup(context):
     )
     # Prefer the source-tree YAML during development so parameter-only
     # changes do not require rebuilding/installing the ROS package.
+    sensor_config_filename = {
+        'livox': 'fr_slam_livox.yaml',
+        'hesai': 'fr_slam_hesai.yaml',
+        'hilti2022': 'fr_slam_hilti2022.yaml',
+        'velodyne': 'velodyne.yaml',
+    }[sensor]
+
     source_slam_config_path = (
         workspace_directory /
         'src' /
         'fr_slam' /
         'config' /
-        ('fr_slam_' + sensor + '.yaml')
+        sensor_config_filename
     )
 
     installed_slam_config_path = (
         package_share_directory /
         'config' /
-        ('fr_slam_' + sensor + '.yaml')
+        sensor_config_filename
     )
 
     if source_slam_config_path.is_file():
@@ -537,7 +544,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sensor',
             default_value='livox',
-            description='Sensor profile: livox or hesai'
+            description='Sensor profile: livox, hesai, hilti2022, or velodyne'
         ),
         DeclareLaunchArgument(
             'profile',
