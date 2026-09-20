@@ -5821,6 +5821,78 @@ private:
         return config;
     }
 
+    struct SensorRuntimeConfig
+    {
+        std::size_t max_lidar_queue_size =
+            3;
+
+        std::size_t imu_qos_depth =
+            1000;
+
+        std::size_t imu_initialization_sample_count =
+            200;
+
+        double imu_history_duration =
+            0.50;
+
+        double imu_wait_warning_threshold_ms =
+            20.0;
+    };
+
+    SensorRuntimeConfig LoadSensorRuntimeConfig()
+    {
+        SensorRuntimeConfig config;
+
+        const int configured_max_queue_size =
+            this->declare_parameter<int>(
+                "max_lidar_queue_size",
+                3);
+
+        config.max_lidar_queue_size =
+            static_cast<std::size_t>(
+                std::max(
+                    2,
+                    configured_max_queue_size));
+
+        const int configured_imu_qos_depth =
+            this->declare_parameter<int>(
+                "imu_qos_depth",
+                1000);
+
+        config.imu_qos_depth =
+            static_cast<std::size_t>(
+                std::max(
+                    50,
+                    configured_imu_qos_depth));
+
+        const int configured_initialization_sample_count =
+            this->declare_parameter<int>(
+                "imu_initialization_sample_count",
+                200);
+
+        config.imu_initialization_sample_count =
+            static_cast<std::size_t>(
+                std::max(
+                    20,
+                    configured_initialization_sample_count));
+
+        config.imu_history_duration =
+            std::max(
+                0.10,
+                this->declare_parameter<double>(
+                    "imu_history_duration",
+                    0.50));
+
+        config.imu_wait_warning_threshold_ms =
+            std::max(
+                0.0,
+                this->declare_parameter<double>(
+                    "imu_wait_warning_threshold_ms",
+                    20.0));
+
+        return config;
+    }
+
 public:
     // ============================================================
     // Constructor
@@ -6309,52 +6381,23 @@ public:
         // ========================================================
         // 3. Real-time pipeline parameters.
         // ========================================================
-        const int configured_max_queue_size =
-            this->declare_parameter<int>(
-                "max_lidar_queue_size",
-                3);
+        const SensorRuntimeConfig sensor_runtime =
+            LoadSensorRuntimeConfig();
 
         max_lidar_queue_size_ =
-            static_cast<std::size_t>(
-                std::max(
-                    2,
-                    configured_max_queue_size));
-
-        const int configured_imu_qos_depth =
-            this->declare_parameter<int>(
-                "imu_qos_depth",
-                1000);
+            sensor_runtime.max_lidar_queue_size;
 
         imu_qos_depth_ =
-            static_cast<std::size_t>(
-                std::max(
-                    50,
-                    configured_imu_qos_depth));
-
-        const int configured_initialization_sample_count =
-            this->declare_parameter<int>(
-                "imu_initialization_sample_count",
-                200);
+            sensor_runtime.imu_qos_depth;
 
         initialization_sample_count_ =
-            static_cast<std::size_t>(
-                std::max(
-                    20,
-                    configured_initialization_sample_count));
+            sensor_runtime.imu_initialization_sample_count;
 
         imu_history_duration_ =
-            std::max(
-                0.10,
-                this->declare_parameter<double>(
-                    "imu_history_duration",
-                    0.50));
+            sensor_runtime.imu_history_duration;
 
         imu_wait_warning_threshold_ms_ =
-            std::max(
-                0.0,
-                this->declare_parameter<double>(
-                    "imu_wait_warning_threshold_ms",
-                    20.0));
+            sensor_runtime.imu_wait_warning_threshold_ms;
 
         // ========================================================
         // 3.1 LiDAR preprocessing parameters from YAML.
