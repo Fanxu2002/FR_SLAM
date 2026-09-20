@@ -4240,12 +4240,114 @@ ProcessGroundMeasurement(
                             kPendingMaximumPlaneRmseM =
                                 0.03;
 
-                        // FR_GROUND_FLAT_LOCK_20260920
-                        // Flat-floor validation:
-                        // keep the first trusted ACTIVE Ground persistent.
-                        // Estimator drift must NEVER redefine Ground.
+                        // FR_GROUND_PIECEWISE_V2
+                        //
+                        // Ground is only LOCALLY planar.
+                        // The complete trajectory is NOT constrained to one
+                        // global plane.
+                        //
+                        // IMPORTANT:
+                        //   Height residual must NEVER trigger a terrain switch.
+                        //   A Z-estimation error can create a large height
+                        //   residual even when the physical Ground did not
+                        //   change.
+                        //
+                        // A new terrain piece is opened only when:
+                        //
+                        //   1. Ground orientation disagrees with ACTIVE;
+                        //   2. physical slope changes consistently, OR the
+                        //      normal change is large enough to represent a
+                        //      direction-changing slope;
+                        //   3. gravity direction is still trustworthy.
+                        //
+                        // PENDING temporal consistency and the existing atomic
+                        // switch remain responsible for final acceptance.
+                        constexpr double
+                            kTerrainNormalTriggerDeg =
+                                1.50;
+
+                        constexpr double
+                            kTerrainSlopeDeltaTriggerDeg =
+                                1.00;
+
+                        constexpr double
+                            kTerrainHardNormalTriggerDeg =
+                                3.50;
+
+                        constexpr double
+                            kTerrainMaximumGravityTiltDeg =
+                                1.50;
+
+                        double gravity_tilt_deg =
+                            std::numeric_limits<double>::infinity();
+
+                        if (current_physical_slope_valid)
+                        {
+                            const double gravity_up_cosine =
+                                std::clamp(
+                                    std::abs(
+                                        physical_up_W.dot(
+                                            Eigen::Vector3d::UnitZ())),
+                                    0.0,
+                                    1.0);
+
+                            gravity_tilt_deg =
+                                std::acos(
+                                    gravity_up_cosine) *
+                                57.29577951308232;
+                        }
+
+                        const bool gravity_direction_reliable =
+                            current_physical_slope_valid &&
+                            std::isfinite(
+                                gravity_tilt_deg) &&
+                            gravity_tilt_deg <=
+                                kTerrainMaximumGravityTiltDeg;
+
+                        const bool physical_slope_delta_valid =
+                            current_physical_slope_valid &&
+                            ground_active_slope_valid_;
+
+                        const double physical_slope_delta_deg =
+                            physical_slope_delta_valid
+                                ? std::abs(
+                                      current_physical_slope_deg -
+                                      ground_active_slope_deg_)
+                                : 0.0;
+
                         const bool terrain_change_candidate =
-                            false;
+                            gravity_direction_reliable &&
+                            active_normal_error_deg >=
+                                kTerrainNormalTriggerDeg &&
+                            (
+                                (
+                                    physical_slope_delta_valid &&
+                                    physical_slope_delta_deg >=
+                                        kTerrainSlopeDeltaTriggerDeg
+                                )
+                                ||
+                                active_normal_error_deg >=
+                                    kTerrainHardNormalTriggerDeg
+                            );
+
+                        if (terrain_change_candidate)
+                        {
+                            std::cout
+                                << "LIO_GROUND_TERRAIN_CANDIDATE"
+                                << " | active_piece="
+                                << ground_active_piece_id_
+                                << " | normal_delta_deg="
+                                << active_normal_error_deg
+                                << " | slope_current_deg="
+                                << current_physical_slope_deg
+                                << " | slope_active_deg="
+                                << ground_active_slope_deg_
+                                << " | slope_delta_deg="
+                                << physical_slope_delta_deg
+                                << " | gravity_tilt_deg="
+                                << gravity_tilt_deg
+                                << std::endl;
+                        }
 
                         // Same physical Ground piece:
                         //
