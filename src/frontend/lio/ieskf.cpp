@@ -1,5 +1,6 @@
 #include "fr_slam/frontend/ieskf.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 
@@ -14,6 +15,542 @@ namespace
 
     constexpr double GRAVITY_TRANSPORT_EPSILON =
         1.0e-6;
+
+
+    Eigen::Matrix3d SkewSymmetric(const Eigen::Vector3d &v)
+    {
+        Eigen::Matrix3d skew = Eigen::Matrix3d::Zero();
+
+        skew <<
+            0.0, -v.z(), v.y(),
+            v.z(), 0.0, -v.x(),
+            -v.y(), v.x(), 0.0;
+
+        return skew;
+    }
+
+    // ========================================================================
+    // BuildLioPoseGraphInformation()
+    //
+    // FR_LIO_ODOM_INFORMATION_V2
+    //
+    // Convert the final ACTUAL LiDAR/Ground/Wall measurement information from
+    // the IESKF tangent space into a robust dynamic 6x6 PoseGraph odometry-edge
+    // information matrix.
+    //
+    // Design rules:
+    //   1. Use measurement information, not posterior covariance.
+    //   2. Persistent structural ownership is NOT a measurement.
+    //   3. If online extrinsic estimation is enabled, marginalize the
+    //      extrinsic block with a Moore-Penrose Schur complement.
+    //   4. Transform IMU [right-rotation, world-position] perturbations into
+    //      local LiDAR [rotation, translation], including the lever arm.
+    //   5. Reorder to g2o::EdgeSE3 [translation, rotation].
+    //   6. Build directional confidence from marginal covariance, NORMALIZE
+    //      TRANSLATION AND ROTATION SEPARATELY, then clamp to [0.01, 1.0].
+    //      This avoids the V1 saturation bug where absolute Hessian scale made
+    //      tx/ty/tz/roll/pitch all clamp to 1 before normalization.
+    //   7. Preserve full 6x6 precision coupling, but shrink its standardized
+    //      correlation toward Identity:
+    //
+    //          J_safe = alpha * J + (1-alpha) * I, alpha = 0.75
+    //
+    //      This retains 75% of the measured coupling while guaranteeing a
+    //      finite SPD margin. With the 0.01 confidence floor, the resulting
+    //      condition number is conservatively bounded to O(1e3), instead of
+    //      the O(1e4~1e5) near-singular V1 behavior observed in real runs.
+    // ========================================================================
+    bool BuildLioPoseGraphInformation(
+        const Ieskf::StateMatrix &measurement_information,
+        const LioState &state,
+        const bool estimate_extrinsic,
+        Eigen::Matrix<double, 6, 6> &pose_graph_information)
+    {
+        using Matrix6d = Eigen::Matrix<double, 6, 6>;
+        using Vector6d = Eigen::Matrix<double, 6, 1>;
+
+        pose_graph_information = Matrix6d::Identity();
+
+        if (!measurement_information.allFinite() ||
+            !state.Q_WI.coeffs().allFinite() ||
+            state.Q_WI.norm() <= 1.0e-12 ||
+            !state.Q_IL.coeffs().allFinite() ||
+            state.Q_IL.norm() <= 1.0e-12 ||
+            !state.P_IL.allFinite())
+        {
+            return false;
+        }
+
+        Matrix6d lambda_pose =
+            measurement_information.block<6, 6>(
+                LioStateIndex::ROTATION,
+                LioStateIndex::ROTATION);
+
+        lambda_pose =
+            0.5 *
+            (lambda_pose + lambda_pose.transpose());
+
+        if (!lambda_pose.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Marginalize online extrinsic variables when they are estimated.
+        // ---------------------------------------------------------------
+        if (estimate_extrinsic)
+        {
+            const Matrix6d lambda_pose_extrinsic =
+                measurement_information.block<6, 6>(
+                    LioStateIndex::ROTATION,
+                    LioStateIndex::EXTRINSIC_ROTATION);
+
+            Matrix6d lambda_extrinsic =
+                measurement_information.block<6, 6>(
+                    LioStateIndex::EXTRINSIC_ROTATION,
+                    LioStateIndex::EXTRINSIC_ROTATION);
+
+            lambda_extrinsic =
+                0.5 *
+                (lambda_extrinsic + lambda_extrinsic.transpose());
+
+            if (!lambda_pose_extrinsic.allFinite() ||
+                !lambda_extrinsic.allFinite())
+            {
+                return false;
+            }
+
+            Eigen::SelfAdjointEigenSolver<Matrix6d> extrinsic_solver(
+                lambda_extrinsic);
+
+            if (extrinsic_solver.info() != Eigen::Success ||
+                !extrinsic_solver.eigenvalues().allFinite() ||
+                !extrinsic_solver.eigenvectors().allFinite())
+            {
+                return false;
+            }
+
+            const Vector6d extrinsic_eigenvalues =
+                extrinsic_solver.eigenvalues();
+
+            const double maximum_extrinsic_eigenvalue =
+                std::max(0.0, extrinsic_eigenvalues.maxCoeff());
+
+            Matrix6d lambda_extrinsic_pinv = Matrix6d::Zero();
+
+            if (maximum_extrinsic_eigenvalue > 1.0e-12)
+            {
+                const double threshold =
+                    std::max(
+                        1.0e-10,
+                        maximum_extrinsic_eigenvalue * 1.0e-8);
+
+                Matrix6d inverse_eigenvalues = Matrix6d::Zero();
+
+                for (int i = 0; i < 6; ++i)
+                {
+                    if (extrinsic_eigenvalues(i) > threshold)
+                    {
+                        inverse_eigenvalues(i, i) =
+                            1.0 / extrinsic_eigenvalues(i);
+                    }
+                }
+
+                lambda_extrinsic_pinv =
+                    extrinsic_solver.eigenvectors() *
+                    inverse_eigenvalues *
+                    extrinsic_solver.eigenvectors().transpose();
+            }
+
+            lambda_pose -=
+                lambda_pose_extrinsic *
+                lambda_extrinsic_pinv *
+                lambda_pose_extrinsic.transpose();
+
+            lambda_pose =
+                0.5 *
+                (lambda_pose + lambda_pose.transpose());
+        }
+
+        // ---------------------------------------------------------------
+        // Convert the possibly rank-deficient pose information into a finite
+        // covariance. Unobservable modes get a large but finite variance.
+        // ---------------------------------------------------------------
+        Eigen::SelfAdjointEigenSolver<Matrix6d> pose_solver(
+            lambda_pose);
+
+        if (pose_solver.info() != Eigen::Success ||
+            !pose_solver.eigenvalues().allFinite() ||
+            !pose_solver.eigenvectors().allFinite())
+        {
+            return false;
+        }
+
+        const Vector6d pose_eigenvalues =
+            pose_solver.eigenvalues();
+
+        const double maximum_pose_eigenvalue =
+            std::max(0.0, pose_eigenvalues.maxCoeff());
+
+        if (!std::isfinite(maximum_pose_eigenvalue) ||
+            maximum_pose_eigenvalue <= 1.0e-12)
+        {
+            return false;
+        }
+
+        const double information_floor =
+            std::max(
+                1.0e-9,
+                maximum_pose_eigenvalue * 1.0e-6);
+
+        Matrix6d inverse_pose_eigenvalues = Matrix6d::Zero();
+
+        for (int i = 0; i < 6; ++i)
+        {
+            const double clipped_information =
+                std::max(
+                    information_floor,
+                    pose_eigenvalues(i));
+
+            inverse_pose_eigenvalues(i, i) =
+                1.0 / clipped_information;
+        }
+
+        Matrix6d covariance_imu_rp =
+            pose_solver.eigenvectors() *
+            inverse_pose_eigenvalues *
+            pose_solver.eigenvectors().transpose();
+
+        covariance_imu_rp =
+            0.5 *
+            (covariance_imu_rp + covariance_imu_rp.transpose());
+
+        if (!covariance_imu_rp.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // IESKF tangent:
+        //   x = [delta_theta_I(right), delta_p_W]
+        //
+        // Local LiDAR tangent:
+        //   y = [delta_theta_L, delta_t_L]
+        //
+        //   delta_theta_L = R_LI * delta_theta_I
+        //   delta_t_L     = R_LW * delta_p_W
+        //                     - R_LI * [p_IL]x * delta_theta_I
+        // ---------------------------------------------------------------
+        const Eigen::Matrix3d R_WI =
+            state.Q_WI.normalized().toRotationMatrix();
+
+        const Eigen::Matrix3d R_IL =
+            state.Q_IL.normalized().toRotationMatrix();
+
+        const Eigen::Matrix3d R_LI =
+            R_IL.transpose();
+
+        const Eigen::Matrix3d R_WL =
+            R_WI * R_IL;
+
+        const Eigen::Matrix3d R_LW =
+            R_WL.transpose();
+
+        Matrix6d imu_pose_to_lidar_local = Matrix6d::Zero();
+
+        imu_pose_to_lidar_local.block<3, 3>(0, 0) =
+            R_LI;
+
+        imu_pose_to_lidar_local.block<3, 3>(3, 0) =
+            -R_LI * SkewSymmetric(state.P_IL);
+
+        imu_pose_to_lidar_local.block<3, 3>(3, 3) =
+            R_LW;
+
+        Matrix6d covariance_lidar_rt =
+            imu_pose_to_lidar_local *
+            covariance_imu_rp *
+            imu_pose_to_lidar_local.transpose();
+
+        covariance_lidar_rt =
+            0.5 *
+            (covariance_lidar_rt + covariance_lidar_rt.transpose());
+
+        if (!covariance_lidar_rt.allFinite())
+        {
+            return false;
+        }
+
+        // [rx ry rz tx ty tz] -> g2o [tx ty tz rx ry rz].
+        Matrix6d rt_to_tr = Matrix6d::Zero();
+        rt_to_tr.block<3, 3>(0, 3) = Eigen::Matrix3d::Identity();
+        rt_to_tr.block<3, 3>(3, 0) = Eigen::Matrix3d::Identity();
+
+        Matrix6d covariance_tr =
+            rt_to_tr *
+            covariance_lidar_rt *
+            rt_to_tr.transpose();
+
+        covariance_tr =
+            0.5 *
+            (covariance_tr + covariance_tr.transpose());
+
+        if (!covariance_tr.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // V2 directional confidence.
+        //
+        // IMPORTANT: meters and radians are different units, therefore the
+        // translation group and rotation group are normalized independently.
+        // We normalize FIRST and clamp SECOND.
+        // ---------------------------------------------------------------
+        constexpr double minimum_directional_confidence = 0.01;
+
+        Vector6d raw_directional_information = Vector6d::Zero();
+        Vector6d confidence_tr = Vector6d::Ones();
+
+        for (int i = 0; i < 6; ++i)
+        {
+            const double variance = covariance_tr(i, i);
+
+            if (!std::isfinite(variance) || variance <= 0.0)
+            {
+                return false;
+            }
+
+            raw_directional_information(i) =
+                1.0 / variance;
+
+            if (!std::isfinite(raw_directional_information(i)) ||
+                raw_directional_information(i) <= 0.0)
+            {
+                return false;
+            }
+        }
+
+        for (int group_start : {0, 3})
+        {
+            double group_maximum = 0.0;
+
+            for (int i = group_start;
+                 i < group_start + 3;
+                 ++i)
+            {
+                group_maximum =
+                    std::max(
+                        group_maximum,
+                        raw_directional_information(i));
+            }
+
+            if (!std::isfinite(group_maximum) ||
+                group_maximum <= 0.0)
+            {
+                return false;
+            }
+
+            for (int i = group_start;
+                 i < group_start + 3;
+                 ++i)
+            {
+                confidence_tr(i) =
+                    std::clamp(
+                        raw_directional_information(i) /
+                            group_maximum,
+                        minimum_directional_confidence,
+                        1.0);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Recover the full precision shape Q = C^-1.
+        // ---------------------------------------------------------------
+        Eigen::SelfAdjointEigenSolver<Matrix6d> covariance_solver(
+            covariance_tr);
+
+        if (covariance_solver.info() != Eigen::Success ||
+            !covariance_solver.eigenvalues().allFinite() ||
+            !covariance_solver.eigenvectors().allFinite() ||
+            covariance_solver.eigenvalues().minCoeff() <= 1.0e-15)
+        {
+            return false;
+        }
+
+        Matrix6d inverse_covariance_eigenvalues = Matrix6d::Zero();
+
+        for (int i = 0; i < 6; ++i)
+        {
+            inverse_covariance_eigenvalues(i, i) =
+                1.0 / covariance_solver.eigenvalues()(i);
+        }
+
+        Matrix6d precision_shape =
+            covariance_solver.eigenvectors() *
+            inverse_covariance_eigenvalues *
+            covariance_solver.eigenvectors().transpose();
+
+        precision_shape =
+            0.5 *
+            (precision_shape + precision_shape.transpose());
+
+        if (!precision_shape.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Standardize precision to unit diagonal:
+        //
+        //     J_ij = Q_ij / sqrt(Q_ii * Q_jj)
+        //
+        // This is a diagonal congruence transform and preserves SPD.
+        // ---------------------------------------------------------------
+        Matrix6d standardized_precision = Matrix6d::Zero();
+
+        for (int i = 0; i < 6; ++i)
+        {
+            if (!std::isfinite(precision_shape(i, i)) ||
+                precision_shape(i, i) <= 0.0)
+            {
+                return false;
+            }
+
+            for (int j = 0; j < 6; ++j)
+            {
+                if (!std::isfinite(precision_shape(j, j)) ||
+                    precision_shape(j, j) <= 0.0)
+                {
+                    return false;
+                }
+
+                const double denominator =
+                    std::sqrt(
+                        precision_shape(i, i) *
+                        precision_shape(j, j));
+
+                if (!std::isfinite(denominator) ||
+                    denominator <= 0.0)
+                {
+                    return false;
+                }
+
+                standardized_precision(i, j) =
+                    precision_shape(i, j) / denominator;
+            }
+        }
+
+        standardized_precision =
+            0.5 *
+            (standardized_precision + standardized_precision.transpose());
+
+        if (!standardized_precision.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // V2 coupling regularization.
+        //
+        // Keep 75% of the measured correlation shape and inject 25% Identity.
+        // Because standardized_precision is SPD with unit diagonal, this keeps
+        // the diagonal exactly one and gives a strict SPD eigenvalue margin.
+        // ---------------------------------------------------------------
+        constexpr double coupling_retention = 0.75;
+
+        Matrix6d regularized_precision_shape =
+            coupling_retention * standardized_precision +
+            (1.0 - coupling_retention) * Matrix6d::Identity();
+
+        regularized_precision_shape =
+            0.5 *
+            (regularized_precision_shape +
+             regularized_precision_shape.transpose());
+
+        Eigen::SelfAdjointEigenSolver<Matrix6d> shape_solver(
+            regularized_precision_shape,
+            Eigen::EigenvaluesOnly);
+
+        if (shape_solver.info() != Eigen::Success ||
+            !shape_solver.eigenvalues().allFinite() ||
+            shape_solver.eigenvalues().minCoeff() <= 1.0e-6)
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Restore the V2 directional confidence by congruence scaling:
+        //
+        //     Omega = W * J_safe * W
+        //     W = diag(sqrt(confidence_tr))
+        //
+        // Since diag(J_safe) == 1, diag(Omega) == confidence_tr exactly.
+        // ---------------------------------------------------------------
+        Matrix6d confidence_scale = Matrix6d::Zero();
+
+        for (int i = 0; i < 6; ++i)
+        {
+            confidence_scale(i, i) =
+                std::sqrt(confidence_tr(i));
+        }
+
+        pose_graph_information =
+            confidence_scale *
+            regularized_precision_shape *
+            confidence_scale;
+
+        pose_graph_information =
+            0.5 *
+            (pose_graph_information + pose_graph_information.transpose());
+
+        if (!pose_graph_information.allFinite())
+        {
+            return false;
+        }
+
+        // ---------------------------------------------------------------
+        // Final strict SPD + conditioning guard. Failure here only causes the
+        // mapping bridge to use the legacy identity fallback for this keyframe;
+        // it never rejects the valid LIO frame itself.
+        // ---------------------------------------------------------------
+        Eigen::SelfAdjointEigenSolver<Matrix6d> final_solver(
+            pose_graph_information,
+            Eigen::EigenvaluesOnly);
+
+        if (final_solver.info() != Eigen::Success ||
+            !final_solver.eigenvalues().allFinite())
+        {
+            return false;
+        }
+
+        const double minimum_eigenvalue =
+            final_solver.eigenvalues().minCoeff();
+
+        const double maximum_eigenvalue =
+            final_solver.eigenvalues().maxCoeff();
+
+        if (!std::isfinite(minimum_eigenvalue) ||
+            !std::isfinite(maximum_eigenvalue) ||
+            minimum_eigenvalue <= 1.0e-8 ||
+            maximum_eigenvalue <= minimum_eigenvalue)
+        {
+            return false;
+        }
+
+        const double condition_number =
+            maximum_eigenvalue / minimum_eigenvalue;
+
+        constexpr double maximum_condition_number = 2500.0;
+
+        if (!std::isfinite(condition_number) ||
+            condition_number > maximum_condition_number)
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     bool InitialUncertaintyIsValid(
         const IeskfInitialUncertainty &uncertainty)
@@ -2707,6 +3244,22 @@ bool Ieskf::IteratedLidarUpdate(
             result.position_information_z /
             position_information_sum;
     }
+
+
+    // =====================================================================
+    // FR_LIO_ODOM_INFORMATION_V2
+    //
+    // Export a dynamic 6x6 keyframe odometry information matrix from the
+    // final ACTUAL measurement information. Failure here must never reject a
+    // valid LIO frame; the mapping/backend bridge will simply use its legacy
+    // fallback information for that keyframe.
+    // =====================================================================
+    result.pose_graph_information_valid =
+        BuildLioPoseGraphInformation(
+            final_measurement.information,
+            current_state,
+            config_.estimate_extrinsic,
+            result.pose_graph_information);
 
     result.success =
         true;

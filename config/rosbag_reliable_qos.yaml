@@ -1,0 +1,11 @@
+/livox/lidar:
+  history: keep_last
+  depth: 1000
+  reliability: reliable
+  durability: volatile
+
+/livox/imu:
+  history: keep_last
+  depth: 5000
+  reliability: reliable
+  durability: volatile

@@ -258,7 +258,7 @@ bool RegistrationScan2LocalMap::AddKeyframeToPoseGraph(
                 symmetric_information;
 
             information_mode =
-                "V2B_FULL_6X6_V2";
+                "DYNAMIC_FULL_6X6_V2";
         }
     }
 

@@ -1,4 +1,7 @@
+#include "fr_slam/loop/loop_retrieval_sampler.hpp"
 #include "fr_slam/loop/btc_adapter.hpp"
+#include "fr_slam/loop/scan_context_window_shadow.hpp"
+#include "fr_slam/loop/scan_context_shadow.hpp"
 #include "fr_slam/frontend/lo_frontend.hpp"
 #include "fr_slam/frontend/ground_segmenter.hpp"
 #include "fr_slam/frontend/ground_input_bridge.hpp"
@@ -1465,6 +1468,55 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         btc_window_stride);
     static bool btc_csv_initialized = false;
 
+// ====================================================================
+// SC-WINDOW SHADOW
+//
+// Uses the SAME accumulated 7-KF cloud as BTC.
+//
+// IMPORTANT:
+//     Retrieval diagnostics only.
+//     SC-WINDOW does NOT create loop edges.
+//     SC-WINDOW does NOT modify PGO.
+// ====================================================================
+static std::unique_ptr<ScanContextWindowShadow>
+    sc_window_shadow;
+
+if (!sc_window_shadow)
+{
+    ScanContextWindowConfig sc_config;
+
+    sc_config.min_keyframe_id_separation =
+        loop_config.min_keyframe_id_separation;
+
+    sc_config.min_time_separation_sec =
+        loop_config.min_time_separation_sec;
+
+    // Historical Scan Context retrieval threshold.
+    sc_config.max_scan_context_distance =
+        0.40;
+
+    // SC-WINDOW tuning V1:
+    // Old single-KF default was 0.50.
+    // For the 7-KF accumulated window this over-penalized coverage
+    // differences and reversed some otherwise-correct raw-cosine rankings.
+    sc_config.scan_context.coverage_penalty_weight =
+        0.30;
+
+    // Frontend pose is diagnostic only.
+    sc_config.use_pose_distance_gate =
+        false;
+
+    sc_config.max_candidate_distance =
+        loop_config.max_candidate_distance;
+
+    sc_config.max_candidates =
+        loop_config.max_candidates;
+
+    sc_window_shadow =
+        std::make_unique<ScanContextWindowShadow>(
+            sc_config);
+}
+
     // ================================================================
     // FR-SLAM V31.11
     //
@@ -1514,26 +1566,663 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         }
     }
 
+    // ====================================================================
+    // LOOP RETRIEVAL SAMPLER V1
+    //
+    // Mapping Keyframe:
+    //     existing 0.5 m OR 5 deg rule -- UNCHANGED.
+    //
+    // Loop Retrieval Sample:
+    //     accumulated Mapping-KF path >= 0.50 m
+    //     OR
+    //     rotation from last Loop Sample >= 10 deg.
+    //
+    // SC and BTC consume exactly the same Loop Sample sequence.
+    // ====================================================================
+    static LoopRetrievalSampler
+        loop_retrieval_sampler(
+            0.50,
+            10.0);
+
+    static std::vector<LoopRetrievalSample>
+        loop_retrieval_samples;
+
+    LoopRetrievalSample
+        current_loop_sample;
+
+    LoopRetrievalSamplingDecision
+        loop_sampling_decision;
+
+    const bool loop_sample_accepted =
+        loop_retrieval_sampler.ProcessMappingKeyframe(
+            current_keyframe.id,
+            current_keyframe.timestamp,
+            current_keyframe.T_WL,
+            current_loop_sample,
+            loop_sampling_decision);
+
+    if (!loop_sampling_decision.valid)
+    {
+        return;
+    }
+
+    if (loop_sample_accepted)
+    {
+        loop_retrieval_samples.push_back(
+            current_loop_sample);
+    }
+
+    // ====================================================================
+    // LOOP RETRIEVAL SAMPLER V1 CSV
+    //
+    // Diagnostic only.
+    // One row per Mapping Keyframe.
+    //
+    // This allows offline validation of:
+    //   - Mapping KF -> Loop Sample reduction
+    //   - accumulated path spacing
+    //   - rotation triggers
+    //   - physical scale of the 7-sample BTC/SC window
+    // ====================================================================
+    try
+    {
+        const std::filesystem::path sampler_directory =
+            FrontendLoopDirectory();
+
+        std::filesystem::create_directories(
+            sampler_directory);
+
+        const std::filesystem::path sampler_csv_path =
+            sampler_directory /
+            "loop_retrieval_samples.csv";
+
+        const bool sampler_csv_exists =
+            std::filesystem::exists(
+                sampler_csv_path);
+
+        std::ofstream sampler_csv(
+            sampler_csv_path,
+            std::ios::app);
+
+        if (sampler_csv.is_open())
+        {
+            sampler_csv
+                << std::fixed
+                << std::setprecision(9);
+
+            if (!sampler_csv_exists)
+            {
+                sampler_csv
+                    << "mapping_keyframe_id,"
+                    << "timestamp,"
+                    << "accepted,"
+                    << "sample_id,"
+                    << "accumulated_path_m,"
+                    << "rotation_from_last_sample_deg,"
+                    << "trigger_translation,"
+                    << "trigger_rotation,"
+                    << "first_sample,"
+                    << "total_samples"
+                    << '\n';
+            }
+
+            sampler_csv
+                << current_keyframe.id << ','
+                << current_keyframe.timestamp << ','
+                << (loop_sample_accepted ? 1 : 0)
+                << ',';
+
+            if (loop_sample_accepted)
+            {
+                sampler_csv
+                    << current_loop_sample.sample_id;
+            }
+            else
+            {
+                sampler_csv
+                    << -1;
+            }
+
+            sampler_csv
+                << ','
+                << loop_sampling_decision
+                       .accumulated_path_distance_m
+                << ','
+                << loop_sampling_decision
+                       .rotation_from_last_sample_deg
+                << ','
+                << (loop_sampling_decision
+                            .trigger_translation
+                        ? 1
+                        : 0)
+                << ','
+                << (loop_sampling_decision
+                            .trigger_rotation
+                        ? 1
+                        : 0)
+                << ','
+                << (loop_sampling_decision
+                            .first_sample
+                        ? 1
+                        : 0)
+                << ','
+                << loop_retrieval_samples.size()
+                << '\n';
+        }
+    }
+    catch (const std::exception &)
+    {
+        // Diagnostics must never affect SLAM.
+    }
+
+    // Only accepted Loop Samples trigger SC/BTC retrieval.
+    if (!loop_sample_accepted)
+    {
+        return;
+    }
+
+    // ====================================================================
+    // SC-SINGLE SHADOW V1
+    //
+    // IMPORTANT:
+    //
+    // This detector consumes ONLY accepted Loop Retrieval Samples.
+    //
+    // It uses ONE original Mapping-Keyframe cloud per descriptor:
+    //
+    //     Loop Sample -> Mapping KF -> Keyframe::cloud
+    //
+    // It is completely independent from:
+    //
+    //     SC-WINDOW
+    //     BTC
+    //     LoopVerifier
+    //     PoseGraph
+    //     PGO
+    //
+    // Diagnostic only. It NEVER creates loop edges.
+    // ====================================================================
+    static std::unique_ptr<ScanContextShadowDetector>
+        sc_single_shadow;
+
+    if (!sc_single_shadow)
+    {
+        ScanContextShadowConfig
+            sc_single_config;
+
+        // Keep the same historical-separation policy as the
+        // existing loop frontend for the first experiment.
+        sc_single_config.min_keyframe_id_separation =
+            loop_config.min_keyframe_id_separation;
+
+        sc_single_config.min_time_separation_sec =
+            loop_config.min_time_separation_sec;
+
+        sc_single_config.max_scan_context_distance =
+            0.40;
+
+        // Frontend pose must NOT decide retrieval.
+        sc_single_config.use_pose_distance_gate =
+            false;
+
+        sc_single_config.max_candidate_distance =
+            loop_config.max_candidate_distance;
+
+        sc_single_config.max_candidates =
+            loop_config.max_candidates;
+
+        sc_single_shadow =
+            std::make_unique<ScanContextShadowDetector>(
+                sc_single_config);
+    }
+
+    ScanContextShadowDiagnostics
+        sc_single_diagnostics;
+
+    std::vector<ScanContextShadowCandidate>
+        sc_single_candidates;
+
+    const bool sc_single_added =
+        sc_single_shadow->AddKeyframe(
+            current_keyframe);
+
+    if (sc_single_added)
+    {
+        sc_single_candidates =
+            sc_single_shadow->Detect(
+                current_keyframe.id,
+                &sc_single_diagnostics);
+    }
+
+    // --------------------------------------------------------------------
+    // SC-SINGLE CSV
+    //
+    // One row per accepted Loop Retrieval Sample.
+    // --------------------------------------------------------------------
+    try
+    {
+        const std::filesystem::path
+            sc_single_directory =
+                FrontendLoopDirectory();
+
+        std::filesystem::create_directories(
+            sc_single_directory);
+
+        const std::filesystem::path
+            sc_single_csv_path =
+                sc_single_directory /
+                "scan_context_single_shadow.csv";
+
+        const bool sc_single_csv_exists =
+            std::filesystem::exists(
+                sc_single_csv_path);
+
+        std::ofstream sc_single_csv(
+            sc_single_csv_path,
+            std::ios::app);
+
+        if (sc_single_csv.is_open())
+        {
+            sc_single_csv
+                << std::fixed
+                << std::setprecision(9);
+
+            if (!sc_single_csv_exists)
+            {
+                sc_single_csv
+                    << "sample_id,"
+                    << "mapping_keyframe_id,"
+                    << "timestamp,"
+                    << "database_entries,"
+                    << "eligible_entries,"
+                    << "valid_matches,"
+                    << "accepted_candidates,"
+                    << "best_raw_kf,"
+                    << "best_raw_distance,"
+                    << "best_raw_similarity,"
+                    << "best_raw_yaw_deg,"
+                    << "accepted_kf,"
+                    << "accepted_distance,"
+                    << "accepted_similarity,"
+                    << "accepted_yaw_deg"
+                    << '\n';
+            }
+
+            sc_single_csv
+                << current_loop_sample.sample_id << ','
+                << current_keyframe.id << ','
+                << current_keyframe.timestamp << ','
+                << sc_single_diagnostics.database_entries
+                << ','
+                << sc_single_diagnostics.separation_eligible
+                << ','
+                << sc_single_diagnostics.valid_matches
+                << ','
+                << sc_single_diagnostics.accepted_candidates
+                << ',';
+
+            // ----------------------------------------------------
+            // Best RAW candidate.
+            // Recorded even when distance > 0.40.
+            // ----------------------------------------------------
+            if (sc_single_diagnostics.has_best_match)
+            {
+                const ScanContextShadowCandidate &
+                    best_raw =
+                        sc_single_diagnostics.best_match;
+
+                sc_single_csv
+                    << best_raw.candidate_id << ','
+                    << best_raw.scan_context_distance << ','
+                    << best_raw.scan_context_similarity << ','
+                    << best_raw.yaw_shift_deg << ',';
+            }
+            else
+            {
+                sc_single_csv
+                    << "-1,nan,nan,nan,";
+            }
+
+            // ----------------------------------------------------
+            // Best threshold-accepted candidate.
+            // ----------------------------------------------------
+            if (!sc_single_candidates.empty())
+            {
+                const ScanContextShadowCandidate &
+                    best =
+                        sc_single_candidates.front();
+
+                sc_single_csv
+                    << best.candidate_id << ','
+                    << best.scan_context_distance << ','
+                    << best.scan_context_similarity << ','
+                    << best.yaw_shift_deg;
+            }
+            else
+            {
+                sc_single_csv
+                    << "-1,nan,nan,nan";
+            }
+
+            sc_single_csv << '\n';
+        }
+    }
+    catch (const std::exception &)
+    {
+        // Shadow diagnostics must never affect SLAM.
+    }
+
+
+
+    // ====================================================================
+    // SC-SINGLE TOP-K LONG-FORM CSV V1
+    //
+    // One row = one threshold-accepted SC-SINGLE candidate.
+    //
+    // Used for:
+    //
+    //     Recall@1
+    //     Recall@5
+    //     Recall@10
+    //
+    // IMPORTANT:
+    //     Diagnostic only.
+    //     Does NOT enter LoopVerifier / PoseGraph / PGO.
+    // ====================================================================
+    try
+    {
+        const std::filesystem::path
+            sc_single_topk_directory =
+                FrontendLoopDirectory();
+
+        std::filesystem::create_directories(
+            sc_single_topk_directory);
+
+        const std::filesystem::path
+            sc_single_topk_path =
+                sc_single_topk_directory /
+                "scan_context_single_topk.csv";
+
+        const bool sc_single_topk_exists =
+            std::filesystem::exists(
+                sc_single_topk_path);
+
+        std::ofstream sc_single_topk_csv(
+            sc_single_topk_path,
+            std::ios::app);
+
+        if (sc_single_topk_csv.is_open())
+        {
+            sc_single_topk_csv
+                << std::fixed
+                << std::setprecision(9);
+
+            if (!sc_single_topk_exists)
+            {
+                sc_single_topk_csv
+                    << "sample_id,"
+                    << "mapping_keyframe_id,"
+                    << "timestamp,"
+                    << "database_entries,"
+                    << "eligible_entries,"
+                    << "valid_matches,"
+                    << "accepted_candidates,"
+                    << "rank,"
+                    << "historical_keyframe_id,"
+                    << "sc_distance,"
+                    << "sc_similarity,"
+                    << "raw_cosine_similarity,"
+                    << "sector_coverage_ratio,"
+                    << "cell_coverage_ratio,"
+                    << "compared_sectors,"
+                    << "yaw_shift_deg,"
+                    << "time_separation_sec,"
+                    << "pose_distance"
+                    << '\n';
+            }
+
+            for (std::size_t rank_index = 0;
+                 rank_index <
+                     sc_single_candidates.size();
+                 ++rank_index)
+            {
+                const ScanContextShadowCandidate &
+                    candidate =
+                        sc_single_candidates[
+                            rank_index];
+
+                sc_single_topk_csv
+                    << current_loop_sample.sample_id << ','
+                    << current_keyframe.id << ','
+                    << current_keyframe.timestamp << ','
+                    << sc_single_diagnostics.database_entries << ','
+                    << sc_single_diagnostics.separation_eligible << ','
+                    << sc_single_diagnostics.valid_matches << ','
+                    << sc_single_diagnostics.accepted_candidates << ','
+                    << (rank_index + 1) << ','
+                    << candidate.candidate_id << ','
+                    << candidate.scan_context_distance << ','
+                    << candidate.scan_context_similarity << ','
+                    << candidate.raw_cosine_similarity << ','
+                    << candidate.sector_coverage_ratio << ','
+                    << candidate.cell_coverage_ratio << ','
+                    << candidate.compared_sectors << ','
+                    << candidate.yaw_shift_deg << ','
+                    << candidate.time_separation_sec << ','
+                    << candidate.pose_distance
+                    << '\n';
+            }
+        }
+    }
+    catch (const std::exception &)
+    {
+        // Diagnostic output must NEVER affect SLAM.
+    }
+
+
+    // ====================================================================
+    // BTC-SINGLE SHADOW V3
+    //
+    // This code is reached ONLY after:
+    //
+    //     if (!loop_sample_accepted)
+    //         return;
+    //
+    // therefore every execution corresponds to exactly ONE accepted
+    // Loop Retrieval Sample.
+    //
+    // Input:
+    //
+    //     current_keyframe.btc_cloud
+    //
+    // i.e. ONE dense pre-frontend-voxel Mapping-Keyframe cloud.
+    //
+    // BTC configuration:
+    //
+    //     window_size   = 1
+    //     window_stride = 1
+    //
+    // Diagnostic only.
+    //
+    // NEVER enters:
+    //     LoopVerifier
+    //     Temporal Consistency
+    //     Cycle Consistency
+    //     PoseGraph
+    //     PGO
+    // ====================================================================
+    static fr_slam_btc::OfficialBtcAdapter
+        btc_single_shadow_adapter(
+            loop_runtime_config_.btc_config_profile,
+            loop_runtime_config_.btc_skip_near_num,
+            loop_runtime_config_.btc_proj_plane_num,
+            1,
+            1);
+
+    bool btc_single_cloud_valid = false;
+    bool btc_single_newly_processed = false;
+    bool btc_single_has_candidate = false;
+
+    std::size_t btc_single_points = 0;
+
+    std::size_t btc_single_historical_keyframe_id =
+        std::numeric_limits<std::size_t>::max();
+
+    if (current_keyframe.btc_cloud &&
+        !current_keyframe.btc_cloud->empty() &&
+        current_keyframe.T_WL.matrix().allFinite())
+    {
+        btc_single_cloud_valid = true;
+
+        btc_single_points =
+            current_keyframe.btc_cloud->size();
+
+        const fr_slam_btc::OfficialBtcSubmapResult
+            btc_single_result =
+                btc_single_shadow_adapter.ProcessSubmap(
+                    current_keyframe.id,
+                    current_keyframe.btc_cloud);
+
+        btc_single_newly_processed =
+            btc_single_result.newly_processed;
+
+        btc_single_has_candidate =
+            btc_single_result.has_candidate;
+
+        if (btc_single_result.has_candidate)
+        {
+            // BTC-SINGLE uses exactly one Mapping KF per database entry.
+            // Therefore historical_submap_id is directly the
+            // historical Mapping-Keyframe ID.
+            btc_single_historical_keyframe_id =
+                btc_single_result.historical_submap_id;
+        }
+    }
+
+
+    // --------------------------------------------------------------------
+    // BTC-SINGLE SHADOW CSV
+    //
+    // One row per accepted Loop Retrieval Sample.
+    // --------------------------------------------------------------------
+    try
+    {
+        const std::filesystem::path
+            btc_single_directory =
+                FrontendLoopDirectory();
+
+        std::filesystem::create_directories(
+            btc_single_directory);
+
+        const std::filesystem::path
+            btc_single_csv_path =
+                btc_single_directory /
+                "btc_single_shadow.csv";
+
+        const bool btc_single_csv_exists =
+            std::filesystem::exists(
+                btc_single_csv_path);
+
+        std::ofstream btc_single_csv(
+            btc_single_csv_path,
+            std::ios::app);
+
+        if (btc_single_csv.is_open())
+        {
+            btc_single_csv
+                << std::fixed
+                << std::setprecision(9);
+
+            if (!btc_single_csv_exists)
+            {
+                btc_single_csv
+                    << "sample_id,"
+                    << "mapping_keyframe_id,"
+                    << "timestamp,"
+                    << "btc_points,"
+                    << "cloud_valid,"
+                    << "newly_processed,"
+                    << "has_candidate,"
+                    << "historical_keyframe_id"
+                    << '\n';
+            }
+
+            btc_single_csv
+                << current_loop_sample.sample_id << ','
+                << current_keyframe.id << ','
+                << current_keyframe.timestamp << ','
+                << btc_single_points << ','
+                << (btc_single_cloud_valid ? 1 : 0) << ','
+                << (btc_single_newly_processed ? 1 : 0) << ','
+                << (btc_single_has_candidate ? 1 : 0) << ',';
+
+            if (btc_single_has_candidate)
+            {
+                btc_single_csv
+                    << btc_single_historical_keyframe_id;
+            }
+            else
+            {
+                btc_single_csv
+                    << -1;
+            }
+
+            btc_single_csv << '\n';
+        }
+    }
+    catch (const std::exception &)
+    {
+        // Shadow diagnostics MUST NEVER affect SLAM.
+    }
+
     const std::chrono::steady_clock::time_point btc_start =
         std::chrono::steady_clock::now();
 
-    const std::size_t query_last_kf = current_keyframe.id;
-    const std::size_t query_first_kf =
-        (query_last_kf + 1 > btc_window_size)
-            ? query_last_kf + 1 - btc_window_size
-            : 0;
+    // ====================================================================
+    // Build the query from the trailing Loop Retrieval Samples.
+    //
+    // sample_id remains contiguous.
+    // mapping_keyframe_id does NOT need to be contiguous.
+    // ====================================================================
+    const std::size_t query_last_sample_index =
+        loop_retrieval_samples.size() - 1;
+
     const std::size_t query_requested_keyframes =
-        query_last_kf - query_first_kf + 1;
+        std::min(
+            btc_window_size,
+            loop_retrieval_samples.size());
+
+    const std::size_t query_first_sample_index =
+        loop_retrieval_samples.size() -
+        query_requested_keyframes;
+
+    const std::size_t query_anchor_sample_index =
+        query_first_sample_index +
+        query_requested_keyframes / 2;
+
+    const std::size_t query_first_kf =
+        loop_retrieval_samples[
+            query_first_sample_index]
+            .mapping_keyframe_id;
+
+    const std::size_t query_last_kf =
+        loop_retrieval_samples[
+            query_last_sample_index]
+            .mapping_keyframe_id;
+
     const std::size_t query_anchor_kf =
-        query_first_kf + query_requested_keyframes / 2;
+        loop_retrieval_samples[
+            query_anchor_sample_index]
+            .mapping_keyframe_id;
 
     const bool query_is_full_window =
         query_requested_keyframes == btc_window_size;
 
     const bool query_will_enter_database =
         query_is_full_window &&
-        query_last_kf >= btc_window_size - 1 &&
-        ((query_last_kf - (btc_window_size - 1)) %
+        query_last_sample_index >= btc_window_size - 1 &&
+        ((query_last_sample_index -
+              (btc_window_size - 1)) %
              btc_window_stride ==
          0);
 
@@ -1550,10 +2239,16 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
         if (query_anchor != nullptr &&
             query_anchor->T_WL.matrix().allFinite())
         {
-            for (std::size_t keyframe_id = query_first_kf;
-                 keyframe_id <= query_last_kf;
-                 ++keyframe_id)
+            for (std::size_t query_sample_index =
+                     query_first_sample_index;
+                 query_sample_index <=
+                     query_last_sample_index;
+                 ++query_sample_index)
             {
+                const std::size_t keyframe_id =
+                    loop_retrieval_samples[
+                        query_sample_index]
+                        .mapping_keyframe_id;
                 const Keyframe *keyframe =
                     FindBackendKeyframeById(keyframe_id);
 
@@ -1594,10 +2289,16 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
 
             std::size_t btc_accumulated_keyframes = 0;
 
-            for (std::size_t keyframe_id = query_first_kf;
-                 keyframe_id <= query_last_kf;
-                 ++keyframe_id)
+            for (std::size_t query_sample_index =
+                     query_first_sample_index;
+                 query_sample_index <=
+                     query_last_sample_index;
+                 ++query_sample_index)
             {
+                const std::size_t keyframe_id =
+                    loop_retrieval_samples[
+                        query_sample_index]
+                        .mapping_keyframe_id;
                 const Keyframe *keyframe =
                     FindBackendKeyframeById(keyframe_id);
 
@@ -1658,6 +2359,300 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
 
             if (!btc_cloud_C->empty())
             {
+
+                // ========================================================
+                // SC-WINDOW SHADOW RETRIEVAL
+                //
+                // btc_cloud_C is EXACTLY the same accumulated query cloud
+                // that is passed into BTC below.
+                //
+                // IMPORTANT ORDER:
+                //
+                //     1. Query historical SC database.
+                //     2. Record diagnostics.
+                //     3. If this is a BTC database-stride window,
+                //        insert it into the SC database.
+                //
+                // Query-before-insert prevents self matching.
+                // ========================================================
+                ScanContextWindowDiagnostics
+                    sc_window_diagnostics;
+
+                const std::vector<ScanContextWindowCandidate>
+                    sc_window_candidates =
+                        sc_window_shadow->QueryWindow(
+                            query_first_kf,
+                            query_last_kf,
+                            query_anchor_kf,
+                            query_anchor->timestamp,
+                            query_anchor->T_WL,
+                            btc_cloud_C,
+                            &sc_window_diagnostics);
+
+
+                // ========================================================
+                // SC-WINDOW CSV
+                // ========================================================
+                try
+                {
+                    const std::filesystem::path
+                        sc_output_directory =
+                            FrontendLoopDirectory();
+
+                    std::filesystem::create_directories(
+                        sc_output_directory);
+
+                    const std::filesystem::path
+                        sc_csv_path =
+                            sc_output_directory /
+                            "scan_context_window_shadow.csv";
+
+                    const bool sc_csv_exists =
+                        std::filesystem::exists(
+                            sc_csv_path);
+
+                    std::ofstream sc_csv(
+                        sc_csv_path,
+                        std::ios::app);
+
+                    if (sc_csv.is_open())
+                    {
+                        if (!sc_csv_exists)
+                        {
+                            sc_csv
+                                << "query_first_kf,"
+                                << "query_last_kf,"
+                                << "query_anchor_kf,"
+                                << "query_points,"
+                                << "database_entries,"
+                                << "eligible_entries,"
+                                << "valid_matches,"
+                                << "accepted_candidates,"
+                                << "best_raw_hist_first_kf,"
+                                << "best_raw_hist_last_kf,"
+                                << "best_raw_hist_anchor_kf,"
+                                << "best_raw_distance,"
+                                << "best_raw_similarity,"
+                                << "best_raw_yaw_deg,"
+                                << "accepted_hist_first_kf,"
+                                << "accepted_hist_last_kf,"
+                                << "accepted_hist_anchor_kf,"
+                                << "accepted_distance,"
+                                << "accepted_similarity,"
+                                << "accepted_yaw_deg"
+                                << '\n';
+                        }
+
+                        sc_csv
+                            << query_first_kf << ','
+                            << query_last_kf << ','
+                            << query_anchor_kf << ','
+                            << btc_cloud_C->size() << ','
+                            << sc_window_diagnostics.database_entries << ','
+                            << sc_window_diagnostics.separation_eligible << ','
+                            << sc_window_diagnostics.valid_matches << ','
+                            << sc_window_diagnostics.accepted_candidates << ',';
+
+
+                        // ----------------------------------------------
+                        // Best RAW SC match.
+                        //
+                        // This is recorded even when SC distance > 0.40.
+                        // ----------------------------------------------
+                        if (sc_window_diagnostics.has_best_match)
+                        {
+                            const ScanContextWindowCandidate &
+                                best_raw =
+                                    sc_window_diagnostics.best_match;
+
+                            sc_csv
+                                << best_raw.historical_first_kf << ','
+                                << best_raw.historical_last_kf << ','
+                                << best_raw.historical_anchor_kf << ','
+                                << best_raw.scan_context_distance << ','
+                                << best_raw.scan_context_similarity << ','
+                                << best_raw.yaw_shift_deg << ',';
+                        }
+                        else
+                        {
+                            sc_csv
+                                << ",,,,,,";
+                        }
+
+
+                        // ----------------------------------------------
+                        // Best ACCEPTED SC match.
+                        //
+                        // Already passed:
+                        //
+                        //     SC distance <= 0.40
+                        // ----------------------------------------------
+                        if (!sc_window_candidates.empty())
+                        {
+                            const ScanContextWindowCandidate &
+                                best =
+                                    sc_window_candidates.front();
+
+                            sc_csv
+                                << best.historical_first_kf << ','
+                                << best.historical_last_kf << ','
+                                << best.historical_anchor_kf << ','
+                                << best.scan_context_distance << ','
+                                << best.scan_context_similarity << ','
+                                << best.yaw_shift_deg;
+                        }
+                        else
+                        {
+                            sc_csv
+                                << ",,,,,";
+                        }
+
+                        sc_csv << '\n';
+                    }
+                }
+                catch (const std::exception &)
+                {
+                    // Shadow diagnostics MUST NEVER affect SLAM.
+                }
+
+
+                // ========================================================
+
+                // ========================================================
+                // SC-WINDOW TOP-K LONG-FORM CSV
+                //
+                // One row = one accepted Scan Context candidate.
+                //
+                // This file is designed for:
+                //
+                //     Recall@1
+                //     Recall@5
+                //     Recall@10
+                //
+                // and retrieval-ranking diagnostics.
+                //
+                // IMPORTANT:
+                //     This remains SHADOW ONLY.
+                //     It never creates loop edges.
+                // ========================================================
+                try
+                {
+                    const std::filesystem::path
+                        sc_topk_output_directory =
+                            FrontendLoopDirectory();
+
+                    std::filesystem::create_directories(
+                        sc_topk_output_directory);
+
+                    const std::filesystem::path
+                        sc_topk_csv_path =
+                            sc_topk_output_directory /
+                            "scan_context_window_topk.csv";
+
+                    const bool sc_topk_csv_exists =
+                        std::filesystem::exists(
+                            sc_topk_csv_path);
+
+                    std::ofstream sc_topk_csv(
+                        sc_topk_csv_path,
+                        std::ios::app);
+
+                    if (sc_topk_csv.is_open())
+                    {
+                        if (!sc_topk_csv_exists)
+                        {
+                            sc_topk_csv
+                                << "query_first_kf,"
+                                << "query_last_kf,"
+                                << "query_anchor_kf,"
+                                << "query_points,"
+                                << "database_entries,"
+                                << "rank,"
+                                << "historical_first_kf,"
+                                << "historical_last_kf,"
+                                << "historical_anchor_kf,"
+                                << "sc_distance,"
+                                << "sc_similarity,"
+                                << "raw_cosine_similarity,"
+                                << "sector_coverage_ratio,"
+                                << "cell_coverage_ratio,"
+                                << "compared_sectors,"
+                                << "yaw_shift_deg,"
+                                << "time_separation_sec,"
+                                << "anchor_pose_distance"
+                                << '\n';
+                        }
+
+                        for (std::size_t rank_index = 0;
+                             rank_index <
+                                 sc_window_candidates.size();
+                             ++rank_index)
+                        {
+                            const ScanContextWindowCandidate &
+                                candidate =
+                                    sc_window_candidates[
+                                        rank_index];
+
+                            sc_topk_csv
+                                << query_first_kf << ','
+                                << query_last_kf << ','
+                                << query_anchor_kf << ','
+                                << btc_cloud_C->size() << ','
+                                << sc_window_diagnostics.database_entries << ','
+                                << (rank_index + 1) << ','
+                                << candidate.historical_first_kf << ','
+                                << candidate.historical_last_kf << ','
+                                << candidate.historical_anchor_kf << ','
+                                << candidate.scan_context_distance << ','
+                                << candidate.scan_context_similarity << ','
+                                << candidate.raw_cosine_similarity << ','
+                                << candidate.sector_coverage_ratio << ','
+                                << candidate.cell_coverage_ratio << ','
+                                << candidate.compared_sectors << ','
+                                << candidate.yaw_shift_deg << ','
+                                << candidate.time_separation_sec << ','
+                                << candidate.anchor_pose_distance
+                                << '\n';
+                        }
+                    }
+                }
+                catch (const std::exception &)
+                {
+                    // Shadow diagnostics MUST NEVER affect SLAM.
+                }
+
+                // BTC-STYLE SC DATABASE POLICY
+                //
+                // For window_size=7, stride=4:
+                //
+                //     [0..6]
+                //     [4..10]
+                //     [8..14]
+                //     ...
+                //
+                // Query has already happened above.
+                // We can now safely insert the current database window.
+                // ========================================================
+                if (query_will_enter_database &&
+                    !sc_window_shadow->HasDatabaseWindow(
+                        query_last_kf))
+                {
+                    sc_window_shadow->AddDatabaseWindow(
+                        query_first_kf,
+                        query_last_kf,
+                        query_anchor_kf,
+                        query_anchor->timestamp,
+                        query_anchor->T_WL,
+                        btc_cloud_C);
+                }
+
+
+                // ========================================================
+                // ORIGINAL BTC PIPELINE CONTINUES BELOW.
+                //
+                // Nothing in BTC / geometry / consistency / PGO is changed.
+                // ========================================================
+
                 const fr_slam_btc::OfficialBtcSubmapResult btc_result =
                     official_btc_adapter.ProcessSubmap(
                         query_last_kf,
@@ -1677,15 +2672,59 @@ void RegistrationScan2LocalMap::DetectAndVerifyLoopFromKeyframe(
                         historical_last_kf =
                             btc_result.historical_submap_id;
 
-                        if (historical_last_kf + 1 >= btc_window_size)
+                        bool historical_sample_found =
+                            false;
+
+                        std::size_t
+                            historical_last_sample_index = 0;
+
+                        for (std::size_t sample_index = 0;
+                             sample_index <
+                                 loop_retrieval_samples.size();
+                             ++sample_index)
                         {
+                            if (loop_retrieval_samples[
+                                    sample_index]
+                                    .mapping_keyframe_id ==
+                                historical_last_kf)
+                            {
+                                historical_last_sample_index =
+                                    sample_index;
+
+                                historical_sample_found =
+                                    true;
+
+                                break;
+                            }
+                        }
+
+                        if (historical_sample_found &&
+                            historical_last_sample_index + 1 >=
+                                btc_window_size)
+                        {
+                            const std::size_t
+                                historical_first_sample_index =
+                                    historical_last_sample_index +
+                                    1 -
+                                    btc_window_size;
+
+                            const std::size_t
+                                historical_anchor_sample_index =
+                                    historical_first_sample_index +
+                                    btc_window_size / 2;
+
                             historical_first_kf =
-                                historical_last_kf + 1 - btc_window_size;
+                                loop_retrieval_samples[
+                                    historical_first_sample_index]
+                                    .mapping_keyframe_id;
+
+                            historical_anchor_kf =
+                                loop_retrieval_samples[
+                                    historical_anchor_sample_index]
+                                    .mapping_keyframe_id;
+
                             historical_keyframe_count =
                                 btc_window_size;
-                            historical_anchor_kf =
-                                historical_first_kf +
-                                btc_window_size / 2;
 
                             historical_keyframe =
                                 FindBackendKeyframeById(

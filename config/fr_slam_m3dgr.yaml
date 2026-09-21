@@ -1,17 +1,14 @@
-fr_slam:
+/**:
   ros__parameters:
-    imu_qos_reliable: true
-    lidar_qos_reliable: true
-
     # Joint Ground observation noise
     ground_height_sigma_m: 0.01
     ground_normal_sigma_deg: 2.0
     # ============================================================
     # Livox Mid-360 + 内置 IMU / Livox Mid-360 + internal IMU
     # ============================================================
-    lidar_type: "mid360s"
-    lidar_topic: "/livox/lidar"
-    imu_topic: "/livox/imu"
+    lidar_type: "livox_custom"
+    lidar_topic: "/livox/mid360/lidar"
+    imu_topic: "/livox/mid360/imu"
 
     # ============================================================
     # 坐标系 / Frames
@@ -24,7 +21,6 @@ fr_slam:
     # ============================================================
     max_lidar_queue_size: 20
     imu_qos_depth: 1000
-    lidar_qos_depth: 200
     imu_initialization_sample_count: 200
     imu_history_duration: 0.5
 
@@ -92,7 +88,8 @@ fr_slam:
     ground_support_constraint_minimum_cells: 30
     ground_support_constraint_minimum_center_cells: 3
     ground_support_constraint_minimum_inlier_ratio: 0.90
-    ground_support_constraint_maximum_rmse_m: 0.030
+    ground_support_constraint_maximum_rmse_m: 0.050
+    ground_clearance_bootstrap_maximum_rmse_m: 0.050
     ground_support_constraint_minimum_score: 8.5
     ground_support_constraint_enter_confidence: 0.62
     ground_support_constraint_keep_confidence: 0.62
@@ -112,12 +109,12 @@ fr_slam:
     # 回环一致性 / 回环边稀疏化 / Loop closure consistency / edge sparsification
     # ============================================================
     # Phase-1 迁移：这些参数值特意保持原先 C++ 默认值不变。 / Phase-1 migration: values intentionally preserve the old C++ defaults.
-    loop_use_temporal_consistency: true
+    loop_use_temporal_consistency: false
     loop_temporal_max_current_gap: 12
     loop_temporal_max_historical_gap: 15
     loop_temporal_min_consistent_proposals: 2
 
-    loop_use_cycle_consistency: true
+    loop_use_cycle_consistency: false
     loop_max_cycle_translation_error_m: 2.0
     loop_max_cycle_rotation_error_deg: 10.0
     loop_consistency_max_history_size: 20
@@ -151,10 +148,10 @@ fr_slam:
     preprocessor_range_max: 60.0
 
     preprocessor_enable_passthrough: true
-    preprocessor_roi_min_x: -30.0
-    preprocessor_roi_max_x: 30.0
-    preprocessor_roi_min_y: -15.0
-    preprocessor_roi_max_y: 15.0
+    preprocessor_roi_min_x: -60.0
+    preprocessor_roi_max_x: 60.0
+    preprocessor_roi_min_y: -40.0
+    preprocessor_roi_max_y: 40.0
     preprocessor_roi_min_z: -2.0
     preprocessor_roi_max_z: 10.0
 
@@ -200,8 +197,8 @@ fr_slam:
     imu_extrinsic_q_il_z: 0.0
     imu_extrinsic_q_il_w: 1.0
 
-    imu_extrinsic_p_il_x: -0.01133142
-    imu_extrinsic_p_il_y: -0.02396263
-    imu_extrinsic_p_il_z: 0.04367367
+    imu_extrinsic_p_il_x: -0.011
+    imu_extrinsic_p_il_y: -0.02329
+    imu_extrinsic_p_il_z: 0.04412
     # fr_slam_livox.yaml
     imu_acceleration_scale: 9.80665

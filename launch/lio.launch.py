@@ -12,7 +12,7 @@ import os
 import yaml
 
 
-SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022', 'velodyne')
+SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022', 'velodyne', 'm3dgr', 'hortimulti')
 SUPPORTED_PROFILES = ('outdoor', 'indoor')
 
 
@@ -274,6 +274,7 @@ def _launch_setup(context):
         'hesai': 'fr_slam_hesai.yaml',
         'hilti2022': 'fr_slam_hilti2022.yaml',
         'velodyne': 'velodyne.yaml',
+        'm3dgr': 'fr_slam_m3dgr.yaml',
     }[sensor]
 
     source_slam_config_path = (
@@ -355,7 +356,7 @@ def _launch_setup(context):
     # Keep the original FR-SLAM offline calibration workflow for
     # Livox / Hesai profiles, but do not override the official Hilti
     # calibration.
-    if sensor == 'hilti2022':
+    if sensor in ('hilti2022', 'm3dgr'):
         calibration_file = None
         q_il = None
     else:
@@ -415,8 +416,8 @@ def _launch_setup(context):
     # For normal Livox / Hesai operation, use the solved offline
     # rotation calibration exactly as before.
     #
-    # For Hilti 2022, leave q_IL untouched here so the complete
-    # calibrated R_IL / P_IL comes directly from the sensor YAML.
+    # For sensors with fixed dataset/calibrated extrinsics, leave q_IL
+    # untouched so the complete R_IL / P_IL comes from the sensor YAML.
     if q_il is not None:
         parameter_overrides['imu_extrinsic_q_il_x'] = q_il[0]
         parameter_overrides['imu_extrinsic_q_il_y'] = q_il[1]
@@ -544,7 +545,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'sensor',
             default_value='livox',
-            description='Sensor profile: livox, hesai, hilti2022, or velodyne'
+            description='Sensor profile: livox, hesai, hilti2022, velodyne, or m3dgr'
         ),
         DeclareLaunchArgument(
             'profile',

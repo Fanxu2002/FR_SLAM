@@ -128,6 +128,18 @@ struct IeskfLidarUpdateResult
     double position_information_y = 0.0;
     double position_information_z = 0.0;
     double position_information_z_ratio = 0.0;
+
+    // FR_LIO_ODOM_INFORMATION_V2
+    // Dynamic full 6x6 odometry-edge information for the keyframe PoseGraph.
+    // Ordering follows g2o::EdgeSE3: [tx, ty, tz, rx, ry, rz].
+    //
+    // This is derived from the FINAL actual LiDAR/Ground/Wall measurement
+    // information after structural ownership projection. Persistent ownership
+    // itself is not added as a measurement.
+    bool pose_graph_information_valid = false;
+
+    Eigen::Matrix<double, 6, 6> pose_graph_information =
+        Eigen::Matrix<double, 6, 6>::Identity();
 };
 class Ieskf
 {

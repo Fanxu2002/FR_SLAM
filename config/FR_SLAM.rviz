@@ -42,27 +42,27 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
-    - Alpha: 1
+    - Alpha: 0.10000000149011612
       Cell Size: 1
       Class: rviz_default_plugins/Grid
-      Color: 165; 29; 45
+      Color: 255; 255; 255
       Enabled: true
       Line Style:
         Line Width: 0.029999999329447746
         Value: Billboards
       Name: Grid
-      Normal Cell Count: 18
+      Normal Cell Count: 0
       Offset:
         X: 0
         Y: 0
-        Z: 0
+        Z: 0.10000000149011612
       Plane: XY
-      Plane Cell Count: 1
+      Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
     - Class: rviz_common/Group
       Displays:
-        - Alpha: 0.800000011920929
+        - Alpha: 1
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
             Max Value: 9.987906455993652
@@ -83,7 +83,7 @@ Visualization Manager:
           Name: Local Map
           Position Transformer: XYZ
           Selectable: true
-          Size (Pixels): 2
+          Size (Pixels): 3
           Size (m): 0.009999999776482582
           Style: Points
           Topic:
@@ -141,7 +141,7 @@ Visualization Manager:
               Scale: 1
               Value: true
             Value: true
-          Enabled: false
+          Enabled: true
           Keep: 100
           Name: Lidar Odometry
           Position Tolerance: 0.10000000149011612
@@ -162,7 +162,7 @@ Visualization Manager:
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /corrected_odometry
-          Value: false
+          Value: true
         - Class: rviz_default_plugins/MarkerArray
           Enabled: true
           Name: MarkerArray
@@ -300,8 +300,8 @@ Visualization Manager:
         - Alpha: 0.800000011920929
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
-            Max Value: 10.956270217895508
-            Min Value: -0.3032349646091461
+            Max Value: 10.348812103271484
+            Min Value: -0.3289726674556732
             Value: true
           Axis: Z
           Channel Name: intensity
@@ -553,25 +553,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/XYOrbit
-      Distance: 74.05355072021484
+      Distance: 26.20393180847168
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 7.1793365478515625
-        Y: -5.379161357879639
-        Z: -1.4693177945446223e-05
+        X: 0.4339817762374878
+        Y: 2.3188116550445557
+        Z: -4.057783735333942e-05
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.439796805381775
+      Pitch: 0.874798059463501
       Target Frame: ""
       Value: XYOrbit (rviz_default_plugins)
-      Yaw: 3.245408773422241
+      Yaw: 3.2954370975494385
     Saved: ~
 Window Geometry:
   Displays:

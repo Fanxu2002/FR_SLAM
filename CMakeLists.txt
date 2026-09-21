@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(Threads REQUIRED)
@@ -213,6 +214,9 @@ set(FR_SLAM_MAPPING_SOURCES
 # --------------------------------------------------------------------------
 set(FR_SLAM_LOOP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_detector.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/scan_context.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/scan_context_shadow.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/scan_context_window_shadow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_verifier.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_consistency.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/btc_adapter.cpp
@@ -329,6 +333,8 @@ target_sources(
 
     ${CMAKE_CURRENT_SOURCE_DIR}/app/lio.cpp
 
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sensor/livox_custom_adapter.cpp
+
     ${FR_SLAM_SENSOR_SOURCES}
     ${FR_SLAM_IMU_SOURCES}
     ${FR_SLAM_LIDAR_SOURCES}
@@ -361,6 +367,7 @@ ament_target_dependencies(
     lio
     rclcpp
     sensor_msgs
+    livox_ros_driver2
     std_srvs
     pcl_conversions
     nav_msgs

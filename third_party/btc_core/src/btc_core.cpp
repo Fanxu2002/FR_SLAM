@@ -798,6 +798,18 @@ void BtcDescManager::SearchLoop(
 
   if (print_debug_info_)
   {
+    const int diag_current_frame =
+        btcs_vec.front().frame_number_;
+
+    if (diag_current_frame >= 500)
+    {
+      std::cout
+          << "BTC_FULL_RETRIEVAL"
+          << " | current=" << diag_current_frame
+          << " | descriptors=" << btcs_vec.size()
+          << " | rough_candidates=" << candidate_matcher_vec.size()
+          << std::endl;
+    }
   }
 
   auto t2 = std::chrono::high_resolution_clock::now();
@@ -807,6 +819,27 @@ void BtcDescManager::SearchLoop(
   int triggle_candidate = -1;
   std::pair<Eigen::Vector3d, Eigen::Matrix3d> best_transform;
   std::vector<std::pair<BTC, BTC>> best_sucess_match_vec;
+
+  // ============================================================
+  // BTC TOP-K diagnostic only.
+  //
+  // IMPORTANT:
+  //   This does NOT change retrieval, verification, ranking,
+  //   thresholds, or the returned loop candidate.
+  //   It only records candidate_verify() results so we can inspect
+  //   why a particular historical frame wins.
+  // ============================================================
+  struct BtcVerifyRankDiagnostic
+  {
+    int historical_internal_frame = -1;
+    std::size_t rough_matches = 0;
+    double verify_score = -1.0;
+    std::size_t successful_triangle_pairs = 0;
+  };
+
+  std::vector<BtcVerifyRankDiagnostic> verify_rank_diagnostics;
+  verify_rank_diagnostics.reserve(candidate_matcher_vec.size());
+
   for (size_t i = 0; i < candidate_matcher_vec.size(); i++)
   {
     double verify_score = -1;
@@ -814,8 +847,38 @@ void BtcDescManager::SearchLoop(
     std::vector<std::pair<BTC, BTC>> sucess_match_vec;
     candidate_verify(candidate_matcher_vec[i], verify_score, relative_pose,
                      sucess_match_vec);
+
+    BtcVerifyRankDiagnostic diag;
+    diag.historical_internal_frame =
+        candidate_matcher_vec[i].match_id_.second;
+    diag.rough_matches =
+        candidate_matcher_vec[i].match_list_.size();
+    diag.verify_score =
+        verify_score;
+    diag.successful_triangle_pairs =
+        sucess_match_vec.size();
+
+    verify_rank_diagnostics.push_back(diag);
+
     if (print_debug_info_)
     {
+      const int diag_current_frame =
+          btcs_vec.front().frame_number_;
+
+      if (diag_current_frame >= 500)
+      {
+        std::cout
+            << "BTC_VERIFY_V288_RESULT"
+            << " | current=" << diag_current_frame
+            << " | historical="
+            << candidate_matcher_vec[i].match_id_.second
+            << " | rough_matches="
+            << candidate_matcher_vec[i].match_list_.size()
+            << " | verify_score=" << verify_score
+            << " | successful_triangle_pairs="
+            << sucess_match_vec.size()
+            << std::endl;
+      }
     }
 
     if (verify_score > best_score)
@@ -827,6 +890,53 @@ void BtcDescManager::SearchLoop(
       triggle_candidate = i;
     }
   }
+  // ------------------------------------------------------------
+  // Diagnostic ranking.
+  //
+  // Restrict output to the late-return section so normal logs do
+  // not explode.  M3DGR KF618 is around internal frame ~614.
+  // ------------------------------------------------------------
+  const int diagnostic_query_frame =
+      btcs_vec.front().frame_number_;
+
+  if (diagnostic_query_frame >= 580)
+  {
+    std::sort(
+        verify_rank_diagnostics.begin(),
+        verify_rank_diagnostics.end(),
+        [](const BtcVerifyRankDiagnostic &lhs,
+           const BtcVerifyRankDiagnostic &rhs)
+        {
+          return lhs.verify_score > rhs.verify_score;
+        });
+
+    const std::size_t top_k =
+        std::min<std::size_t>(
+            5,
+            verify_rank_diagnostics.size());
+
+    for (std::size_t rank = 0; rank < top_k; ++rank)
+    {
+      const auto &diag =
+          verify_rank_diagnostics[rank];
+
+      std::cout
+          << "BTC_VERIFY_TOPK"
+          << " | query_internal_frame="
+          << diagnostic_query_frame
+          << " | rank=" << (rank + 1)
+          << " | historical_internal_frame="
+          << diag.historical_internal_frame
+          << " | rough_matches="
+          << diag.rough_matches
+          << " | verify_score="
+          << diag.verify_score
+          << " | successful_triangle_pairs="
+          << diag.successful_triangle_pairs
+          << std::endl;
+    }
+  }
+
   auto t3 = std::chrono::high_resolution_clock::now();
 
   //           << " ms, candidate verify: " << time_inc(t3, t2) << "ms"
@@ -837,6 +947,21 @@ void BtcDescManager::SearchLoop(
 
   if (print_debug_info_)
   {
+    if (diagnostic_query_frame >= 500)
+    {
+      std::cout
+          << "BTC_FULL_FINAL"
+          << " | current=" << diagnostic_query_frame
+          << " | best_historical=" << best_candidate_id
+          << " | best_score=" << best_score
+          << " | icp_threshold="
+          << config_setting_.icp_threshold_
+          << " | successful_triangle_pairs="
+          << best_sucess_match_vec.size()
+          << " | accepted="
+          << (best_score > config_setting_.icp_threshold_ ? 1 : 0)
+          << std::endl;
+    }
   }
 
   if (best_score > config_setting_.icp_threshold_)
@@ -2937,7 +3062,7 @@ void BtcDescManager::candidate_selector(
   // use index recorder
 
   // -----------------------------------------------------------------------
-  constexpr bool kEnableBtcV284MatchStageDiagnostics = false;
+  constexpr bool kEnableBtcV284MatchStageDiagnostics = true;
   if (kEnableBtcV284MatchStageDiagnostics && print_debug_info_)
   {
   // FR-SLAM V28.4 match-stage diagnostic only.
@@ -3127,6 +3252,51 @@ void BtcDescManager::candidate_selector(
         ++diag_similarity_history_count;
       }
 
+      if (current_frame_id >= 500 &&
+          diag_frame <= 20)
+      {
+        std::cout
+            << "BTC_MATCH_STAGE"
+            << " | current=" << current_frame_id
+            << " | historical=" << diag_frame
+            << " | bucket_hits="
+            << diag_bucket_hits[diag_frame]
+            << " | rough_pass="
+            << diag_rough_pass[diag_frame]
+            << " | similarity_pass="
+            << diag_similarity_pass[diag_frame]
+            << " | best_rel_dis="
+            << diag_best_rel_dis[diag_frame]
+            << " | best_similarity="
+            << diag_best_similarity[diag_frame]
+            << " | official_votes="
+            << match_array[diag_frame]
+            << std::endl;
+      }
+    }
+
+    if (current_frame_id >= 500)
+    {
+      std::cout
+          << "BTC_MATCH_STAGE_SUMMARY"
+          << " | current=" << current_frame_id
+          << " | query_descriptors="
+          << current_STD_list.size()
+          << " | bucket_histories="
+          << diag_bucket_history_count
+          << " | rough_histories="
+          << diag_rough_history_count
+          << " | similarity_histories="
+          << diag_similarity_history_count
+          << " | bucket_hits_before_time_gate="
+          << diag_bucket_hits_before_time_gate
+          << " | skip_near_rejects="
+          << diag_skip_near_rejects
+          << " | rough_threshold="
+          << config_setting_.rough_dis_threshold_
+          << " | similarity_threshold="
+          << config_setting_.similarity_threshold_
+          << std::endl;
     }
 
   }
@@ -3183,10 +3353,26 @@ void BtcDescManager::candidate_selector(
 
       printed_any_vote = true;
 
+      if (current_frame_id >= 500)
+      {
+        std::cout
+            << "BTC_ROUGH_VOTE"
+            << " | current=" << current_frame_id
+            << " | rank=" << (rank + 1)
+            << " | historical=" << debug_frame[rank]
+            << " | votes=" << debug_vote[rank]
+            << std::endl;
+      }
     }
 
-    if (!printed_any_vote)
+    if (!printed_any_vote &&
+        current_frame_id >= 500)
     {
+      std::cout
+          << "BTC_ROUGH_VOTE"
+          << " | current=" << current_frame_id
+          << " | rank=NONE"
+          << std::endl;
     }
   }
   // =====================================================================
@@ -3400,6 +3586,17 @@ void BtcDescManager::candidate_selector(
     if (selected_by_pending_rescue &&
         max_vote < 4.0)
     {
+      if (print_debug_info_ &&
+          current_frame_id >= 500)
+      {
+        std::cout
+            << "BTC_ROUGH_VOTE"
+            << " | current=" << current_frame_id
+            << " | historical=" << max_vote_index
+            << " | votes=" << max_vote
+            << " | selected_by_pending_rescue=1"
+            << std::endl;
+      }
     }
 
     candidate_matcher_vec.push_back(
@@ -3457,6 +3654,18 @@ void BtcDescManager::candidate_verify(
 
   if (print_debug_info_)
   {
+    if (current_frame >= 500)
+    {
+      std::cout
+          << "BTC_VERIFY_V288_BEGIN"
+          << " | current=" << current_frame
+          << " | historical=" << historical_frame
+          << " | rough_pairs="
+          << candidate_matcher.match_list_.size()
+          << " | skip_len=" << skip_len
+          << " | hypothesis_count=" << use_size
+          << std::endl;
+    }
   }
 
   std::mutex mylock;
@@ -3689,6 +3898,19 @@ void BtcDescManager::candidate_verify(
 
   if (print_debug_info_)
   {
+    if (current_frame >= 500)
+    {
+      std::cout
+          << "BTC_VERIFY_V288_VOTE"
+          << " | current=" << current_frame
+          << " | historical=" << historical_frame
+          << " | raw_max_vote=" << raw_max_vote
+          << " | selected_max_vote=" << max_vote
+          << " | near_tie_count=" << near_tie_count
+          << " | selected_residual_mean="
+          << selected_residual_mean
+          << std::endl;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -4005,6 +4227,19 @@ void BtcDescManager::candidate_verify(
 
     if (print_debug_info_)
     {
+      if (current_frame >= 500)
+      {
+        std::cout
+            << "BTC_VERIFY_V288_FINAL"
+            << " | current=" << current_frame
+            << " | historical=" << historical_frame
+            << " | max_vote=" << max_vote
+            << " | successful_triangle_pairs="
+            << sucess_match_list.size()
+            << " | plane_score=" << verify_score
+            << " | consensus_gate=PASS"
+            << std::endl;
+      }
     }
   }
   else
@@ -4013,6 +4248,18 @@ void BtcDescManager::candidate_verify(
 
     if (print_debug_info_)
     {
+      if (current_frame >= 500)
+      {
+        std::cout
+            << "BTC_VERIFY_V288_FINAL"
+            << " | current=" << current_frame
+            << " | historical=" << historical_frame
+            << " | max_vote=" << max_vote
+            << " | successful_triangle_pairs=0"
+            << " | plane_score=-1"
+            << " | consensus_gate=REJECT"
+            << std::endl;
+      }
     }
   }
 

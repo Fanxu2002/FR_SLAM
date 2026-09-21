@@ -14,6 +14,7 @@
 #include "fr_slam/sensor/lidar_adapter.hpp"
 #include "fr_slam/sensor/mid360s_adapter.hpp"
 #include "fr_slam/sensor/hesai_adapter.hpp"
+#include "fr_slam/sensor/livox_custom_adapter.hpp"
 #include "fr_slam/sensor/velodyne_adapter.hpp"
 #include "fr_slam/sensor/imu_adapter.hpp"
 
@@ -41,6 +42,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 
 #include <Eigen/Core>
+#include <Eigen/Eigenvalues>
 #include <Eigen/Geometry>
 
 #include <algorithm>
@@ -88,6 +90,55 @@ private:
     };
 
     // ============================================================
+    // FR_SYNC V2 THREE-LAYER DIAGNOSTICS
+    //
+    // Timestamp + ordinal fingerprint.
+    // Diagnostic only. No estimator state is modified.
+    // ============================================================
+    static std::uint64_t FrSyncMix64(
+        std::uint64_t value)
+    {
+        value +=
+            0x9e3779b97f4a7c15ULL;
+
+        value =
+            (value ^ (value >> 30)) *
+            0xbf58476d1ce4e5b9ULL;
+
+        value =
+            (value ^ (value >> 27)) *
+            0x94d049bb133111ebULL;
+
+        return
+            value ^ (value >> 31);
+    }
+
+    static std::uint64_t FrSyncStampNs(
+        const builtin_interfaces::msg::Time &stamp)
+    {
+        const std::int64_t sec =
+            static_cast<std::int64_t>(
+                stamp.sec);
+
+        const std::int64_t nanosec =
+            static_cast<std::int64_t>(
+                stamp.nanosec);
+
+        return static_cast<std::uint64_t>(
+            sec * 1000000000LL +
+            nanosec);
+    }
+
+    static std::uint64_t FrSyncContribution(
+        const builtin_interfaces::msg::Time &stamp,
+        std::uint64_t ordinal)
+    {
+        return FrSyncMix64(
+            FrSyncStampNs(stamp) ^
+            FrSyncMix64(ordinal));
+    }
+
+    // ============================================================
     // Result of building IMU trajectory for one LiDAR frame.
     // ============================================================
     enum class ImuBuildStatus
@@ -130,6 +181,10 @@ private:
     rclcpp::Subscription<
         sensor_msgs::msg::PointCloud2>::SharedPtr
         lidar_sub_;
+
+    rclcpp::Subscription<
+        livox_ros_driver2::msg::CustomMsg>::SharedPtr
+        livox_custom_sub_;
 
     // ============================================================
     // ROS publishers
@@ -296,6 +351,9 @@ private:
 
     Velodyne_Adapter
         velodyne_adapter_;
+
+    LivoxCustomAdapter
+        livox_custom_adapter_;
 
     Lidar_Adapt *
         lidar_adapter_ =
@@ -492,6 +550,42 @@ private:
     std::atomic<std::size_t>
         processed_lidar_frames_{
             0};
+
+    // ============================================================
+    // FR_SYNC V2 counters.
+    //
+    // callback_total:
+    //   all subscription callback entries.
+    //
+    // callback_preinit:
+    //   callback entries discarded before IMU initialization.
+    //
+    // callback_ready:
+    //   callbacks surviving the IMU initialization gate.
+    //
+    // queue_push:
+    //   valid scans actually inserted into lidar_queue_.
+    // ============================================================
+    std::atomic<std::size_t>
+        lidar_callback_total_{0};
+
+    std::atomic<std::size_t>
+        lidar_callback_preinit_{0};
+
+    std::atomic<std::size_t>
+        lidar_callback_ready_{0};
+
+    std::atomic<std::size_t>
+        lidar_queue_push_count_{0};
+
+    std::atomic<std::uint64_t>
+        lidar_callback_fingerprint_{0};
+
+    std::atomic<std::uint64_t>
+        lidar_queue_fingerprint_{0};
+
+    std::atomic<std::uint64_t>
+        lidar_process_fingerprint_{0};
 
     // ============================================================
     // LiDAR/IMU synchronization diagnostics.
@@ -853,11 +947,37 @@ private:
     void LidarCallback(
         const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
     {
+        const std::size_t fr_sync_callback_total_index =
+            lidar_callback_total_.fetch_add(
+                1,
+                std::memory_order_relaxed) +
+            1;
+
+        (void)fr_sync_callback_total_index;
+
         if (!imu_initialized_.load())
         {
+            lidar_callback_preinit_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+
 
             return;
         }
+
+        const std::size_t fr_sync_callback_ready_index =
+            lidar_callback_ready_.fetch_add(
+                1,
+                std::memory_order_relaxed) +
+            1;
+
+        lidar_callback_fingerprint_.fetch_xor(
+            FrSyncContribution(
+                msg->header.stamp,
+                static_cast<std::uint64_t>(
+                    fr_sync_callback_ready_index)),
+            std::memory_order_relaxed);
+
 
         if (lidar_adapter_ == nullptr)
         {
@@ -928,6 +1048,20 @@ private:
             lidar_queue_.push_back(
                 std::move(pending));
 
+            const std::size_t fr_sync_queue_push_index =
+                lidar_queue_push_count_.fetch_add(
+                    1,
+                    std::memory_order_relaxed) +
+                1;
+
+            lidar_queue_fingerprint_.fetch_xor(
+                FrSyncContribution(
+                    msg->header.stamp,
+                    static_cast<std::uint64_t>(
+                        fr_sync_queue_push_index)),
+                std::memory_order_relaxed);
+
+
             queue_size =
                 lidar_queue_.size();
         }
@@ -983,12 +1117,290 @@ private:
                     std::memory_order_relaxed));
         }
 
+        if ((fr_sync_callback_ready_index % 500) == 0)
+        {
+            const std::size_t overflow_drops =
+                dropped_queue_while_imu_wait_.load(
+                    std::memory_order_relaxed) +
+                dropped_queue_while_processing_.load(
+                    std::memory_order_relaxed) +
+                dropped_queue_other_.load(
+                    std::memory_order_relaxed);
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FR_SYNC V2 | source=%s "
+                "callback_total=%zu "
+                "callback_preinit=%zu "
+                "callback_ready=%zu "
+                "queue_push=%zu "
+                "processed=%zu "
+                "stale=%zu invalid=%zu overflow=%zu "
+                "callback_hash=0x%016llx "
+                "queue_hash=0x%016llx "
+                "process_hash=0x%016llx",
+                "PointCloud2",
+                lidar_callback_total_.load(
+                    std::memory_order_relaxed),
+                lidar_callback_preinit_.load(
+                    std::memory_order_relaxed),
+                lidar_callback_ready_.load(
+                    std::memory_order_relaxed),
+                lidar_queue_push_count_.load(
+                    std::memory_order_relaxed),
+                processed_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                dropped_stale_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                dropped_invalid_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                overflow_drops,
+                static_cast<unsigned long long>(
+                    lidar_callback_fingerprint_.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    lidar_queue_fingerprint_.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    lidar_process_fingerprint_.load(
+                        std::memory_order_relaxed)));
+        }
+
         data_condition_.notify_one();
     }
 
     // ============================================================
     // Find actual point-time range of a LiDAR scan.
     // ============================================================
+    // ============================================================
+    // Livox Driver2 CustomMsg callback.
+    //
+    // Only the ROS input format differs. After conversion the
+    // exact same PendingLidarFrame / FIFO / IMU / LIO pipeline is used.
+    // ============================================================
+    void LivoxCustomCallback(
+        const livox_ros_driver2::msg::CustomMsg::ConstSharedPtr msg)
+    {
+        const std::size_t fr_sync_callback_total_index =
+            lidar_callback_total_.fetch_add(
+                1,
+                std::memory_order_relaxed) +
+            1;
+
+        (void)fr_sync_callback_total_index;
+
+        if (!imu_initialized_.load())
+        {
+            lidar_callback_preinit_.fetch_add(
+                1,
+                std::memory_order_relaxed);
+
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Waiting for IMU initialization before queuing Livox CustomMsg.");
+
+            return;
+        }
+
+        const std::size_t fr_sync_callback_ready_index =
+            lidar_callback_ready_.fetch_add(
+                1,
+                std::memory_order_relaxed) +
+            1;
+
+        lidar_callback_fingerprint_.fetch_xor(
+            FrSyncContribution(
+                msg->header.stamp,
+                static_cast<std::uint64_t>(
+                    fr_sync_callback_ready_index)),
+            std::memory_order_relaxed);
+
+
+        const LIDAR_FRAME raw_frame =
+            livox_custom_adapter_.convert(
+                *msg);
+
+        if (!raw_frame.cloud ||
+            raw_frame.cloud->empty())
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Converted Livox CustomMsg cloud is empty.");
+
+            return;
+        }
+
+        if (!raw_frame.has_point_time)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Livox CustomMsg frame has no valid point timing.");
+
+            return;
+        }
+
+        PendingLidarFrame pending;
+
+        pending.frame =
+            raw_frame;
+
+        pending.stamp =
+            msg->header.stamp;
+
+        pending.frame_id =
+            msg->header.frame_id;
+
+        std::size_t queue_size = 0;
+        std::size_t dropped_now = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                lidar_queue_mutex_);
+
+            while (lidar_queue_.size() >=
+                   max_lidar_queue_size_)
+            {
+                if (lidar_queue_.size() <= 1)
+                {
+                    break;
+                }
+
+                lidar_queue_.erase(
+                    lidar_queue_.begin() + 1);
+
+                ++dropped_now;
+            }
+
+            lidar_queue_.push_back(
+                std::move(pending));
+
+            const std::size_t fr_sync_queue_push_index =
+                lidar_queue_push_count_.fetch_add(
+                    1,
+                    std::memory_order_relaxed) +
+                1;
+
+            lidar_queue_fingerprint_.fetch_xor(
+                FrSyncContribution(
+                    msg->header.stamp,
+                    static_cast<std::uint64_t>(
+                        fr_sync_queue_push_index)),
+                std::memory_order_relaxed);
+
+
+            queue_size =
+                lidar_queue_.size();
+        }
+
+        if (dropped_now > 0)
+        {
+            dropped_lidar_frames_.fetch_add(
+                dropped_now);
+
+            const LidarWorkerState worker_state =
+                static_cast<LidarWorkerState>(
+                    lidar_worker_state_.load(
+                        std::memory_order_relaxed));
+
+            const char *overflow_reason =
+                "OTHER_BACKLOG";
+
+            if (worker_state ==
+                LidarWorkerState::WAIT_FOR_IMU)
+            {
+                dropped_queue_while_imu_wait_.fetch_add(
+                    dropped_now);
+
+                overflow_reason =
+                    "IMU_WAIT_BACKLOG";
+            }
+            else if (worker_state ==
+                     LidarWorkerState::PROCESSING)
+            {
+                dropped_queue_while_processing_.fetch_add(
+                    dropped_now);
+
+                overflow_reason =
+                    "PROCESSING_BACKLOG";
+            }
+            else
+            {
+                dropped_queue_other_.fetch_add(
+                    dropped_now);
+            }
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                1000,
+                "Livox CustomMsg queue overflow | "
+                "reason=%s dropped=%zu total_dropped=%zu "
+                "queue=%zu max_queue=%zu",
+                overflow_reason,
+                dropped_now,
+                dropped_lidar_frames_.load(),
+                queue_size,
+                max_lidar_queue_size_);
+        }
+
+        if ((fr_sync_callback_ready_index % 500) == 0)
+        {
+            const std::size_t overflow_drops =
+                dropped_queue_while_imu_wait_.load(
+                    std::memory_order_relaxed) +
+                dropped_queue_while_processing_.load(
+                    std::memory_order_relaxed) +
+                dropped_queue_other_.load(
+                    std::memory_order_relaxed);
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "FR_SYNC V2 | source=%s "
+                "callback_total=%zu "
+                "callback_preinit=%zu "
+                "callback_ready=%zu "
+                "queue_push=%zu "
+                "processed=%zu "
+                "stale=%zu invalid=%zu overflow=%zu "
+                "callback_hash=0x%016llx "
+                "queue_hash=0x%016llx "
+                "process_hash=0x%016llx",
+                "LivoxCustomMsg",
+                lidar_callback_total_.load(
+                    std::memory_order_relaxed),
+                lidar_callback_preinit_.load(
+                    std::memory_order_relaxed),
+                lidar_callback_ready_.load(
+                    std::memory_order_relaxed),
+                lidar_queue_push_count_.load(
+                    std::memory_order_relaxed),
+                processed_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                dropped_stale_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                dropped_invalid_lidar_frames_.load(
+                    std::memory_order_relaxed),
+                overflow_drops,
+                static_cast<unsigned long long>(
+                    lidar_callback_fingerprint_.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    lidar_queue_fingerprint_.load(
+                        std::memory_order_relaxed)),
+                static_cast<unsigned long long>(
+                    lidar_process_fingerprint_.load(
+                        std::memory_order_relaxed)));
+        }
+
+        data_condition_.notify_one();
+    }
+
     bool FindPointTimeRange(
         const LIDAR_FRAME &lidar_frame,
         double &min_point_time,
@@ -3650,7 +4062,6 @@ private:
         const PreparedLidarTarget *tracking_target =
             scan_to_local_map_->GetPreparedTrackingTarget();
 
-
         // ========================================================
         // Current PRIMARY Submap context for structural Wall
         // association.
@@ -4073,12 +4484,17 @@ private:
         const std::chrono::steady_clock::time_point commit_start =
             std::chrono::steady_clock::now();
 
+        const Eigen::Matrix<double, 6, 6> *odom_information =
+            lio_result.lidar_update.pose_graph_information_valid
+                ? &lio_result.lidar_update.pose_graph_information
+                : nullptr;
+
         const bool commit_success =
             scan_to_local_map_->CommitExternalPoseFrame(
                 lio_result.processed_frame.cloud,
                 raw_frame.scan_start_time,
                 lio_result.T_WL,
-                nullptr,
+                odom_information,
                 &is_keyframe);
 
         const std::chrono::steady_clock::time_point commit_end =
@@ -4099,6 +4515,84 @@ private:
                 raw_frame.scan_start_time);
 
             return;
+        }
+
+        if (is_keyframe)
+        {
+            if (lio_result.lidar_update.pose_graph_information_valid)
+            {
+                const auto &info =
+                    lio_result.lidar_update.pose_graph_information;
+
+                Eigen::SelfAdjointEigenSolver<
+                    Eigen::Matrix<double, 6, 6>>
+                    info_solver(
+                        info,
+                        Eigen::EigenvaluesOnly);
+
+                const double minimum_eigenvalue =
+                    (info_solver.info() == Eigen::Success)
+                        ? info_solver.eigenvalues().minCoeff()
+                        : -1.0;
+
+                const double maximum_eigenvalue =
+                    (info_solver.info() == Eigen::Success)
+                        ? info_solver.eigenvalues().maxCoeff()
+                        : -1.0;
+
+                const double condition_number =
+                    (minimum_eigenvalue > 0.0)
+                        ? maximum_eigenvalue / minimum_eigenvalue
+                        : -1.0;
+
+                double maximum_off_diagonal = 0.0;
+                double maximum_translation_rotation_coupling = 0.0;
+
+                for (int i = 0; i < 6; ++i)
+                {
+                    for (int j = 0; j < 6; ++j)
+                    {
+                        if (i == j)
+                        {
+                            continue;
+                        }
+
+                        maximum_off_diagonal =
+                            std::max(
+                                maximum_off_diagonal,
+                                std::abs(info(i, j)));
+
+                        if ((i < 3 && j >= 3) ||
+                            (i >= 3 && j < 3))
+                        {
+                            maximum_translation_rotation_coupling =
+                                std::max(
+                                    maximum_translation_rotation_coupling,
+                                    std::abs(info(i, j)));
+                        }
+                    }
+                }
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "LIO_ODOM_INFO | mode=DYNAMIC_FULL_6X6_V2 | "
+                    "diag=[%.6f %.6f %.6f %.6f %.6f %.6f] | "
+                    "eig_min=%.6e | eig_max=%.6e | cond=%.3f | "
+                    "offdiag_max=%.6f | tr_coupling_max=%.6f",
+                    info(0, 0), info(1, 1), info(2, 2),
+                    info(3, 3), info(4, 4), info(5, 5),
+                    minimum_eigenvalue,
+                    maximum_eigenvalue,
+                    condition_number,
+                    maximum_off_diagonal,
+                    maximum_translation_rotation_coupling);
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "LIO_ODOM_INFO | mode=IDENTITY_FALLBACK");
+            }
         }
 
         // ========================================================
@@ -4658,7 +5152,18 @@ private:
                 pending,
                 lio_imu_data);
 
-            processed_lidar_frames_.fetch_add(1);
+            const std::size_t fr_sync_processed_index =
+                processed_lidar_frames_.fetch_add(
+                    1,
+                    std::memory_order_relaxed) +
+                1;
+
+            lidar_process_fingerprint_.fetch_xor(
+                FrSyncContribution(
+                    pending.stamp,
+                    static_cast<std::uint64_t>(
+                        fr_sync_processed_index)),
+                std::memory_order_relaxed);
 
             // ====================================================
             // 4. Processing finished: now pop the protected front.
@@ -4682,6 +5187,65 @@ private:
                 static_cast<int>(LidarWorkerState::IDLE),
                 std::memory_order_relaxed);
         }
+
+        std::size_t fr_sync_queue_remaining = 0;
+
+        {
+            std::lock_guard<std::mutex> lock(
+                lidar_queue_mutex_);
+
+            fr_sync_queue_remaining =
+                lidar_queue_.size();
+        }
+
+        const std::size_t fr_sync_overflow_drops =
+            dropped_queue_while_imu_wait_.load(
+                std::memory_order_relaxed) +
+            dropped_queue_while_processing_.load(
+                std::memory_order_relaxed) +
+            dropped_queue_other_.load(
+                std::memory_order_relaxed);
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "FR_SYNC V2 FINAL | "
+            "callback_total=%zu "
+            "callback_preinit=%zu "
+            "callback_ready=%zu "
+            "queue_push=%zu "
+            "processed=%zu "
+            "stale=%zu "
+            "invalid=%zu "
+            "overflow=%zu "
+            "queue_remaining=%zu "
+            "callback_hash=0x%016llx "
+            "queue_hash=0x%016llx "
+            "process_hash=0x%016llx",
+            lidar_callback_total_.load(
+                std::memory_order_relaxed),
+            lidar_callback_preinit_.load(
+                std::memory_order_relaxed),
+            lidar_callback_ready_.load(
+                std::memory_order_relaxed),
+            lidar_queue_push_count_.load(
+                std::memory_order_relaxed),
+            processed_lidar_frames_.load(
+                std::memory_order_relaxed),
+            dropped_stale_lidar_frames_.load(
+                std::memory_order_relaxed),
+            dropped_invalid_lidar_frames_.load(
+                std::memory_order_relaxed),
+            fr_sync_overflow_drops,
+            fr_sync_queue_remaining,
+            static_cast<unsigned long long>(
+                lidar_callback_fingerprint_.load(
+                    std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                lidar_queue_fingerprint_.load(
+                    std::memory_order_relaxed)),
+            static_cast<unsigned long long>(
+                lidar_process_fingerprint_.load(
+                    std::memory_order_relaxed)));
 
         lidar_worker_state_.store(
             static_cast<int>(LidarWorkerState::IDLE),
@@ -5321,6 +5885,13 @@ private:
                     this->declare_parameter<int>(
                         "ground_clearance_bootstrap_samples",
                         8)));
+        ground_segmentation_config
+            .support_clearance_bootstrap_maximum_rmse_m =
+            std::max(
+                0.001,
+                this->declare_parameter<double>(
+                    "ground_clearance_bootstrap_maximum_rmse_m",
+                    0.030));
 
         return ground_constraint_config;
     }
@@ -5328,7 +5899,6 @@ private:
     PreprocessorConfig LoadPreprocessorConfig()
     {
         PreprocessorConfig preprocessor_config;
-
 
         preprocessor_config.range_min =
             this->declare_parameter<double>(
@@ -6242,6 +6812,17 @@ public:
             lidar_adapter_ =
                 &mid360s_adapter_;
         }
+        else if (lidar_type_ == "livox_custom" ||
+                 lidar_type_ == "livox_driver2" ||
+                 lidar_type_ == "m3dgr")
+        {
+            lidar_type_ =
+                "livox_custom";
+
+            // CustomMsg has its own adapter/callback.
+            lidar_adapter_ =
+                nullptr;
+        }
         else if (lidar_type_ == "hesai")
         {
             lidar_adapter_ =
@@ -6257,7 +6838,7 @@ public:
             RCLCPP_FATAL(
                 this->get_logger(),
                 "Unsupported lidar_type='%s'. "
-                "Valid values: mid360s, hesai, velodyne.",
+                "Valid values: mid360s, livox_custom, hesai, velodyne.",
                 lidar_type_.c_str());
 
             throw std::runtime_error(
@@ -6293,7 +6874,6 @@ public:
         // ========================================================
         LoopDetectorConfig loop_detector_config =
             LoadLoopDetectorConfig();
-
 
         ground_constraint_config =
             LoadGroundConstraintConfig();
@@ -6612,8 +7192,29 @@ public:
             rclcpp::KeepLast(
                 imu_qos_depth_)};
 
-        imu_qos.best_effort();
+        const bool imu_qos_reliable =
+            this->declare_parameter<bool>(
+                "imu_qos_reliable",
+                false);
+
+        if (imu_qos_reliable)
+        {
+            imu_qos.reliable();
+        }
+        else
+        {
+            imu_qos.best_effort();
+        }
+
         imu_qos.durability_volatile();
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "IMU QoS | depth=%zu | reliability=%s | durability=VOLATILE",
+            imu_qos_depth_,
+            imu_qos_reliable
+                ? "RELIABLE"
+                : "BEST_EFFORT");
 
         imu_sub_ =
             this->create_subscription<
@@ -6636,17 +7237,87 @@ public:
         lidar_options.callback_group =
             lidar_callback_group_;
 
-        lidar_sub_ =
-            this->create_subscription<
-                sensor_msgs::msg::PointCloud2>(
-                lidar_topic_,
-                rclcpp::SensorDataQoS(),
-                std::bind(
-                    &lidar_registration_scan2localmap::
-                        LidarCallback,
-                    this,
-                    std::placeholders::_1),
-                lidar_options);
+        // ========================================================
+        // LiDAR DDS QoS
+        // Keep BEST_EFFORT / VOLATILE for sensor + rosbag
+        // compatibility, but enlarge history depth so short CPU
+        // stalls do not immediately discard incoming LiDAR frames.
+        // ========================================================
+        const std::int64_t configured_lidar_qos_depth =
+            this->declare_parameter<std::int64_t>(
+                "lidar_qos_depth",
+                200);
+
+        const std::size_t lidar_qos_depth =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{10},
+                    configured_lidar_qos_depth));
+
+        rclcpp::QoS lidar_qos{
+            rclcpp::KeepLast(
+                lidar_qos_depth)};
+
+        const bool lidar_qos_reliable =
+            this->declare_parameter<bool>(
+                "lidar_qos_reliable",
+                false);
+
+        if (lidar_qos_reliable)
+        {
+            lidar_qos.reliable();
+        }
+        else
+        {
+            lidar_qos.best_effort();
+        }
+
+        lidar_qos.durability_volatile();
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LiDAR QoS | depth=%zu | reliability=%s | durability=VOLATILE",
+            lidar_qos_depth,
+            lidar_qos_reliable
+                ? "RELIABLE"
+                : "BEST_EFFORT");
+
+        if (lidar_type_ == "livox_custom")
+        {
+            livox_custom_sub_ =
+                this->create_subscription<
+                    livox_ros_driver2::msg::CustomMsg>(
+                    lidar_topic_,
+                    lidar_qos,
+                    std::bind(
+                        &lidar_registration_scan2localmap::
+                            LivoxCustomCallback,
+                        this,
+                        std::placeholders::_1),
+                    lidar_options);
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "LiDAR input type: livox_ros_driver2/msg/CustomMsg");
+        }
+        else
+        {
+            lidar_sub_ =
+                this->create_subscription<
+                    sensor_msgs::msg::PointCloud2>(
+                    lidar_topic_,
+                    lidar_qos,
+                    std::bind(
+                        &lidar_registration_scan2localmap::
+                            LidarCallback,
+                        this,
+                        std::placeholders::_1),
+                    lidar_options);
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "LiDAR input type: sensor_msgs/msg/PointCloud2");
+        }
 
         // ========================================================
         // 7. TF broadcaster
