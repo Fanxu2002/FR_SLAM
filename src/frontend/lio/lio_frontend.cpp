@@ -1,7 +1,11 @@
+#include <fstream>
+#include <filesystem>
+#include <cstdlib>
 #include "fr_slam/frontend/lio_frontend.hpp"
 #include <array>
 #include <Eigen/Eigenvalues>
 #include "fr_slam/frontend/ground_input_bridge.hpp"
+#include <pcl/kdtree/kdtree_flann.h>
 #include <iomanip>
 #include <sstream>
 
@@ -5533,7 +5537,7 @@ ProcessGroundMeasurement(
     joint_wall_ready =
         false;
 
-const bool joint_ground_ready =
+bool joint_ground_ready =
         ground_joint_measurement_allowed &&
         config_.ground.enabled &&
         config_.ground.mode != "off" &&
@@ -5556,46 +5560,258 @@ const bool joint_ground_ready =
             ground_reference_plane_d_W_);
 
     // ========================================================================
-    // FR_GROUND_DEGRADED_HEIGHT_V1
+    // FR_GROUND_V2_FINAL_POLICY
     //
-    // If HIGH_RMSE is the ONLY failed support gate, retain a WEAK
-    // height-only Ground observation.
-    //
-    // We deliberately do NOT trust the noisy normal:
-    //
-    //     normal measurement = OFF
-    //     height measurement = weak ON
-    //
-    // All other rejection masks remain measurement OFF.
-    // Persistent Ground ownership remains responsible for rank-3 ownership.
+    // No degraded-height fallback.  A Ground observation is either trusted
+    // as a full frozen-plane measurement, or it is OFF and the frame falls
+    // back to normal all-point Dense LIO.
     // ========================================================================
     const bool joint_ground_degraded_height_ready =
-        ground_joint_measurement_allowed &&
-        config_.ground.enabled &&
-        config_.ground.mode != "off" &&
-        config_.ground.mode != "disabled" &&
-        last_ground_segmentation_valid_ &&
-        ground_reference_frozen_ &&
-        last_ground_segmentation_result_.success &&
-        last_ground_segmentation_result_.support_plane_valid &&
-        !last_ground_segmentation_result_.support_constraint_valid &&
-        last_ground_segmentation_result_
-                .support_constraint_rejection_mask ==
-            fr_slam::SUPPORT_CONSTRAINT_REJECT_HIGH_RMSE &&
-        last_ground_segmentation_result_.support_ground_cloud &&
-        !last_ground_segmentation_result_.support_ground_cloud->empty() &&
-        last_ground_segmentation_result_
-            .support_ground_normal_L.allFinite() &&
-        std::isfinite(
-            last_ground_segmentation_result_
-                .support_ground_plane_d) &&
-        ground_reference_normal_W_.allFinite() &&
-        ground_reference_normal_W_.norm() > 1.0e-12 &&
-        std::isfinite(
-            ground_reference_plane_d_W_);
+        false;
 
     const auto joint_ground_result =
         last_ground_segmentation_result_;
+
+
+    // ========================================================================
+    // FR_GROUND_MEASUREMENT_PARTITION_V2
+    //
+    // Measurement ownership, NOT state-DoF ownership:
+    //
+    //   trusted support Ground points -> Frozen Ground residual
+    //   all remaining registration points -> generic point-to-plane residual
+    //
+    // If the partition is not safe (too few generic points, invalid support,
+    // etc.), disable Ground for THIS frame and atomically fall back to the
+    // original ALL-point Dense LiDAR update.
+    // ========================================================================
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr measurement_scan_L =
+        result.processed_frame.cloud;
+
+    pcl::PointCloud<LIDAR_POINT>::Ptr partitioned_nonground_scan_L(
+        new pcl::PointCloud<LIDAR_POINT>);
+
+    bool ground_measurement_partition_active =
+        false;
+
+    std::size_t ground_owned_registration_points =
+        0U;
+
+    double ground_partition_plane_gate_m =
+        0.0;
+
+    if (joint_ground_ready &&
+        result.processed_frame.cloud &&
+        !result.processed_frame.cloud->empty() &&
+        joint_ground_result.support_ground_cloud &&
+        !joint_ground_result.support_ground_cloud->empty() &&
+        joint_ground_result.support_ground_normal_L.allFinite() &&
+        std::isfinite(joint_ground_result.support_ground_plane_d))
+    {
+        Eigen::Vector3d partition_normal_L =
+            joint_ground_result.support_ground_normal_L;
+
+        const double partition_normal_norm =
+            partition_normal_L.norm();
+
+        if (std::isfinite(partition_normal_norm) &&
+            partition_normal_norm > 1.0e-12)
+        {
+            partition_normal_L /=
+                partition_normal_norm;
+
+            const double partition_plane_d_L =
+                joint_ground_result.support_ground_plane_d /
+                partition_normal_norm;
+
+            if (std::isfinite(partition_plane_d_L))
+            {
+                pcl::KdTreeFLANN<pcl::PointXYZ> support_ground_kdtree;
+                support_ground_kdtree.setInputCloud(
+                    joint_ground_result.support_ground_cloud);
+
+                constexpr double kSupportNeighborRadiusM =
+                    0.25;
+
+                constexpr double kMinimumPlaneGateM =
+                    0.05;
+
+                constexpr double kMaximumPlaneGateM =
+                    0.12;
+
+                const double support_rmse_m =
+                    std::isfinite(joint_ground_result.support_plane_rmse_m)
+                        ? std::max(
+                              0.0,
+                              joint_ground_result.support_plane_rmse_m)
+                        : kMinimumPlaneGateM / 3.0;
+
+                ground_partition_plane_gate_m =
+                    std::clamp(
+                        3.0 * support_rmse_m,
+                        kMinimumPlaneGateM,
+                        kMaximumPlaneGateM);
+
+                const double neighbor_radius_squared =
+                    kSupportNeighborRadiusM *
+                    kSupportNeighborRadiusM;
+
+                partitioned_nonground_scan_L->reserve(
+                    result.processed_frame.cloud->size());
+
+                std::vector<int> nearest_index(1);
+                std::vector<float> nearest_squared_distance(1);
+
+                for (const LIDAR_POINT &point :
+                     result.processed_frame.cloud->points)
+                {
+                    if (!std::isfinite(point.x) ||
+                        !std::isfinite(point.y) ||
+                        !std::isfinite(point.z))
+                    {
+                        continue;
+                    }
+
+                    const Eigen::Vector3d p_L(
+                        static_cast<double>(point.x),
+                        static_cast<double>(point.y),
+                        static_cast<double>(point.z));
+
+                    const double plane_residual_m =
+                        std::abs(
+                            partition_normal_L.dot(p_L) +
+                            partition_plane_d_L);
+
+                    bool owned_by_ground =
+                        false;
+
+                    if (std::isfinite(plane_residual_m) &&
+                        plane_residual_m <=
+                            ground_partition_plane_gate_m)
+                    {
+                        pcl::PointXYZ query;
+                        query.x = point.x;
+                        query.y = point.y;
+                        query.z = point.z;
+
+                        const int found =
+                            support_ground_kdtree.nearestKSearch(
+                                query,
+                                1,
+                                nearest_index,
+                                nearest_squared_distance);
+
+                        if (found > 0 &&
+                            !nearest_squared_distance.empty() &&
+                            std::isfinite(
+                                nearest_squared_distance.front()) &&
+                            static_cast<double>(
+                                nearest_squared_distance.front()) <=
+                                neighbor_radius_squared)
+                        {
+                            owned_by_ground =
+                                true;
+                        }
+                    }
+
+                    if (owned_by_ground)
+                    {
+                        ++ground_owned_registration_points;
+                        continue;
+                    }
+
+                    partitioned_nonground_scan_L->push_back(
+                        point);
+                }
+
+                partitioned_nonground_scan_L->width =
+                    static_cast<std::uint32_t>(
+                        partitioned_nonground_scan_L->size());
+
+                partitioned_nonground_scan_L->height =
+                    1U;
+
+                partitioned_nonground_scan_L->is_dense =
+                    result.processed_frame.cloud->is_dense;
+
+                const std::size_t minimum_generic_points =
+                    std::max<std::size_t>(
+                        200U,
+                        4U *
+                            measurement_builder_
+                                .Config()
+                                .min_correspondences);
+
+                const double remaining_fraction =
+                    result.processed_frame.cloud->empty()
+                        ? 0.0
+                        : static_cast<double>(
+                              partitioned_nonground_scan_L->size()) /
+                              static_cast<double>(
+                                  result.processed_frame.cloud->size());
+
+                constexpr double kMinimumRemainingFraction =
+                    0.25;
+
+                if (partitioned_nonground_scan_L->size() >=
+                        minimum_generic_points &&
+                    remaining_fraction >=
+                        kMinimumRemainingFraction)
+                {
+                    measurement_scan_L =
+                        partitioned_nonground_scan_L;
+
+                    ground_measurement_partition_active =
+                        true;
+                }
+            }
+        }
+
+        if (!ground_measurement_partition_active)
+        {
+            // Atomic fallback: do NOT double-count Ground if partitioning
+            // failed.  Use original all-point Pure LIO for this frame.
+            joint_ground_ready =
+                false;
+
+            measurement_scan_L =
+                result.processed_frame.cloud;
+        }
+    }
+
+    static std::size_t ground_partition_diag_counter =
+        0U;
+
+    ++ground_partition_diag_counter;
+
+    if ((ground_partition_diag_counter % 20U) == 0U ||
+        (joint_ground_ready &&
+         !ground_measurement_partition_active))
+    {
+        std::cout
+            << "LIO_GROUND_PARTITION_V2"
+            << " | active="
+            << (ground_measurement_partition_active ? 1 : 0)
+            << " | ground_ready="
+            << (joint_ground_ready ? 1 : 0)
+            << " | input="
+            << (result.processed_frame.cloud
+                    ? result.processed_frame.cloud->size()
+                    : 0U)
+            << " | ground_owned="
+            << ground_owned_registration_points
+            << " | generic="
+            << (measurement_scan_L
+                    ? measurement_scan_L->size()
+                    : 0U)
+            << " | support="
+            << (joint_ground_result.support_ground_cloud
+                    ? joint_ground_result.support_ground_cloud->size()
+                    : 0U)
+            << " | plane_gate_m="
+            << ground_partition_plane_gate_m
+            << std::endl;
+    }
 
     Eigen::Vector3d joint_ground_reference_normal_W =
         Eigen::Vector3d::UnitZ();
@@ -5738,14 +5954,7 @@ const bool joint_ground_ready =
             1.0;
 
     const bool joint_ground_persistent_height_hold_ready =
-        !joint_ground_ready &&
-        ground_reference_frozen_ &&
-        persistent_height_hold_valid &&
-        std::isfinite(
-            persistent_height_hold_age_s) &&
-        persistent_height_hold_age_s >= 0.0 &&
-        persistent_height_hold_age_s <=
-            kPersistentHeightHoldMaximumAgeS;
+        false;
 
     Eigen::Vector3d persistent_height_hold_normal_W =
         Eigen::Vector3d::UnitZ();
@@ -5772,6 +5981,463 @@ const bool joint_ground_ready =
     }
 
     // ========================================================================
+
+    // ========================================================================
+    // FR_LIO_GROUND_CSV_V1
+    //
+    // DIAGNOSTICS ONLY.
+    //
+    // One row per processed LIO frame.  This records the CURRENT Piecewise
+    // Ground lifecycle actually used by src/frontend/lio/lio_frontend.cpp.
+    //
+    // IMPORTANT:
+    //   - does NOT modify Ground segmentation
+    //   - does NOT modify Pending / Active state
+    //   - does NOT modify Persistent Height Hold
+    //   - does NOT modify IESKF state or covariance
+    //   - does NOT modify measurement information
+    //
+    // The old LO Ground writer creates the file/header, but the current LIO
+    // Piecewise Ground path does not use that writer.  On the first current-LIO
+    // frame we therefore replace that header-only file with this lifecycle CSV.
+    // ========================================================================
+    {
+        static bool ground_csv_initialized =
+            false;
+
+        const char *ground_output_root =
+            std::getenv("FR_SLAM_OUTPUT_DIR");
+
+        if (ground_output_root != nullptr &&
+            ground_output_root[0] != '\0')
+        {
+            try
+            {
+                const std::filesystem::path
+                    ground_csv_directory =
+                        std::filesystem::path(
+                            ground_output_root) /
+                        "diagnostics" /
+                        "frontend";
+
+                std::filesystem::create_directories(
+                    ground_csv_directory);
+
+                const std::filesystem::path
+                    ground_csv_path =
+                        ground_csv_directory /
+                        "ground_frontend_diagnostics.csv";
+
+                std::ios_base::openmode ground_csv_mode =
+                    std::ios::out;
+
+                if (ground_csv_initialized)
+                {
+                    ground_csv_mode |=
+                        std::ios::app;
+                }
+                else
+                {
+                    ground_csv_mode |=
+                        std::ios::trunc;
+                }
+
+                std::ofstream ground_csv(
+                    ground_csv_path,
+                    ground_csv_mode);
+
+                if (ground_csv.is_open())
+                {
+                    ground_csv
+                        << std::fixed
+                        << std::setprecision(9);
+
+                    if (!ground_csv_initialized)
+                    {
+                        ground_csv
+                            << "timestamp,"
+                            << "ground_reference_frozen,"
+                            << "active_anchor_valid,"
+                            << "active_piece_id,"
+                            << "active_slope_valid,"
+                            << "active_slope_deg,"
+                            << "segmentation_valid,"
+                            << "seg_success,"
+                            << "plane_valid,"
+                            << "constraint_valid,"
+                            << "rejection_mask,"
+                            << "support_points,"
+                            << "support_cells,"
+                            << "plane_rmse_m,"
+                            << "plane_inlier_ratio,"
+                            << "ground_tilt_deg,"
+                            << "current_nx_L,"
+                            << "current_ny_L,"
+                            << "current_nz_L,"
+                            << "current_plane_d_L,"
+                            << "active_nx_W,"
+                            << "active_ny_W,"
+                            << "active_nz_W,"
+                            << "active_plane_d_W,"
+                            << "active_normal_error_deg,"
+                            << "active_height_error_m,"
+                            << "current_physical_slope_deg,"
+                            << "slope_delta_deg,"
+                            << "gravity_tilt_deg,"
+                            << "terrain_change_candidate_diag,"
+                            << "pending_active,"
+                            << "pending_count,"
+                            << "joint_measurement_allowed,"
+                            << "joint_ground_ready,"
+                            << "degraded_height_ready,"
+                            << "persistent_hold_valid,"
+                            << "persistent_hold_age_s,"
+                            << "persistent_hold_ready,"
+                            << "persistent_hold_target,"
+                            << "measurement_mode"
+                            << '\n';
+                    }
+
+                    const LioState ground_diag_state =
+                        ieskf_.State();
+
+                    const double ground_diag_nan =
+                        std::numeric_limits<double>::
+                            quiet_NaN();
+
+                    double diag_active_normal_error_deg =
+                        ground_diag_nan;
+
+                    double diag_active_height_error_m =
+                        ground_diag_nan;
+
+                    double diag_current_physical_slope_deg =
+                        ground_diag_nan;
+
+                    double diag_slope_delta_deg =
+                        ground_diag_nan;
+
+                    double diag_gravity_tilt_deg =
+                        ground_diag_nan;
+
+                    bool diag_terrain_change_candidate =
+                        false;
+
+                    Eigen::Vector3d diag_current_normal_L =
+                        joint_ground_result
+                            .support_ground_normal_L;
+
+                    double diag_current_plane_d_L =
+                        joint_ground_result
+                            .support_ground_plane_d;
+
+                    const double diag_current_normal_norm =
+                        diag_current_normal_L.norm();
+
+                    if (ground_reference_frozen_ &&
+                        ground_active_anchor_valid_ &&
+                        joint_ground_result.success &&
+                        joint_ground_result
+                            .support_plane_valid &&
+                        diag_current_normal_L.allFinite() &&
+                        std::isfinite(
+                            diag_current_normal_norm) &&
+                        diag_current_normal_norm >
+                            1.0e-12 &&
+                        std::isfinite(
+                            diag_current_plane_d_L))
+                    {
+                        diag_current_normal_L /=
+                            diag_current_normal_norm;
+
+                        diag_current_plane_d_L /=
+                            diag_current_normal_norm;
+
+                        const Eigen::Isometry3d
+                            diag_T_WL =
+                                StateToLidarPose(
+                                    ground_diag_state);
+
+                        Eigen::Vector3d
+                            diag_current_normal_W =
+                                diag_T_WL.rotation() *
+                                diag_current_normal_L;
+
+                        const double
+                            diag_current_normal_W_norm =
+                                diag_current_normal_W.norm();
+
+                        Eigen::Vector3d
+                            diag_active_normal_W =
+                                ground_reference_normal_W_;
+
+                        const double
+                            diag_active_normal_W_norm =
+                                diag_active_normal_W.norm();
+
+                        if (diag_T_WL.matrix().allFinite() &&
+                            diag_current_normal_W.allFinite() &&
+                            std::isfinite(
+                                diag_current_normal_W_norm) &&
+                            diag_current_normal_W_norm >
+                                1.0e-12 &&
+                            diag_active_normal_W.allFinite() &&
+                            std::isfinite(
+                                diag_active_normal_W_norm) &&
+                            diag_active_normal_W_norm >
+                                1.0e-12)
+                        {
+                            diag_current_normal_W /=
+                                diag_current_normal_W_norm;
+
+                            diag_active_normal_W /=
+                                diag_active_normal_W_norm;
+
+                            if (diag_current_normal_W.dot(
+                                    diag_active_normal_W) <
+                                0.0)
+                            {
+                                diag_current_normal_W =
+                                    -diag_current_normal_W;
+
+                                diag_current_normal_L =
+                                    -diag_current_normal_L;
+
+                                diag_current_plane_d_L =
+                                    -diag_current_plane_d_L;
+                            }
+
+                            const Eigen::Vector3d
+                                diag_current_anchor_L =
+                                    -diag_current_plane_d_L *
+                                    diag_current_normal_L;
+
+                            const Eigen::Vector3d
+                                diag_current_anchor_W =
+                                    diag_T_WL *
+                                    diag_current_anchor_L;
+
+                            if (diag_current_anchor_W.allFinite())
+                            {
+                                const double diag_normal_dot =
+                                    std::clamp(
+                                        diag_active_normal_W.dot(
+                                            diag_current_normal_W),
+                                        -1.0,
+                                        1.0);
+
+                                diag_active_normal_error_deg =
+                                    std::acos(
+                                        diag_normal_dot) *
+                                    57.29577951308232;
+
+                                diag_active_height_error_m =
+                                    diag_active_normal_W.dot(
+                                        diag_current_anchor_W -
+                                        ground_active_anchor_W_);
+                            }
+
+                            if (ground_diag_state
+                                    .gravity_W
+                                    .allFinite() &&
+                                ground_diag_state
+                                    .gravity_W
+                                    .norm() >
+                                    1.0e-6)
+                            {
+                                const Eigen::Vector3d
+                                    diag_physical_up_W =
+                                        -ground_diag_state
+                                             .gravity_W
+                                             .normalized();
+
+                                Eigen::Vector3d
+                                    diag_physical_up_L =
+                                        diag_T_WL.rotation()
+                                            .transpose() *
+                                        diag_physical_up_W;
+
+                                const double
+                                    diag_physical_up_L_norm =
+                                        diag_physical_up_L.norm();
+
+                                if (diag_physical_up_L
+                                        .allFinite() &&
+                                    std::isfinite(
+                                        diag_physical_up_L_norm) &&
+                                    diag_physical_up_L_norm >
+                                        1.0e-12)
+                                {
+                                    diag_physical_up_L /=
+                                        diag_physical_up_L_norm;
+
+                                    const double
+                                        diag_slope_cosine =
+                                            std::clamp(
+                                                std::abs(
+                                                    diag_current_normal_L
+                                                        .dot(
+                                                            diag_physical_up_L)),
+                                                0.0,
+                                                1.0);
+
+                                    diag_current_physical_slope_deg =
+                                        std::acos(
+                                            diag_slope_cosine) *
+                                        57.29577951308232;
+
+                                    const double
+                                        diag_gravity_cosine =
+                                            std::clamp(
+                                                std::abs(
+                                                    diag_physical_up_W.dot(
+                                                        Eigen::Vector3d::
+                                                            UnitZ())),
+                                                0.0,
+                                                1.0);
+
+                                    diag_gravity_tilt_deg =
+                                        std::acos(
+                                            diag_gravity_cosine) *
+                                        57.29577951308232;
+                                }
+                            }
+
+                            if (ground_active_slope_valid_ &&
+                                std::isfinite(
+                                    diag_current_physical_slope_deg))
+                            {
+                                diag_slope_delta_deg =
+                                    std::abs(
+                                        diag_current_physical_slope_deg -
+                                        ground_active_slope_deg_);
+                            }
+
+                            // Diagnostic copy of the CURRENT terrain trigger.
+                            // This does not drive the state machine.
+                            constexpr double
+                                kDiagTerrainNormalTriggerDeg =
+                                    1.50;
+
+                            constexpr double
+                                kDiagTerrainSlopeDeltaTriggerDeg =
+                                    1.00;
+
+                            constexpr double
+                                kDiagTerrainHardNormalTriggerDeg =
+                                    3.50;
+
+                            constexpr double
+                                kDiagTerrainMaximumGravityTiltDeg =
+                                    1.50;
+
+                            const bool
+                                diag_gravity_direction_reliable =
+                                    std::isfinite(
+                                        diag_current_physical_slope_deg) &&
+                                    std::isfinite(
+                                        diag_gravity_tilt_deg) &&
+                                    diag_gravity_tilt_deg <=
+                                        kDiagTerrainMaximumGravityTiltDeg;
+
+                            const bool
+                                diag_slope_delta_valid =
+                                    ground_active_slope_valid_ &&
+                                    std::isfinite(
+                                        diag_slope_delta_deg);
+
+                            diag_terrain_change_candidate =
+                                diag_gravity_direction_reliable &&
+                                std::isfinite(
+                                    diag_active_normal_error_deg) &&
+                                diag_active_normal_error_deg >=
+                                    kDiagTerrainNormalTriggerDeg &&
+                                (
+                                    (
+                                        diag_slope_delta_valid &&
+                                        diag_slope_delta_deg >=
+                                            kDiagTerrainSlopeDeltaTriggerDeg
+                                    )
+                                    ||
+                                    diag_active_normal_error_deg >=
+                                        kDiagTerrainHardNormalTriggerDeg
+                                );
+                        }
+                    }
+
+                    const char *ground_measurement_mode =
+                        joint_ground_ready
+                            ? "FULL"
+                            : (
+                                joint_ground_persistent_height_hold_ready
+                                    ? "HOLD"
+                                    : (
+                                        joint_ground_degraded_height_ready
+                                            ? "DEGRADED"
+                                            : "NONE"
+                                      )
+                              );
+
+                    ground_csv
+                        << ground_diag_state.timestamp << ','
+                        << (ground_reference_frozen_ ? 1 : 0) << ','
+                        << (ground_active_anchor_valid_ ? 1 : 0) << ','
+                        << ground_active_piece_id_ << ','
+                        << (ground_active_slope_valid_ ? 1 : 0) << ','
+                        << ground_active_slope_deg_ << ','
+                        << (last_ground_segmentation_valid_ ? 1 : 0) << ','
+                        << (joint_ground_result.success ? 1 : 0) << ','
+                        << (joint_ground_result.support_plane_valid ? 1 : 0) << ','
+                        << (joint_ground_result.support_constraint_valid ? 1 : 0) << ','
+                        << joint_ground_result
+                               .support_constraint_rejection_mask << ','
+                        << joint_ground_result
+                               .support_ground_points << ','
+                        << joint_ground_result
+                               .support_ground_cells << ','
+                        << joint_ground_result
+                               .support_plane_rmse_m << ','
+                        << joint_ground_result
+                               .support_plane_inlier_ratio << ','
+                        << joint_ground_result
+                               .support_ground_tilt_deg << ','
+                        << diag_current_normal_L.x() << ','
+                        << diag_current_normal_L.y() << ','
+                        << diag_current_normal_L.z() << ','
+                        << diag_current_plane_d_L << ','
+                        << ground_reference_normal_W_.x() << ','
+                        << ground_reference_normal_W_.y() << ','
+                        << ground_reference_normal_W_.z() << ','
+                        << ground_reference_plane_d_W_ << ','
+                        << diag_active_normal_error_deg << ','
+                        << diag_active_height_error_m << ','
+                        << diag_current_physical_slope_deg << ','
+                        << diag_slope_delta_deg << ','
+                        << diag_gravity_tilt_deg << ','
+                        << (diag_terrain_change_candidate ? 1 : 0) << ','
+                        << (ground_pending_active_ ? 1 : 0) << ','
+                        << ground_pending_sample_count_ << ','
+                        << (ground_joint_measurement_allowed ? 1 : 0) << ','
+                        << (joint_ground_ready ? 1 : 0) << ','
+                        << (joint_ground_degraded_height_ready ? 1 : 0) << ','
+                        << (persistent_height_hold_valid ? 1 : 0) << ','
+                        << persistent_height_hold_age_s << ','
+                        << (joint_ground_persistent_height_hold_ready ? 1 : 0) << ','
+                        << persistent_height_hold_target_lidar_normal_W << ','
+                        << ground_measurement_mode
+                        << '\n';
+
+                    ground_csv_initialized =
+                        true;
+                }
+            }
+            catch (const std::exception &)
+            {
+                // Diagnostics must never affect the realtime frontend.
+            }
+        }
+    }
+
     // FR_GROUND_TRACE_V1
     //
     // DIAGNOSTICS ONLY.
@@ -7934,12 +8600,7 @@ const bool joint_ground_ready =
     // It contains no residual and no gradient.
     // ========================================================================
     const bool persistent_ground_owner_active =
-        config_.ground.enabled &&
-        config_.ground.mode != "off" &&
-        config_.ground.mode != "disabled" &&
-        ground_reference_frozen_ &&
-        ground_reference_normal_W_.allFinite() &&
-        ground_reference_normal_W_.norm() > 1.0e-12;
+        false;
 
     Eigen::Vector3d persistent_ground_normal_W =
         Eigen::Vector3d::UnitZ();
@@ -8072,12 +8733,12 @@ const bool joint_ground_ready =
     }
 
 if (!ieskf_.IteratedLidarUpdate(
-            result.processed_frame.cloud,
+            measurement_scan_L,
             *prepared_target,
             measurement_builder_,
             result.lidar_update,
             &joint_observation_builder_final,
-            &structural_ownership_builder))
+            nullptr))
     {
         std::cerr
             << "LIO_REJECT | stage=JOINT_LIDAR_GROUND_UPDATE"

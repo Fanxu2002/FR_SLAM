@@ -1466,6 +1466,11 @@ bool Ieskf::IteratedLidarUpdate(
     LioState current_state =
         prior_state;
 
+    // FR_B1_ADDITIVE_GROUND_ABLATION_V1
+    // Keep full Dense LiDAR information and ADD structural measurements.
+    // Ground / Wall state machines and residuals are unchanged.
+    constexpr bool kEnableStructuralSubspaceOwnershipProjection = false;
+
     for (int iteration = 0;
          iteration <
          config_.max_lidar_iterations;
@@ -1641,7 +1646,7 @@ bool Ieskf::IteratedLidarUpdate(
                         }
                     }
 
-                    if (owned_rank > 0)
+                    if (kEnableStructuralSubspaceOwnershipProjection && owned_rank > 0)
                     {
                         const StateMatrix keep_projector =
                             StateMatrix::Identity() -
@@ -2522,7 +2527,7 @@ bool Ieskf::IteratedLidarUpdate(
                     }
                 }
 
-                if (owned_rank > 0)
+                if (kEnableStructuralSubspaceOwnershipProjection && owned_rank > 0)
                 {
                     const StateMatrix keep_projector =
                         StateMatrix::Identity() -
