@@ -1,0 +1,17 @@
+/velodyne_points:
+  history: keep_last
+  depth: 1000
+  reliability: reliable
+  durability: volatile
+
+/ms/imu/data:
+  history: keep_last
+  depth: 5000
+  reliability: reliable
+  durability: volatile
+
+/antobot_gps:
+  history: keep_last
+  depth: 1000
+  reliability: reliable
+  durability: volatile

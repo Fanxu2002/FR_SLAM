@@ -1,3 +1,4 @@
+#include "fr_slam/backend/pgo_ground_confidence_bridge.hpp"
 #include "fr_slam/frontend/lo_frontend.hpp"
 #include "fr_slam/frontend/ground_segmenter.hpp"
 #include "fr_slam/frontend/ground_input_bridge.hpp"
@@ -3093,11 +3094,31 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
       //     5-keyframe overlap
       //
       // local_map_config is reused by the LocalMap builder inside each Submap.
+      // FR_LONG_MEMORY_60_30_DIAG
+      //
+      // Baseline:
+      //     max_keyframes_per_submap = 30
+      //     overlap_keyframes        = 15
+      //
+      // Long-memory diagnostic:
+      //     max_keyframes_per_submap = 60
+      //     overlap_keyframes        = 30
+      //
+      // Tracking architecture itself is unchanged:
+      //     PRIMARY only.
       submap_manager_(
-          SubmapManagerConfig(),
+          []()
+          {
+              SubmapManagerConfig config;
+              config.max_keyframes_per_submap = 60;
+              config.overlap_keyframes = 30;
+              config.transition_until_active_keyframes = 30;
+              return config;
+          }(),
           local_map_config),
 
       loop_detector_(loop_detector_config),
+      loop_verifier_(loop_runtime_config.verifier),
       loop_consistency_checker_(loop_runtime_config.consistency),
 
       // Create a keyframe when either:
@@ -5264,6 +5285,19 @@ bool RegistrationScan2LocalMap::CommitExternalPoseFrame(
             return false;
         }
 
+        // FR_PGO_GROUND_CONF_BIND_FIRST_V3
+        if (!fr_slam::BindPgoGroundConfidenceKeyframe(
+                timestamp,
+                first_keyframe->id,
+                1.0e-4))
+        {
+            std::cerr
+                << "PGO_GROUND_CONF_BIND_MISS_V3"
+                << " | kf=" << first_keyframe->id
+                << " | timestamp=" << timestamp
+                << std::endl;
+        }
+
         if (!submap_manager_.AddKeyframe(*first_keyframe))
         {
             std::cerr
@@ -5393,6 +5427,19 @@ bool RegistrationScan2LocalMap::CommitExternalPoseFrame(
                 << "latest keyframe pointer is null."
                 << std::endl;
             return false;
+        }
+
+        // FR_PGO_GROUND_CONF_BIND_NEW_V3
+        if (!fr_slam::BindPgoGroundConfidenceKeyframe(
+                timestamp,
+                new_keyframe->id,
+                1.0e-4))
+        {
+            std::cerr
+                << "PGO_GROUND_CONF_BIND_MISS_V3"
+                << " | kf=" << new_keyframe->id
+                << " | timestamp=" << timestamp
+                << std::endl;
         }
 
         const Submap *current_owner_before_add =

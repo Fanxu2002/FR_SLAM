@@ -20,10 +20,17 @@ fr_slam:
     # ============================================================
     # 实时处理 / 时间同步 / Realtime / synchronization
     # ============================================================
-    max_lidar_queue_size: 3
+    max_lidar_queue_size: 20
     imu_qos_depth: 1000
+    imu_qos_reliable: true
+    lidar_qos_reliable: true
     imu_initialization_sample_count: 200
     imu_history_duration: 0.5
+    lio_gyro_noise_std: 0.02236068
+    lio_accel_noise_std: 0.02236068
+    lio_gyro_bias_random_walk_std: 0.000707107
+    lio_accel_bias_random_walk_std: 0.000707107
+    lio_point_to_plane_noise_std: 0.0316227766
 
     # LiDAR→IMU 等待几毫秒属于正常的异步到达现象。 / A few milliseconds of LiDAR->IMU waiting is normal asynchronous arrival.
     # 只有等待/滞后达到或超过该阈值时才输出 WARN。 / Only waits/lag at or above this threshold are emitted as WARN.
@@ -33,7 +40,7 @@ fr_slam:
     # 局部地图 LocalMap / LocalMap
     # ============================================================
     local_map_max_frames: 10
-    local_map_voxel_leaf_size: 0.30
+    local_map_voxel_leaf_size: 0.50
 
     # ============================================================
     # Ground V1.4：冻结世界平面的横滚/俯仰/Z 方向锚定 / Ground V1.4: frozen world-plane roll/pitch/Z anchor
@@ -41,7 +48,7 @@ fr_slam:
     # 在坡道、多层地面或无法用单一固定支撑平面描述的地形中，请使用 "off"。 / Use "off" for ramps, multi-level floors, or terrain where one fixed
     # 此时固定支撑平面不再是有效的世界模型。 / support plane is not a valid world model.
     ground_constraint_enable: true
-    ground_constraint_mode: "flat_anchor"
+    ground_constraint_mode: "piecewise_frozen"
     ground_analysis_voxel_leaf_size: 0.15
 
     ground_anchor_bootstrap_frames: 8
@@ -49,7 +56,7 @@ fr_slam:
     ground_anchor_max_plane_d_spread_m: 0.08
 
     ground_plane_information_scale: 1.0
-    ground_height_sigma_m: 0.05
+    ground_height_sigma_m: 0.04
     ground_normal_sigma_deg: 2.0
     ground_height_huber_delta_m: 0.05
     ground_normal_huber_delta_deg: 2.0
@@ -83,16 +90,24 @@ fr_slam:
     # 即关闭 Scan Context → 回环 ICP → Loop Edge → 回环触发 PGO 的完整流程。 / Scan Context -> loop ICP -> Loop Edge -> loop-triggered PGO chain.
     backend_loop_closure_enable: true
 
+    # LoopVerifier compute backend:
+    #   "cpu"  -> reference CPU implementation
+    #   "cuda" -> require CUDA Persistent-Fused implementation
+    #   "auto" -> CUDA when available, otherwise CPU fallback
+    loop_verifier_backend: "cpu"
+
+    loop_retrieval_mode: "scan_context_single"
+
     # ============================================================
     # 回环一致性 / 回环边稀疏化 / Loop closure consistency / edge sparsification
     # ============================================================
     # Phase-1 迁移：这些参数值特意保持原先 C++ 默认值不变。 / Phase-1 migration: values intentionally preserve the old C++ defaults.
-    loop_use_temporal_consistency: false
-    loop_temporal_max_current_gap: 12
-    loop_temporal_max_historical_gap: 15
-    loop_temporal_min_consistent_proposals: 2
+    loop_use_temporal_consistency: true
+    loop_temporal_max_current_gap: 4
+    loop_temporal_max_historical_gap: 4
+    loop_temporal_min_consistent_proposals: 3
 
-    loop_use_cycle_consistency: false
+    loop_use_cycle_consistency: true
     loop_max_cycle_translation_error_m: 2.0
     loop_max_cycle_rotation_error_deg: 10.0
     loop_consistency_max_history_size: 20
@@ -127,7 +142,7 @@ fr_slam:
     preprocessor_range_min: 1.0
     preprocessor_range_max: 30.0
 
-    preprocessor_enable_passthrough: true
+    preprocessor_enable_passthrough: false
     preprocessor_roi_min_x: -30.0
     preprocessor_roi_max_x: 30.0
     preprocessor_roi_min_y: -15.0
@@ -135,7 +150,7 @@ fr_slam:
     preprocessor_roi_min_z: -2.0
     preprocessor_roi_max_z: 10.0
 
-    preprocessor_enable_cropbox: true
+    preprocessor_enable_cropbox: false
     preprocessor_cropbox_min_x: -0.15
     preprocessor_cropbox_max_x: 0.15
     preprocessor_cropbox_min_y: -0.15
@@ -144,7 +159,7 @@ fr_slam:
     preprocessor_cropbox_max_z: 0.15
 
     preprocessor_enable_voxel: true
-    preprocessor_voxel_leaf_size: 0.30
+    preprocessor_voxel_leaf_size: 0.50
     preprocessor_voxel_min_points: 1
 
     preprocessor_sor_mode: "off"
@@ -152,7 +167,7 @@ fr_slam:
     preprocessor_sor_mean_k: 50
     preprocessor_sor_stddev_mul_thresh: 1.0
 
-    preprocessor_enable_ror: true
+    preprocessor_enable_ror: false
     preprocessor_ror_radius: 0.30
     preprocessor_ror_min_neighbors: 1
 
@@ -181,4 +196,5 @@ fr_slam:
     imu_extrinsic_p_il_z: -0.257469947
     # fr_slam_hesai.yaml
     imu_acceleration_scale: 1.0
+    lio_estimate_gravity: true
     lio_estimate_extrinsic: false

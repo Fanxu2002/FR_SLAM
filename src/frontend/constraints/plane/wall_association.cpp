@@ -279,6 +279,69 @@ namespace
         return std::acos(clamped_cosine) * kRadToDeg;
     }
 
+    // ------------------------------------------------------------------------
+    // FR_WALL_HORIZONTAL_FRAGMENT_MERGE_V45
+    //
+    // Compare only the XY projection of two nearly-vertical wall normals.
+    // Plane normals are sign-ambiguous, so use |dot| just like the existing
+    // full-3D comparison.
+    // ------------------------------------------------------------------------
+    double WallAssociationV2HorizontalNormalAngleDeg(
+        const Eigen::Vector3d &a,
+        const Eigen::Vector3d &b)
+    {
+        if (!a.allFinite() ||
+            !b.allFinite())
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        Eigen::Vector3d a_horizontal(
+            a.x(),
+            a.y(),
+            0.0);
+
+        Eigen::Vector3d b_horizontal(
+            b.x(),
+            b.y(),
+            0.0);
+
+        const double a_norm =
+            a_horizontal.norm();
+
+        const double b_norm =
+            b_horizontal.norm();
+
+        if (!std::isfinite(a_norm) ||
+            !std::isfinite(b_norm) ||
+            a_norm < 1.0e-9 ||
+            b_norm < 1.0e-9)
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        a_horizontal /= a_norm;
+        b_horizontal /= b_norm;
+
+        const double cosine =
+            std::abs(
+                a_horizontal.dot(
+                    b_horizontal));
+
+        const double clamped_cosine =
+            std::max(
+                -1.0,
+                std::min(
+                    1.0,
+                    cosine));
+
+        constexpr double kRadToDeg =
+            57.2957795130823208768;
+
+        return std::acos(clamped_cosine) *
+               kRadToDeg;
+    }
+
     double WallAssociationV2TangentialDistance(
         const Eigen::Vector3d &center_a_A,
         const Eigen::Vector3d &center_b_A,
@@ -365,11 +428,24 @@ namespace
     BuildWallAssociationV2PhysicalWalls(
         const ::fr_slam::MultiPlaneExtractionResult &result,
         const Eigen::Isometry3d &T_AL,
-        std::size_t &raw_wall_candidates)
+        std::size_t &raw_wall_candidates,
+        const bool horizontal_fragment_merge_enabled)
     {
         constexpr double kClusterMaximumNormalDifferenceDeg = 5.0;
         constexpr double kClusterMaximumPlaneDistanceDifferenceM = 0.20;
         constexpr double kClusterMaximumSupportGapM = 1.50;
+
+        // FR_WALL_HORIZONTAL_FRAGMENT_MERGE_V45
+        //
+        // Conservative fallback validated by the V4.4 shadow.
+        constexpr double
+            kFragmentMaximumHorizontalNormalDifferenceDeg = 0.75;
+        constexpr double
+            kFragmentMaximumPlaneDistanceDifferenceM = 0.08;
+        constexpr double
+            kFragmentMaximumSymmetricPlaneSeparationM = 0.08;
+        constexpr double
+            kFragmentMaximumSupportGapM = 0.50;
 
         std::vector<WallAssociationV2Observation> observations;
 
@@ -450,9 +526,33 @@ namespace
                         observations[i].normal_A,
                         observations[j].normal_A);
 
-                if (!std::isfinite(normal_difference_deg) ||
-                    normal_difference_deg >
-                        kClusterMaximumNormalDifferenceDeg)
+                const bool legacy_normal_compatible =
+                    std::isfinite(normal_difference_deg) &&
+                    normal_difference_deg <=
+                        kClusterMaximumNormalDifferenceDeg;
+
+                double horizontal_normal_difference_deg =
+                    std::numeric_limits<double>::quiet_NaN();
+
+                bool horizontal_fragment_candidate = false;
+
+                if (horizontal_fragment_merge_enabled &&
+                    !legacy_normal_compatible)
+                {
+                    horizontal_normal_difference_deg =
+                        WallAssociationV2HorizontalNormalAngleDeg(
+                            observations[i].normal_A,
+                            observations[j].normal_A);
+
+                    horizontal_fragment_candidate =
+                        std::isfinite(
+                            horizontal_normal_difference_deg) &&
+                        horizontal_normal_difference_deg <=
+                            kFragmentMaximumHorizontalNormalDifferenceDeg;
+                }
+
+                if (!legacy_normal_compatible &&
+                    !horizontal_fragment_candidate)
                 {
                     continue;
                 }
@@ -475,8 +575,15 @@ namespace
                         observations[i].d_A -
                         d_j_A);
 
-                if (plane_distance_difference_m >
-                    kClusterMaximumPlaneDistanceDifferenceM)
+                const double maximum_plane_distance_difference_m =
+                    legacy_normal_compatible
+                        ? kClusterMaximumPlaneDistanceDifferenceM
+                        : kFragmentMaximumPlaneDistanceDifferenceM;
+
+                if (!std::isfinite(
+                        plane_distance_difference_m) ||
+                    plane_distance_difference_m >
+                        maximum_plane_distance_difference_m)
                 {
                     continue;
                 }
@@ -501,11 +608,80 @@ namespace
                         observations[j].radius_m,
                         mean_normal_A);
 
+                const double maximum_support_gap_m =
+                    legacy_normal_compatible
+                        ? kClusterMaximumSupportGapM
+                        : kFragmentMaximumSupportGapM;
+
                 if (!std::isfinite(support_gap_m) ||
                     support_gap_m >
-                        kClusterMaximumSupportGapM)
+                        maximum_support_gap_m)
                 {
                     continue;
+                }
+
+                if (horizontal_fragment_candidate)
+                {
+                    Eigen::Vector3d normal_i_unit =
+                        observations[i].normal_A;
+
+                    Eigen::Vector3d normal_j_unit =
+                        normal_j_A;
+
+                    const double normal_i_norm =
+                        normal_i_unit.norm();
+
+                    const double normal_j_norm =
+                        normal_j_unit.norm();
+
+                    if (!std::isfinite(normal_i_norm) ||
+                        !std::isfinite(normal_j_norm) ||
+                        normal_i_norm < 1.0e-9 ||
+                        normal_j_norm < 1.0e-9)
+                    {
+                        continue;
+                    }
+
+                    const double d_i_unit =
+                        observations[i].d_A /
+                        normal_i_norm;
+
+                    const double d_j_unit =
+                        d_j_A /
+                        normal_j_norm;
+
+                    normal_i_unit /=
+                        normal_i_norm;
+
+                    normal_j_unit /=
+                        normal_j_norm;
+
+                    const double i_plane_at_j_center_m =
+                        std::abs(
+                            normal_i_unit.dot(
+                                observations[j].center_A) +
+                            d_i_unit);
+
+                    const double j_plane_at_i_center_m =
+                        std::abs(
+                            normal_j_unit.dot(
+                                observations[i].center_A) +
+                            d_j_unit);
+
+                    const double symmetric_plane_separation_m =
+                        0.5 *
+                        (
+                            i_plane_at_j_center_m +
+                            j_plane_at_i_center_m
+                        );
+
+                    if (!std::isfinite(
+                            symmetric_plane_separation_m) ||
+                        symmetric_plane_separation_m >
+                            kFragmentMaximumSymmetricPlaneSeparationM)
+                    {
+                        continue;
+                    }
                 }
 
                 WallAssociationV2Union(
@@ -702,7 +878,8 @@ namespace
         const ::fr_slam::MultiPlaneExtractionResult &result,
         const Eigen::Isometry3d &T_AL,
         const std::size_t frame_index,
-        WallAssociationV2Runtime &runtime)
+        WallAssociationV2Runtime &runtime,
+        const bool horizontal_fragment_merge_enabled)
     {
         // Same-frame fragment merging happens in
         // BuildWallAssociationV2PhysicalWalls().  V3 deliberately keeps the
@@ -773,7 +950,8 @@ namespace
             BuildWallAssociationV2PhysicalWalls(
                 result,
                 T_AL,
-                debug.raw_wall_candidates);
+                debug.raw_wall_candidates,
+                horizontal_fragment_merge_enabled);
 
         debug.physical_wall_candidates =
             debug.physical_walls.size();
@@ -2405,6 +2583,9 @@ namespace
 struct WallAssociation::Impl
 {
     WallAssociationV2Runtime runtime;
+
+    // Default false preserves existing Local Wall V1 behavior.
+    bool horizontal_fragment_merge_enabled = false;
 };
 
 WallAssociation::WallAssociation()
@@ -2426,6 +2607,18 @@ void WallAssociation::Reset()
         WallAssociationV2Runtime();
 }
 
+void WallAssociation::SetHorizontalFragmentMergeEnabled(
+    const bool enabled)
+{
+    if (!impl_)
+    {
+        return;
+    }
+
+    impl_->horizontal_fragment_merge_enabled =
+        enabled;
+}
+
 WallAssociationResult WallAssociation::Update(
     const MultiPlaneExtractionResult &planes,
     const Eigen::Isometry3d &T_AL,
@@ -2444,7 +2637,8 @@ WallAssociationResult WallAssociation::Update(
             planes,
             T_AL,
             frame_index,
-            impl_->runtime);
+            impl_->runtime,
+            impl_->horizontal_fragment_merge_enabled);
 
     result.raw_wall_candidates =
         debug.raw_wall_candidates;

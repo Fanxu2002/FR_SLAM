@@ -1,3 +1,5 @@
+#include <iomanip>
+#include <iostream>
 #include "fr_slam/mapping/submap_manager.hpp"
 
 #include <algorithm>
@@ -614,66 +616,133 @@ bool SubmapManager::AddKeyframeToSubmap(
         return false;
     }
 
-    // ------------------------------------------------------------------------
-    // Append source-of-truth S-frame geometry.
-    // ------------------------------------------------------------------------
-    submap.cloud_S->reserve(
-        submap.cloud_S->size() +
-        filtered_S->size());
+    // ========================================================
+    // FR_LONG_SPAN_SAME_COUNT_V1
+    //
+    // Keep ALL Keyframes in Submap lifecycle, but only every
+    // second local Keyframe contributes geometry.
+    //
+    // 60 lifecycle KFs -> approximately 30 geometry KFs.
+    // ========================================================
+    const std::size_t local_keyframe_index =
+        submap.keyframe_ids.size();
 
-    submap.cloud_O->reserve(
-        submap.cloud_O->size() +
-        filtered_S->size());
+    const bool keep_geometry =
+        (local_keyframe_index % 2U) == 0U;
 
-    for (const LIDAR_POINT &point_S :
-         filtered_S->points)
+    // ------------------------------------------------------------------------
+    // FR_MAP_KF_INSERT_V1
+    //
+    // Diagnostic only.
+    //
+    // Record the EXACT Keyframe pose that is about to be baked into this
+    // fixed-frame Submap geometry. Old cloud_S points are never rebuilt, so
+    // this is the pose-error inheritance event we want to analyze offline.
+    // ------------------------------------------------------------------------
+    std::cout
+        << std::setprecision(17)
+        << "FR_MAP_KF_INSERT_V1"
+        << " | submap_id=" << submap.id
+        << " | submap_state="
+        << static_cast<int>(submap.state)
+        << " | kf_id=" << keyframe.id
+        << " | kf_t=" << keyframe.timestamp
+
+        << " | anchor_xyz=["
+        << submap.T_O_S_creation.translation().x() << " "
+        << submap.T_O_S_creation.translation().y() << " "
+        << submap.T_O_S_creation.translation().z() << "]"
+
+        << " | kf_xyz=["
+        << keyframe.T_WL.translation().x() << " "
+        << keyframe.T_WL.translation().y() << " "
+        << keyframe.T_WL.translation().z() << "]"
+
+        << " | tsl_xyz=["
+        << T_S_L.translation().x() << " "
+        << T_S_L.translation().y() << " "
+        << T_S_L.translation().z() << "]"
+
+        << " | raw_points="
+        << keyframe.cloud->size()
+
+        << " | filtered_points="
+        << filtered_S->size()
+
+        << " | local_index="
+        << local_keyframe_index
+
+        << " | geometry_kept="
+        << (keep_geometry ? 1 : 0)
+
+        << " | submap_points_before="
+        << submap.cloud_S->size()
+
+        << std::endl;
+
+    if (keep_geometry)
     {
-        submap.cloud_S->push_back(
-            point_S);
+        // ------------------------------------------------------------------------
+        // Append source-of-truth S-frame geometry.
+        // ------------------------------------------------------------------------
+        submap.cloud_S->reserve(
+            submap.cloud_S->size() +
+            filtered_S->size());
 
-        const Eigen::Vector3d p_S(
-            static_cast<double>(point_S.x),
-            static_cast<double>(point_S.y),
-            static_cast<double>(point_S.z));
+        submap.cloud_O->reserve(
+            submap.cloud_O->size() +
+            filtered_S->size());
 
-        const Eigen::Vector3d p_O =
-            submap.T_O_S_creation *
-            p_S;
-
-        if (!p_O.allFinite())
+        for (const LIDAR_POINT &point_S :
+             filtered_S->points)
         {
-            return false;
+            submap.cloud_S->push_back(
+                point_S);
+
+            const Eigen::Vector3d p_S(
+                static_cast<double>(point_S.x),
+                static_cast<double>(point_S.y),
+                static_cast<double>(point_S.z));
+
+            const Eigen::Vector3d p_O =
+                submap.T_O_S_creation *
+                p_S;
+
+            if (!p_O.allFinite())
+            {
+                return false;
+            }
+
+            LIDAR_POINT point_O =
+                point_S;
+
+            point_O.x =
+                static_cast<float>(p_O.x());
+
+            point_O.y =
+                static_cast<float>(p_O.y());
+
+            point_O.z =
+                static_cast<float>(p_O.z());
+
+            submap.cloud_O->push_back(
+                point_O);
         }
 
-        LIDAR_POINT point_O =
-            point_S;
+        submap.cloud_S->width =
+            static_cast<std::uint32_t>(
+                submap.cloud_S->size());
 
-        point_O.x =
-            static_cast<float>(p_O.x());
+        submap.cloud_S->height = 1;
+        submap.cloud_S->is_dense = false;
 
-        point_O.y =
-            static_cast<float>(p_O.y());
+        submap.cloud_O->width =
+            static_cast<std::uint32_t>(
+                submap.cloud_O->size());
 
-        point_O.z =
-            static_cast<float>(p_O.z());
-
-        submap.cloud_O->push_back(
-            point_O);
+        submap.cloud_O->height = 1;
+        submap.cloud_O->is_dense = false;
     }
-
-    submap.cloud_S->width =
-        static_cast<std::uint32_t>(
-            submap.cloud_S->size());
-
-    submap.cloud_S->height = 1;
-    submap.cloud_S->is_dense = false;
-
-    submap.cloud_O->width =
-        static_cast<std::uint32_t>(
-            submap.cloud_O->size());
-
-    submap.cloud_O->height = 1;
-    submap.cloud_O->is_dense = false;
 
     submap.keyframe_ids.push_back(
         keyframe.id);

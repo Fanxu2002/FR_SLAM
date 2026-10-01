@@ -52,9 +52,24 @@
 // containers for frontend registration and loop ICP verification.
 // ============================================================================
 
+enum class LoopRetrievalMode
+{
+    ScanContextSingle,
+    ScanContextWindow,
+    Btc
+};
+
 struct LoopRuntimeConfig
 {
+    LoopRetrievalMode retrieval_mode =
+        LoopRetrievalMode::ScanContextSingle;
+
     LoopConsistencyConfig consistency;
+
+    // Geometry-verification compute backend.
+    // The algorithmic loop-closure pipeline is unchanged; only the
+    // expensive LoopVerifier point-to-plane solver backend is selected.
+    LoopVerifierConfig verifier;
 
     std::size_t min_online_loop_edge_current_keyframe_spacing = 4;
     std::size_t min_online_loop_edge_historical_keyframe_spacing = 2;
@@ -269,7 +284,11 @@ public:
     //     Node id == Keyframe id
     //     Node pose == T_WK
     // ------------------------------------------------------------------------
+
     PoseGraph GetPoseGraphSnapshot() const;
+
+    std::vector<std::size_t>
+    GetLoopRetrievalSampleKeyframeIdsSnapshot() const;
 
     // Backward-compatible API.  This returns a thread-local copy of the
     // latest immutable backend snapshot.
@@ -281,6 +300,18 @@ public:
     std::size_t PoseGraphLoopEdgeCount() const;
 
     void Reset();
+
+    // ============================================================
+    // FINAL REFINEMENT FOR SAVE V2
+    //
+    // On-demand only.  Used by /save_slam_maps after normal online
+    // refinement has been throttled.  The underlying refinement still
+    // modifies only the derived refined-map layer.
+    // ============================================================
+    bool ForcePostPgoRefinementForSave()
+    {
+        return RebuildPostPgoRefinedMap();
+    }
 
 private:
     // ========================================================================
@@ -1055,7 +1086,11 @@ private:
     // this mutex; the worker only swaps/copies outputs when one job completes.
     mutable std::mutex backend_output_mutex_;
 
+
     PoseGraph backend_pose_graph_snapshot_;
+
+    std::vector<std::size_t>
+        backend_loop_retrieval_sample_keyframe_ids_snapshot_;
 
     pcl::PointCloud<LIDAR_POINT>::ConstPtr backend_raw_map_snapshot_;
     pcl::PointCloud<LIDAR_POINT>::ConstPtr backend_optimized_map_snapshot_;

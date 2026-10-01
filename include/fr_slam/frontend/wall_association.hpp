@@ -76,6 +76,14 @@ public:
 
     void Reset();
 
+    // FR_WALL_HORIZONTAL_FRAGMENT_MERGE_V45
+    //
+    // Enable the conservative horizontal-normal fallback used only for
+    // same-frame fragmentation merging. Default is false so the existing
+    // Local Wall V1 behavior remains unchanged unless explicitly enabled.
+    void SetHorizontalFragmentMergeEnabled(
+        bool enabled);
+
     WallAssociationResult Update(
         const MultiPlaneExtractionResult &planes,
         const Eigen::Isometry3d &T_AL,

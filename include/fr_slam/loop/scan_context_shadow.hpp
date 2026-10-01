@@ -31,6 +31,23 @@ struct ScanContextShadowCandidate
     std::size_t sector_shift = 0;
 
     double yaw_shift_deg = 0.0;
+
+    // ================================================================
+    // POSE SUPPLEMENT RETRIEVAL V1
+    //
+    // False:
+    //     ordinary Scan Context Top-K candidate.
+    //
+    // True:
+    //     one extra long-history candidate selected only by frontend
+    //     pose proximity.
+    //
+    // IMPORTANT:
+    //     this candidate is NOT allowed to become the ordinary
+    //     single-frame geometry winner.  It exists only to seed the
+    //     causal TrackRecovery rescue path.
+    // ================================================================
+    bool pose_supplement = false;
 };
 
 struct ScanContextShadowConfig
@@ -44,6 +61,22 @@ struct ScanContextShadowConfig
     double max_candidate_distance = 5.0;
 
     std::size_t max_candidates = 10;
+
+    // ================================================================
+    // POSE SUPPLEMENT RETRIEVAL V1
+    //
+    // Keep normal SC Top-K unchanged and append AT MOST one additional
+    // long-history pose-nearest candidate.
+    //
+    // It is only a retrieval supplement, never direct loop acceptance.
+    // ================================================================
+    bool enable_pose_supplement = false;
+
+    std::size_t
+        pose_supplement_min_keyframe_id_separation = 100;
+
+    double
+        pose_supplement_max_distance = 2.0;
 
     ScanContextConfig scan_context;
 };

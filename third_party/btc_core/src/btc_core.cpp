@@ -801,7 +801,7 @@ void BtcDescManager::SearchLoop(
     const int diag_current_frame =
         btcs_vec.front().frame_number_;
 
-    if (diag_current_frame >= 500)
+    if (diag_current_frame >= 450)
     {
       std::cout
           << "BTC_FULL_RETRIEVAL"
@@ -865,7 +865,7 @@ void BtcDescManager::SearchLoop(
       const int diag_current_frame =
           btcs_vec.front().frame_number_;
 
-      if (diag_current_frame >= 500)
+      if (diag_current_frame >= 450)
       {
         std::cout
             << "BTC_VERIFY_V288_RESULT"
@@ -899,7 +899,7 @@ void BtcDescManager::SearchLoop(
   const int diagnostic_query_frame =
       btcs_vec.front().frame_number_;
 
-  if (diagnostic_query_frame >= 580)
+  if (diagnostic_query_frame >= 450)
   {
     std::sort(
         verify_rank_diagnostics.begin(),
@@ -947,7 +947,7 @@ void BtcDescManager::SearchLoop(
 
   if (print_debug_info_)
   {
-    if (diagnostic_query_frame >= 500)
+    if (diagnostic_query_frame >= 450)
     {
       std::cout
           << "BTC_FULL_FINAL"
@@ -3654,7 +3654,7 @@ void BtcDescManager::candidate_verify(
 
   if (print_debug_info_)
   {
-    if (current_frame >= 500)
+    if (current_frame >= 450)
     {
       std::cout
           << "BTC_VERIFY_V288_BEGIN"
@@ -3898,7 +3898,7 @@ void BtcDescManager::candidate_verify(
 
   if (print_debug_info_)
   {
-    if (current_frame >= 500)
+    if (current_frame >= 450)
     {
       std::cout
           << "BTC_VERIFY_V288_VOTE"
@@ -4227,7 +4227,7 @@ void BtcDescManager::candidate_verify(
 
     if (print_debug_info_)
     {
-      if (current_frame >= 500)
+      if (current_frame >= 450)
       {
         std::cout
             << "BTC_VERIFY_V288_FINAL"
@@ -4248,7 +4248,7 @@ void BtcDescManager::candidate_verify(
 
     if (print_debug_info_)
     {
-      if (current_frame >= 500)
+      if (current_frame >= 450)
       {
         std::cout
             << "BTC_VERIFY_V288_FINAL"

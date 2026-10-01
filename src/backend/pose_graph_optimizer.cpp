@@ -1,3 +1,4 @@
+#include "fr_slam/backend/pgo_ground_confidence_bridge.hpp"
 #include "fr_slam/backend/pose_graph_optimizer.hpp"
 
 #include <algorithm>
@@ -97,6 +98,59 @@ namespace
             // Difference of two unit gravity directions.  For small tilt angles,
             // ||error|| is approximately the angular error in radians.
             _error = gravity_estimated - gravity_measurement;
+        }
+
+        bool read(std::istream &) override
+        {
+            return false;
+        }
+
+        bool write(std::ostream &) const override
+        {
+            return false;
+        }
+    };
+
+
+    // ============================================================================
+    // FR_PGO_Z_PRIOR_DIAG_V1
+    // Soft World-Z prior around the pose entering the current PGO call.
+    // ============================================================================
+    class EdgeWorldZPrior
+        : public g2o::BaseUnaryEdge<1, double, g2o::VertexSE3>
+    {
+    public:
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+        EdgeWorldZPrior()
+        {
+            information().setIdentity();
+        }
+
+        void computeError() override
+        {
+            const g2o::VertexSE3 *vertex =
+                static_cast<const g2o::VertexSE3 *>(_vertices[0]);
+
+            if (vertex == nullptr)
+            {
+                _error[0] =
+                    std::numeric_limits<double>::quiet_NaN();
+                return;
+            }
+
+            const double z =
+                vertex->estimate().translation().z();
+
+            if (!std::isfinite(z) ||
+                !std::isfinite(_measurement))
+            {
+                _error[0] =
+                    std::numeric_limits<double>::quiet_NaN();
+                return;
+            }
+
+            _error[0] = z - _measurement;
         }
 
         bool read(std::istream &) override
@@ -1408,7 +1462,539 @@ bool PoseGraphOptimizer::Optimize(
     }
 
     // ------------------------------------------------------------------------
-    // 4. Optimize.
+    // FR_PGO_Z_PRIOR_IMMUTABLE_V2
+    //
+    // Reconstruct one immutable frontend trajectory using ONLY odometry-edge
+    // measurements:
+    //
+    //     T_ref(j) = T_ref(i) * Z_ij
+    //
+    // where:
+    //
+    //     Z_ij = T_from_to
+    //
+    // Loop edges are deliberately excluded from the reference reconstruction.
+    //
+    // The fixed graph vertex supplies the world-frame anchor. Because that
+    // vertex never moves, later PGO calls cannot move this Z reference.
+    // ------------------------------------------------------------------------
+    const bool apply_z_prior_diag =
+        nodes.size() >= config_.global_information_min_nodes &&
+        pose_graph.LoopEdgeCount() > 0;
+
+    if (apply_z_prior_diag)
+    {
+        double sigma_z_m = 0.10;
+
+        if (const char *env =
+                std::getenv("FR_PGO_Z_PRIOR_SIGMA_M"))
+        {
+            char *end = nullptr;
+
+            const double parsed =
+                std::strtod(env, &end);
+
+            if (end != env &&
+                end != nullptr &&
+                *end == '\0' &&
+                std::isfinite(parsed) &&
+                parsed > 0.0)
+            {
+                sigma_z_m = parsed;
+            }
+            else
+            {
+                std::cerr
+                    << "PGO_Z_PRIOR_IMMUTABLE_V2 invalid sigma: "
+                    << env
+                    << std::endl;
+                return false;
+            }
+        }
+
+        const double information_z =
+            1.0 / (sigma_z_m * sigma_z_m);
+
+        // ------------------------------------------------------------
+        // Find the fixed graph anchor.
+        // ------------------------------------------------------------
+        const PoseGraphNode *root_node = nullptr;
+
+        for (const PoseGraphNode &node : nodes)
+        {
+            if (!node.fixed)
+            {
+                continue;
+            }
+
+            root_node = &node;
+            break;
+        }
+
+        if (root_node == nullptr ||
+            !root_node->T_WK.matrix().allFinite())
+        {
+            std::cerr
+                << "PGO_Z_PRIOR_IMMUTABLE_V2: no valid fixed root."
+                << std::endl;
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // Reconstruct immutable frontend reference poses from
+        // Odometry edges only.
+        //
+        // The iterative propagation handles either edge orientation:
+        //
+        // known(from) -> unknown(to):
+        //     T_ref(to) = T_ref(from) * Z_from_to
+        //
+        // known(to) -> unknown(from):
+        //     T_ref(from) = T_ref(to) * Z_from_to^-1
+        // ------------------------------------------------------------
+        std::unordered_map<
+            std::size_t,
+            Eigen::Isometry3d> reference_pose;
+
+        reference_pose.reserve(nodes.size());
+
+        reference_pose.emplace(
+            root_node->id,
+            root_node->T_WK);
+
+        std::size_t reconstruction_passes = 0U;
+
+        while (reference_pose.size() < nodes.size())
+        {
+            bool progress = false;
+            ++reconstruction_passes;
+
+            for (const PoseGraphEdge &edge_data : edges)
+            {
+                if (edge_data.type !=
+                    PoseGraphEdgeType::Odometry)
+                {
+                    continue;
+                }
+
+                if (!edge_data.T_from_to.matrix().allFinite())
+                {
+                    return false;
+                }
+
+                const auto from_it =
+                    reference_pose.find(edge_data.from_id);
+
+                const auto to_it =
+                    reference_pose.find(edge_data.to_id);
+
+                const bool have_from =
+                    from_it != reference_pose.end();
+
+                const bool have_to =
+                    to_it != reference_pose.end();
+
+                if (have_from && !have_to)
+                {
+                    const Eigen::Isometry3d T_ref_to =
+                        from_it->second *
+                        edge_data.T_from_to;
+
+                    if (!T_ref_to.matrix().allFinite())
+                    {
+                        return false;
+                    }
+
+                    reference_pose.emplace(
+                        edge_data.to_id,
+                        T_ref_to);
+
+                    progress = true;
+                }
+                else if (!have_from && have_to)
+                {
+                    const Eigen::Isometry3d T_ref_from =
+                        to_it->second *
+                        edge_data.T_from_to.inverse();
+
+                    if (!T_ref_from.matrix().allFinite())
+                    {
+                        return false;
+                    }
+
+                    reference_pose.emplace(
+                        edge_data.from_id,
+                        T_ref_from);
+
+                    progress = true;
+                }
+            }
+
+            if (!progress)
+            {
+                break;
+            }
+        }
+
+        if (reference_pose.size() != nodes.size())
+        {
+            std::cerr
+                << "PGO_Z_PRIOR_IMMUTABLE_V2: incomplete odometry chain"
+                << " | refs=" << reference_pose.size()
+                << " | nodes=" << nodes.size()
+                << " | odom_edges="
+                << pose_graph.OdometryEdgeCount()
+                << std::endl;
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // FR_PGO_LOOP_Z_INCONSISTENCY_V1
+        //
+        // Compare every loop measurement against the immutable odometry-chain
+        // reference reconstructed above.
+        //
+        // Z_ref_ij =
+        //     T_ref_Wi^-1 * T_ref_Wj
+        //
+        // T_loop_implied_Wj =
+        //     T_ref_Wi * Z_loop_ij
+        //
+        // world_z_error tells us how much vertical deformation the loop
+        // measurement alone asks for relative to the frontend reference.
+        // ------------------------------------------------------------
+        for (const PoseGraphEdge &edge_data : edges)
+        {
+            if (edge_data.type != PoseGraphEdgeType::Loop)
+            {
+                continue;
+            }
+
+            const auto from_ref_it =
+                reference_pose.find(edge_data.from_id);
+
+            const auto to_ref_it =
+                reference_pose.find(edge_data.to_id);
+
+            if (from_ref_it == reference_pose.end() ||
+                to_ref_it == reference_pose.end() ||
+                !edge_data.T_from_to.matrix().allFinite())
+            {
+                return false;
+            }
+
+            const Eigen::Isometry3d &T_ref_Wi =
+                from_ref_it->second;
+
+            const Eigen::Isometry3d &T_ref_Wj =
+                to_ref_it->second;
+
+            const Eigen::Isometry3d Z_ref_ij =
+                T_ref_Wi.inverse() *
+                T_ref_Wj;
+
+            const Eigen::Isometry3d T_loop_implied_Wj =
+                T_ref_Wi *
+                edge_data.T_from_to;
+
+            if (!Z_ref_ij.matrix().allFinite() ||
+                !T_loop_implied_Wj.matrix().allFinite())
+            {
+                return false;
+            }
+
+            const Eigen::Vector3d relative_translation_error =
+                edge_data.T_from_to.translation() -
+                Z_ref_ij.translation();
+
+            const double world_z_error =
+                T_loop_implied_Wj.translation().z() -
+                T_ref_Wj.translation().z();
+
+            const double world_xyz_error =
+                (T_loop_implied_Wj.translation() -
+                 T_ref_Wj.translation()).norm();
+
+            std::cout
+                << "PGO_LOOP_Z_INCONSISTENCY_V1"
+                << " | from=" << edge_data.from_id
+                << " | to=" << edge_data.to_id
+                << " | loop_rel_z="
+                << edge_data.T_from_to.translation().z()
+                << " | ref_rel_z="
+                << Z_ref_ij.translation().z()
+                << " | rel_z_diff="
+                << relative_translation_error.z()
+                << " | world_z_error="
+                << world_z_error
+                << " | world_xyz_error="
+                << world_xyz_error
+                << std::endl;
+        }
+
+        // ------------------------------------------------------------
+        // FR_PGO_GROUND_CONF_WEIGHT_V3
+        //
+        // Immutable odometry-chain Z reference is preserved from V2.
+        //
+        // The Z factor information is now:
+        //
+        //   Omega_z_i =
+        //       Omega_z_base
+        //       * confidence_i^2
+        //       * anchor_factor_i
+        //
+        // Invalid / untrusted Ground:
+        //
+        //   no Z unary factor
+        //
+        // This mirrors the existing frontend Ground trust semantics rather
+        // than imposing equal Z confidence on every Keyframe.
+        // ------------------------------------------------------------
+        std::size_t z_prior_edges = 0U;
+
+        std::size_t ground_records_found = 0U;
+        std::size_t ground_records_missing = 0U;
+        std::size_t ground_records_trusted = 0U;
+        std::size_t ground_records_rejected = 0U;
+
+        double sum_effective_information = 0.0;
+        double minimum_effective_information =
+            std::numeric_limits<double>::infinity();
+        double maximum_effective_information = 0.0;
+
+        double sum_trusted_confidence = 0.0;
+
+        double sum_abs_pre_minus_ref_z = 0.0;
+        double max_abs_pre_minus_ref_z = 0.0;
+
+        for (const PoseGraphNode &node : nodes)
+        {
+            const auto ref_it =
+                reference_pose.find(node.id);
+
+            if (ref_it == reference_pose.end())
+            {
+                return false;
+            }
+
+            const double z_reference =
+                ref_it->second.translation().z();
+
+            const double z_pre =
+                node.T_WK.translation().z();
+
+            if (!std::isfinite(z_reference) ||
+                !std::isfinite(z_pre))
+            {
+                return false;
+            }
+
+            const double abs_dz =
+                std::abs(z_pre - z_reference);
+
+            sum_abs_pre_minus_ref_z += abs_dz;
+
+            max_abs_pre_minus_ref_z =
+                std::max(
+                    max_abs_pre_minus_ref_z,
+                    abs_dz);
+
+            if (node.fixed)
+            {
+                continue;
+            }
+
+            fr_slam::PgoGroundConfidenceRecord
+                ground_record;
+
+            if (!fr_slam::GetPgoGroundConfidenceKeyframe(
+                    node.id,
+                    ground_record))
+            {
+                ++ground_records_missing;
+                continue;
+            }
+
+            ++ground_records_found;
+
+            if (!ground_record.segmentation_valid ||
+                !ground_record.support_constraint_valid ||
+                !std::isfinite(ground_record.confidence))
+            {
+                ++ground_records_rejected;
+                continue;
+            }
+
+            const double confidence =
+                std::max(
+                    0.0,
+                    std::min(
+                        1.0,
+                        ground_record.confidence));
+
+            if (confidence <= 0.0)
+            {
+                ++ground_records_rejected;
+                continue;
+            }
+
+            double anchor_factor = 1.0;
+
+            if (ground_record.anchor_valid &&
+                std::isfinite(
+                    ground_record.anchor_error_m) &&
+                std::isfinite(
+                    ground_record.anchor_tolerance_m) &&
+                ground_record.anchor_tolerance_m > 0.0)
+            {
+                const double anchor_sigma_m =
+                    std::max(
+                        0.025,
+                        0.5 *
+                            ground_record
+                                .anchor_tolerance_m);
+
+                const double normalized_error =
+                    ground_record.anchor_error_m /
+                    anchor_sigma_m;
+
+                anchor_factor =
+                    std::exp(
+                        -0.5 *
+                        normalized_error *
+                        normalized_error);
+            }
+
+            const double effective_information =
+                information_z *
+                confidence *
+                confidence *
+                anchor_factor;
+
+            if (!std::isfinite(effective_information) ||
+                effective_information <= 1.0e-9)
+            {
+                ++ground_records_rejected;
+                continue;
+            }
+
+            int g2o_id = 0;
+
+            if (!ToG2oId(node.id, g2o_id))
+            {
+                return false;
+            }
+
+            g2o::HyperGraph::Vertex *vertex =
+                optimizer.vertex(g2o_id);
+
+            if (vertex == nullptr)
+            {
+                return false;
+            }
+
+            EdgeWorldZPrior *z_edge =
+                new EdgeWorldZPrior();
+
+            z_edge->setVertex(0, vertex);
+            z_edge->setMeasurement(z_reference);
+
+            Eigen::Matrix<double, 1, 1> info;
+            info(0, 0) =
+                effective_information;
+
+            z_edge->setInformation(info);
+
+            if (!optimizer.addEdge(z_edge))
+            {
+                delete z_edge;
+                return false;
+            }
+
+            ++z_prior_edges;
+            ++ground_records_trusted;
+
+            sum_trusted_confidence +=
+                confidence;
+
+            sum_effective_information +=
+                effective_information;
+
+            minimum_effective_information =
+                std::min(
+                    minimum_effective_information,
+                    effective_information);
+
+            maximum_effective_information =
+                std::max(
+                    maximum_effective_information,
+                    effective_information);
+        }
+
+        const double mean_effective_information =
+            z_prior_edges > 0U
+                ? sum_effective_information /
+                    static_cast<double>(
+                        z_prior_edges)
+                : 0.0;
+
+        if (z_prior_edges == 0U)
+        {
+            minimum_effective_information = 0.0;
+        }
+
+        const double mean_trusted_confidence =
+            ground_records_trusted > 0U
+                ? sum_trusted_confidence /
+                    static_cast<double>(
+                        ground_records_trusted)
+                : 0.0;
+
+        const double mean_abs_pre_minus_ref_z =
+            sum_abs_pre_minus_ref_z /
+            static_cast<double>(nodes.size());
+
+        std::cout
+            << "PGO_Z_PRIOR_GROUND_CONF_V3"
+            << " | sigma_m=" << sigma_z_m
+            << " | information=" << information_z
+            << " | edges=" << z_prior_edges
+            << " | refs=" << reference_pose.size()
+            << " | nodes=" << nodes.size()
+            << " | odom_edges="
+            << pose_graph.OdometryEdgeCount()
+            << " | loops="
+            << pose_graph.LoopEdgeCount()
+            << " | passes="
+            << reconstruction_passes
+            << " | pre_ref_z_mean_abs="
+            << mean_abs_pre_minus_ref_z
+            << " | pre_ref_z_max_abs="
+            << max_abs_pre_minus_ref_z
+            << " | registry_size="
+            << fr_slam::PgoGroundConfidenceRegistrySize()
+            << " | ground_found="
+            << ground_records_found
+            << " | ground_missing="
+            << ground_records_missing
+            << " | ground_trusted="
+            << ground_records_trusted
+            << " | ground_rejected="
+            << ground_records_rejected
+            << " | conf_mean="
+            << mean_trusted_confidence
+            << " | info_mean="
+            << mean_effective_information
+            << " | info_min="
+            << minimum_effective_information
+            << " | info_max="
+            << maximum_effective_information
+            << std::endl;
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Optimize.
     // ------------------------------------------------------------------------
     if (!optimizer.initializeOptimization())
     {

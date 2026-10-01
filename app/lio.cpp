@@ -3,6 +3,7 @@
 
 #include "fr_slam/common/lidar_frame.hpp"
 #include "fr_slam/lidar/lidar_preprocessor.hpp"
+#include "fr_slam/lidar/lidar_registration.hpp"
 #include "fr_slam/common/point_types.hpp"
 #include "fr_slam/frontend/lo_frontend.hpp"
 #include "fr_slam/frontend/lio_frontend.hpp"
@@ -109,8 +110,7 @@ private:
             (value ^ (value >> 27)) *
             0x94d049bb133111ebULL;
 
-        return
-            value ^ (value >> 31);
+        return value ^ (value >> 31);
     }
 
     static std::uint64_t FrSyncStampNs(
@@ -683,6 +683,16 @@ private:
         scan_to_local_map_;
 
     // ============================================================
+    // FR_SHADOW_REGISTRATION_V1
+    //
+    // Diagnostic-only LiDAR registration object.
+    // It uses exactly the same LidarRegistrationConfig as the
+    // normal frontend, but never modifies the estimator or map.
+    // ============================================================
+    std::unique_ptr<LidarRegistration>
+        shadow_registration_;
+
+    // ============================================================
     // Latest ACCEPTED realtime-front-end LiDAR pose.
     //
     // Historically this variable is named T_WL_, but after introducing the
@@ -961,7 +971,6 @@ private:
                 1,
                 std::memory_order_relaxed);
 
-
             return;
         }
 
@@ -977,7 +986,6 @@ private:
                 static_cast<std::uint64_t>(
                     fr_sync_callback_ready_index)),
             std::memory_order_relaxed);
-
 
         if (lidar_adapter_ == nullptr)
         {
@@ -1060,7 +1068,6 @@ private:
                     static_cast<std::uint64_t>(
                         fr_sync_queue_push_index)),
                 std::memory_order_relaxed);
-
 
             queue_size =
                 lidar_queue_.size();
@@ -1217,7 +1224,6 @@ private:
                     fr_sync_callback_ready_index)),
             std::memory_order_relaxed);
 
-
         const LIDAR_FRAME raw_frame =
             livox_custom_adapter_.convert(
                 *msg);
@@ -1292,7 +1298,6 @@ private:
                     static_cast<std::uint64_t>(
                         fr_sync_queue_push_index)),
                 std::memory_order_relaxed);
-
 
             queue_size =
                 lidar_queue_.size();
@@ -2994,6 +2999,10 @@ private:
         const PoseGraph graph =
             scan_to_local_map_->GetPoseGraphSnapshot();
 
+        const std::vector<std::size_t>
+            loop_retrieval_sample_kf_ids =
+                scan_to_local_map_->GetLoopRetrievalSampleKeyframeIdsSnapshot();
+
         visualization_msgs::msg::MarkerArray
             marker_array;
 
@@ -3061,6 +3070,28 @@ private:
 
             node_marker.points.push_back(
                 point);
+
+            auto point_color =
+                node_marker.color;
+
+            const bool is_loop_retrieval_sample =
+                std::find(
+                    loop_retrieval_sample_kf_ids.begin(),
+                    loop_retrieval_sample_kf_ids.end(),
+                    node.id) !=
+                loop_retrieval_sample_kf_ids.end();
+
+            if (is_loop_retrieval_sample)
+            {
+                // Orange = Mapping KF selected for loop retrieval.
+                point_color.r = 1.0f;
+                point_color.g = 0.35f;
+                point_color.b = 0.0f;
+                point_color.a = 1.0f;
+            }
+
+            node_marker.colors.push_back(
+                point_color);
         }
 
         marker_array.markers.push_back(
@@ -4095,6 +4126,80 @@ private:
         }
 
         // ========================================================
+        // FR_SUBMAP_ANCHOR_DIAG_V1
+        //
+        // PRE-update diagnostic.
+        //
+        // This PRIMARY Submap is exactly the historical tracking
+        // reference available to the CURRENT LiDAR update.
+        //
+        // Diagnostic only. No estimator/map state is modified.
+        // ========================================================
+        if (lio_primary_submap != nullptr &&
+            lio_primary_submap->has_origin_pose &&
+            lio_primary_submap
+                ->T_O_S_creation
+                .matrix()
+                .allFinite() &&
+            std::isfinite(
+                lio_primary_submap->start_timestamp))
+        {
+            Eigen::Quaterniond anchor_q(
+                lio_primary_submap
+                    ->T_O_S_creation
+                    .rotation());
+
+            if (anchor_q.coeffs().allFinite() &&
+                anchor_q.norm() > 1.0e-12)
+            {
+                anchor_q.normalize();
+
+                const auto &anchor_kf_ids =
+                    lio_primary_submap->keyframe_ids;
+
+                const std::size_t anchor_first_kf =
+                    anchor_kf_ids.empty()
+                        ? 0
+                        : anchor_kf_ids.front();
+
+                const std::size_t anchor_last_kf =
+                    anchor_kf_ids.empty()
+                        ? 0
+                        : anchor_kf_ids.back();
+
+                const Eigen::Vector3d anchor_p =
+                    lio_primary_submap
+                        ->T_O_S_creation
+                        .translation();
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "LIO_SUBMAP_ANCHOR_DIAG | "
+                    "t=%.9f "
+                    "submap=%zu "
+                    "anchor_t=%.9f "
+                    "active_n=%zu "
+                    "first_kf=%zu "
+                    "last_kf=%zu "
+                    "anchor_p=[%.9f %.9f %.9f] "
+                    "anchor_q=[%.9f %.9f %.9f %.9f]",
+                    raw_frame.scan_start_time,
+                    lio_primary_submap->id,
+                    lio_primary_submap->start_timestamp,
+                    anchor_kf_ids.size(),
+                    anchor_first_kf,
+                    anchor_last_kf,
+                    anchor_p.x(),
+                    anchor_p.y(),
+                    anchor_p.z(),
+                    anchor_q.x(),
+                    anchor_q.y(),
+                    anchor_q.z(),
+                    anchor_q.w());
+            }
+        }
+
+        // ========================================================
         // LIO-only PRE-update tracking-target Z diagnostic.
         //
         // This is evaluated BEFORE LioFrontend::ProcessFrame().
@@ -4303,6 +4408,406 @@ private:
 
         const std::chrono::steady_clock::time_point lio_end =
             std::chrono::steady_clock::now();
+
+        // ========================================================
+        // FR_SHADOW_TARGET_V2
+        //
+        // Diagnostic only.
+        //
+        // Every 20 frames:
+        //   1. recover the scan-start predicted state saved by
+        //      LioFrontend BEFORE the normal LiDAR correction;
+        //   2. rotate a COPY of the historical tracking target
+        //      about the predicted current LiDAR origin;
+        //   3. rebuild PreparedLidarTarget for +/-0.4 deg world-Y.
+        //
+        // Nothing here is written back to:
+        //   - IESKF
+        //   - PRIMARY Submap
+        //   - normal PreparedLidarTarget
+        //   - trajectory
+        // ========================================================
+        if (lio_success &&
+            tracking_target != nullptr &&
+            tracking_target->ready &&
+            tracking_target->cloud &&
+            !tracking_target->cloud->empty() &&
+            shadow_registration_ &&
+            lio_result.diagnostics.valid)
+        {
+            static std::atomic<std::size_t>
+                shadow_target_frame_counter{0};
+
+            const std::size_t shadow_frame_index =
+                shadow_target_frame_counter.fetch_add(
+                    1,
+                    std::memory_order_relaxed);
+
+            if ((shadow_frame_index % 20U) == 0U)
+            {
+                const LioState &predicted_state =
+                    lio_result.diagnostics.after_propagation;
+
+                const Eigen::Quaterniond Q_WI =
+                    predicted_state.Q_WI.normalized();
+
+                const Eigen::Vector3d lidar_origin_W =
+                    predicted_state.P_WI +
+                    Q_WI *
+                        predicted_state.P_IL;
+
+                const double prediction_time_error_ms =
+                    1000.0 *
+                    (predicted_state.timestamp -
+                     raw_frame.scan_start_time);
+
+                constexpr double shadow_angle_deg =
+                    0.4;
+
+                const double degree_to_radian =
+                    std::acos(-1.0) / 180.0;
+
+                // ====================================================
+                // FR_SHADOW_RESPONSE_V3
+                //
+                // Rebuild exactly the same LIO point-to-plane
+                // linearization at the saved scan-start predicted state,
+                // then compute the measurement-only rotation optimum
+                // after marginalizing POSITION with a Moore-Penrose
+                // Schur complement.
+                //
+                // This reproduces FR_MARGINALIZED_ROTATION_DIAG_V1.
+                // Diagnostic only.
+                // ====================================================
+                LioMeasurementBuilder shadow_measurement_builder(
+                    lio_frontend_->Config().lidar_measurement);
+
+                const auto evaluate_shadow_response =
+                    [&](double target_angle_deg,
+                        const PreparedLidarTarget &response_target)
+                {
+                    LioMeasurementResult measurement;
+
+                    const bool measurement_ok =
+                        shadow_measurement_builder.Build(
+                            predicted_state,
+                            lio_result.processed_frame.cloud,
+                            response_target,
+                            measurement);
+
+                    if (!measurement_ok ||
+                        !measurement.success)
+                    {
+                        RCLCPP_INFO(
+                            this->get_logger(),
+                            "FR_SHADOW_RESPONSE | "
+                            "t=%.9f "
+                            "angle_y_deg=%+.3f "
+                            "valid=0 "
+                            "corr=%zu",
+                            raw_frame.scan_start_time,
+                            target_angle_deg,
+                            measurement.correspondences);
+
+                        return;
+                    }
+
+                    const Ieskf::StateMatrix &information =
+                        measurement.information;
+
+                    const Eigen::Matrix3d rotation_information =
+                        information.block<3, 3>(
+                            LioStateIndex::ROTATION,
+                            LioStateIndex::ROTATION);
+
+                    const Eigen::Matrix3d rotation_translation_information =
+                        information.block<3, 3>(
+                            LioStateIndex::ROTATION,
+                            LioStateIndex::POSITION);
+
+                    const Eigen::Matrix3d translation_rotation_information =
+                        information.block<3, 3>(
+                            LioStateIndex::POSITION,
+                            LioStateIndex::ROTATION);
+
+                    const Eigen::Matrix3d translation_information =
+                        information.block<3, 3>(
+                            LioStateIndex::POSITION,
+                            LioStateIndex::POSITION);
+
+                    Eigen::Matrix3d translation_information_pinv =
+                        Eigen::Matrix3d::Zero();
+
+                    {
+                        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                            solver(
+                                translation_information);
+
+                        if (solver.info() == Eigen::Success &&
+                            solver.eigenvalues().allFinite() &&
+                            solver.eigenvectors().allFinite())
+                        {
+                            const Eigen::Vector3d values =
+                                solver.eigenvalues();
+
+                            const double maximum =
+                                values.cwiseAbs().maxCoeff();
+
+                            Eigen::Vector3d inverse_values =
+                                Eigen::Vector3d::Zero();
+
+                            if (maximum > 1.0e-12)
+                            {
+                                constexpr double kEigenThreshold =
+                                    1.0e-9;
+
+                                for (int i = 0; i < 3; ++i)
+                                {
+                                    if (values(i) >
+                                        kEigenThreshold *
+                                            maximum)
+                                    {
+                                        inverse_values(i) =
+                                            1.0 / values(i);
+                                    }
+                                }
+
+                                translation_information_pinv =
+                                    solver.eigenvectors() *
+                                    inverse_values.asDiagonal() *
+                                    solver.eigenvectors().transpose();
+                            }
+                        }
+                    }
+
+                    Eigen::Matrix3d marginalized_rotation_information =
+                        rotation_information -
+                        rotation_translation_information *
+                            translation_information_pinv *
+                            translation_rotation_information;
+
+                    marginalized_rotation_information =
+                        0.5 *
+                        (
+                            marginalized_rotation_information +
+                            marginalized_rotation_information.transpose()
+                        );
+
+                    const Eigen::Vector3d rotation_gradient =
+                        measurement.gradient.segment<3>(
+                            LioStateIndex::ROTATION);
+
+                    const Eigen::Vector3d translation_gradient =
+                        measurement.gradient.segment<3>(
+                            LioStateIndex::POSITION);
+
+                    const Eigen::Vector3d marginalized_rotation_gradient =
+                        rotation_gradient -
+                        rotation_translation_information *
+                            translation_information_pinv *
+                            translation_gradient;
+
+                    Eigen::Matrix3d marginalized_rotation_information_pinv =
+                        Eigen::Matrix3d::Zero();
+
+                    Eigen::Vector3d marginalized_rotation_eigenvalues =
+                        Eigen::Vector3d::Zero();
+
+                    {
+                        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                            solver(
+                                marginalized_rotation_information);
+
+                        if (solver.info() == Eigen::Success &&
+                            solver.eigenvalues().allFinite() &&
+                            solver.eigenvectors().allFinite())
+                        {
+                            marginalized_rotation_eigenvalues =
+                                solver.eigenvalues();
+
+                            const double maximum =
+                                marginalized_rotation_eigenvalues
+                                    .cwiseAbs()
+                                    .maxCoeff();
+
+                            Eigen::Vector3d inverse_values =
+                                Eigen::Vector3d::Zero();
+
+                            if (maximum > 1.0e-12)
+                            {
+                                constexpr double kEigenThreshold =
+                                    1.0e-9;
+
+                                for (int i = 0; i < 3; ++i)
+                                {
+                                    if (marginalized_rotation_eigenvalues(i) >
+                                        kEigenThreshold *
+                                            maximum)
+                                    {
+                                        inverse_values(i) =
+                                            1.0 /
+                                            marginalized_rotation_eigenvalues(i);
+                                    }
+                                }
+
+                                marginalized_rotation_information_pinv =
+                                    solver.eigenvectors() *
+                                    inverse_values.asDiagonal() *
+                                    solver.eigenvectors().transpose();
+                            }
+                        }
+                    }
+
+                    const Eigen::Vector3d lidar_only_rotation_local =
+                        -marginalized_rotation_information_pinv *
+                            marginalized_rotation_gradient;
+
+                    constexpr double kRadToDeg =
+                        57.2957795130823208768;
+
+                    const Eigen::Matrix3d R_WI =
+                        predicted_state.Q_WI
+                            .normalized()
+                            .toRotationMatrix();
+
+                    const Eigen::Vector3d lidar_only_rotation_world_deg =
+                        R_WI *
+                        lidar_only_rotation_local *
+                        kRadToDeg;
+
+                    const Eigen::Vector3d world_y_local =
+                        R_WI.transpose() *
+                        Eigen::Vector3d::UnitY();
+
+                    const double marginalized_info_world_y =
+                        world_y_local.dot(
+                            marginalized_rotation_information *
+                            world_y_local);
+
+                    const double marginalized_gradient_world_y =
+                        world_y_local.dot(
+                            marginalized_rotation_gradient);
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "FR_SHADOW_RESPONSE | "
+                        "t=%.9f "
+                        "angle_y_deg=%+.3f "
+                        "valid=1 "
+                        "corr=%zu "
+                        "rmse=%.9f "
+                        "robust_rmse=%.9f "
+                        "marg_info_wy=%.9e "
+                        "marg_grad_wy=%.9e "
+                        "lidar_only_wy_deg=%+.9f "
+                        "lidar_only_world_deg=[%+.9f %+.9f %+.9f]",
+                        raw_frame.scan_start_time,
+                        target_angle_deg,
+                        measurement.correspondences,
+                        measurement.rmse,
+                        measurement.robust_rmse,
+                        marginalized_info_world_y,
+                        marginalized_gradient_world_y,
+                        lidar_only_rotation_world_deg.y(),
+                        lidar_only_rotation_world_deg.x(),
+                        lidar_only_rotation_world_deg.y(),
+                        lidar_only_rotation_world_deg.z());
+                };
+
+                // Original historical PRIMARY target.
+                evaluate_shadow_response(
+                    0.0,
+                    *tracking_target);
+
+                for (const double sign :
+                     {-1.0, +1.0})
+                {
+                    const double angle_deg =
+                        sign * shadow_angle_deg;
+
+                    const double angle_rad =
+                        angle_deg *
+                        degree_to_radian;
+
+                    const Eigen::Matrix3d R_shadow =
+                        Eigen::AngleAxisd(
+                            angle_rad,
+                            Eigen::Vector3d::UnitY())
+                            .toRotationMatrix();
+
+                    pcl::PointCloud<LIDAR_POINT>::Ptr
+                        shadow_cloud(
+                            new pcl::PointCloud<LIDAR_POINT>(
+                                *tracking_target->cloud));
+
+                    for (LIDAR_POINT &point :
+                         shadow_cloud->points)
+                    {
+                        const Eigen::Vector3d p_W(
+                            static_cast<double>(point.x),
+                            static_cast<double>(point.y),
+                            static_cast<double>(point.z));
+
+                        const Eigen::Vector3d p_shadow_W =
+                            lidar_origin_W +
+                            R_shadow *
+                                (p_W -
+                                 lidar_origin_W);
+
+                        point.x =
+                            static_cast<float>(
+                                p_shadow_W.x());
+
+                        point.y =
+                            static_cast<float>(
+                                p_shadow_W.y());
+
+                        point.z =
+                            static_cast<float>(
+                                p_shadow_W.z());
+                    }
+
+                    PreparedLidarTarget
+                        shadow_target;
+
+                    const bool shadow_ready =
+                        shadow_registration_->PrepareTarget(
+                            shadow_cloud,
+                            shadow_target);
+
+                    if (shadow_ready)
+                    {
+                        evaluate_shadow_response(
+                            angle_deg,
+                            shadow_target);
+                    }
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "FR_SHADOW_TARGET | "
+                        "t=%.9f "
+                        "pred_t=%.9f "
+                        "pred_dt_ms=%+.6f "
+                        "angle_y_deg=%+.3f "
+                        "center=[%.6f %.6f %.6f] "
+                        "points=%zu "
+                        "valid_planes=%zu "
+                        "invalid_planes=%zu "
+                        "ready=%d",
+                        raw_frame.scan_start_time,
+                        predicted_state.timestamp,
+                        prediction_time_error_ms,
+                        angle_deg,
+                        lidar_origin_W.x(),
+                        lidar_origin_W.y(),
+                        lidar_origin_W.z(),
+                        shadow_cloud->size(),
+                        shadow_target.valid_planes,
+                        shadow_target.invalid_planes,
+                        shadow_ready ? 1 : 0);
+                }
+            }
+        }
 
         const double lio_ms =
             std::chrono::duration<double, std::milli>(
@@ -6562,6 +7067,42 @@ private:
     {
         LoopRuntimeConfig config;
 
+        const std::string configured_loop_verifier_backend =
+            this->declare_parameter<std::string>(
+                "loop_verifier_backend",
+                "cpu");
+
+        if (configured_loop_verifier_backend == "cpu")
+        {
+            config.verifier.backend =
+                LoopVerifierBackend::Cpu;
+        }
+        else if (configured_loop_verifier_backend == "cuda")
+        {
+            config.verifier.backend =
+                LoopVerifierBackend::Cuda;
+        }
+        else if (configured_loop_verifier_backend == "auto")
+        {
+            config.verifier.backend =
+                LoopVerifierBackend::Auto;
+        }
+        else
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Invalid loop_verifier_backend: %s",
+                configured_loop_verifier_backend.c_str());
+
+            throw std::runtime_error(
+                "Invalid loop_verifier_backend");
+        }
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "LoopVerifier backend: %s",
+            configured_loop_verifier_backend.c_str());
+
         config.consistency.use_temporal_consistency =
             this->declare_parameter<bool>(
                 "loop_use_temporal_consistency",
@@ -6633,6 +7174,42 @@ private:
                     this->declare_parameter<std::int64_t>(
                         "loop_edge_historical_keyframe_spacing",
                         2)));
+
+        const std::string configured_loop_retrieval_mode =
+            this->declare_parameter<std::string>(
+                "loop_retrieval_mode",
+                "scan_context_single");
+
+        if (configured_loop_retrieval_mode == "scan_context_single")
+        {
+            config.retrieval_mode =
+                LoopRetrievalMode::ScanContextSingle;
+        }
+        else if (configured_loop_retrieval_mode == "scan_context_window")
+        {
+            config.retrieval_mode =
+                LoopRetrievalMode::ScanContextWindow;
+        }
+        else if (configured_loop_retrieval_mode == "btc")
+        {
+            config.retrieval_mode =
+                LoopRetrievalMode::Btc;
+        }
+        else
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Invalid loop_retrieval_mode: %s",
+                configured_loop_retrieval_mode.c_str());
+
+            throw std::runtime_error(
+                "Invalid loop_retrieval_mode");
+        }
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Loop retrieval mode: %s",
+            configured_loop_retrieval_mode.c_str());
 
         config.btc_config_profile =
             this->declare_parameter<std::string>(
@@ -6851,6 +7428,17 @@ public:
         // ========================================================
         LidarRegistrationConfig
             registration_config;
+
+        // ========================================================
+        // FR_SHADOW_REGISTRATION_V1
+        //
+        // Clone the exact frontend registration configuration.
+        // Diagnostic object only: no target is prepared yet and
+        // no estimator/map state is touched.
+        // ========================================================
+        shadow_registration_ =
+            std::make_unique<LidarRegistration>(
+                registration_config);
 
         const double wall_constraint_minimum_radius_m =
             LoadWallConstraintMinimumRadius();

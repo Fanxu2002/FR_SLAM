@@ -64,8 +64,31 @@
 //         p_A = T_AB * p_B
 // ============================================================================
 
+enum class LoopVerifierBackend
+{
+    Cpu = 0,
+    Cuda,
+    Auto
+};
+
 struct LoopVerifierConfig
 {
+    // Computational backend for the expensive Point-to-Plane solve.
+    //
+    // Cpu:
+    //     Always use the reference PCL/CPU implementation.
+    //
+    // Cuda:
+    //     Require the CUDA Persistent-Fused backend. CUDA initialization
+    //     failure rejects the verification instead of silently changing
+    //     the requested backend.
+    //
+    // Auto:
+    //     Try CUDA first; fall back to the reference CPU implementation
+    //     when CUDA initialization is unavailable.
+    LoopVerifierBackend backend =
+        LoopVerifierBackend::Cpu;
+
     // Backend Submap clouds are already voxelized by LocalMap, but a slightly
     // coarser verifier cloud keeps candidate checking inexpensive.
     double voxel_leaf_size = 0.50;

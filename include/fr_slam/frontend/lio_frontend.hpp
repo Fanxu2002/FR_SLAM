@@ -211,6 +211,46 @@ private:
     // Lifetime is tied to the current PRIMARY Submap.
     fr_slam::WallAssociation wall_association_;
 
+    // ========================================================================
+    // FR_WALL_WORLD_SHADOW_V4
+    //
+    // Diagnostic-only trajectory-global Wall association.
+    //
+    // IMPORTANT:
+    //   - receives T_OL (frontend world/odom frame), NOT T_SL;
+    //   - is NEVER reset on PRIMARY Submap changes;
+    //   - contributes NOTHING to IESKF;
+    //   - exists only to verify cross-submap persistent_wall_id continuity.
+    // ========================================================================
+    fr_slam::WallAssociation wall_world_shadow_association_;
+
+    std::size_t wall_world_shadow_frame_index_ = 0;
+
+
+    // ========================================================================
+    // FR_MULTI_FAMILY_WALL_HEADING_V1
+    //
+    // Trajectory-global frozen structural heading families.
+    // New families are anchored by an already-frozen family.
+    // ========================================================================
+    std::vector<Eigen::Vector3d>
+        wall_heading_family_heading_O_;
+
+    std::vector<Eigen::Vector3d>
+        wall_heading_family_bootstrap_sum_O_;
+
+    std::vector<std::size_t>
+        wall_heading_family_bootstrap_count_;
+
+    std::vector<bool>
+        wall_heading_family_frozen_;
+
+    std::vector<std::size_t>
+        wall_heading_family_source_id_;
+
+    std::vector<std::size_t>
+        wall_heading_family_last_bootstrap_frame_;
+
     std::size_t wall_association_submap_id_ =
         std::numeric_limits<std::size_t>::max();
 

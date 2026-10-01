@@ -12,7 +12,7 @@ import os
 import yaml
 
 
-SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022', 'velodyne', 'm3dgr', 'hortimulti')
+SUPPORTED_SENSORS = ('livox', 'hesai', 'hilti2022', 'velodyne', 'm3dgr', 'hortimulti', 'kitti')
 SUPPORTED_PROFILES = ('outdoor', 'indoor')
 
 
@@ -239,6 +239,23 @@ def _launch_setup(context):
         context,
         'backend_loop_closure_enable'
     )
+
+    loop_verifier_backend_override = (
+        LaunchConfiguration(
+            'loop_verifier_backend'
+        ).perform(context).strip().lower()
+    )
+
+    if (
+        loop_verifier_backend_override
+        and loop_verifier_backend_override
+        not in ('cpu', 'cuda', 'auto')
+    ):
+        raise RuntimeError(
+            'Invalid loop_verifier_backend='
+            + loop_verifier_backend_override
+            + '. Use cpu, cuda, or auto.'
+        )
     wall_constraint_override = _optional_boolean(
         context,
         'wall_constraint_enable'
@@ -274,7 +291,9 @@ def _launch_setup(context):
         'hesai': 'fr_slam_hesai.yaml',
         'hilti2022': 'fr_slam_hilti2022.yaml',
         'velodyne': 'velodyne.yaml',
+        'kitti': 'fr_slam_kitti.yaml',
         'm3dgr': 'fr_slam_m3dgr.yaml',
+        'hortimulti': 'fr_slam_hortimulti.yaml',
     }[sensor]
 
     source_slam_config_path = (
@@ -356,7 +375,7 @@ def _launch_setup(context):
     # Keep the original FR-SLAM offline calibration workflow for
     # Livox / Hesai profiles, but do not override the official Hilti
     # calibration.
-    if sensor in ('hilti2022', 'm3dgr'):
+    if sensor in ('hilti2022', 'm3dgr', 'hortimulti', 'kitti'):
         calibration_file = None
         q_il = None
     else:
@@ -427,6 +446,11 @@ def _launch_setup(context):
     if backend_loop_closure_override is not None:
         parameter_overrides['backend_loop_closure_enable'] = (
             backend_loop_closure_override
+        )
+
+    if loop_verifier_backend_override:
+        parameter_overrides['loop_verifier_backend'] = (
+            loop_verifier_backend_override
         )
 
     if wall_constraint_override is not None:
@@ -558,6 +582,14 @@ def generate_launch_description():
             description=(
                 'Optional loop-closure override: true/false; '
                 'empty uses the sensor YAML value'
+            )
+        ),
+        DeclareLaunchArgument(
+            'loop_verifier_backend',
+            default_value='',
+            description=(
+                'LoopVerifier compute backend: cpu/cuda/auto; '
+                'empty uses sensor YAML'
             )
         ),
         DeclareLaunchArgument(

@@ -58,3 +58,6 @@ cleanup_backup/
 *.backup
 *.orig
 *.rej
+/experiments/
+/output/
+/build/

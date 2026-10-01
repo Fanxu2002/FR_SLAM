@@ -1,6 +1,75 @@
 cmake_minimum_required(VERSION 3.8)
 project(fr_slam)
 
+# ------------------------------------------------------------
+# Optional CUDA acceleration for LoopVerifier.
+#
+# ON:
+#   use CUDA when a CUDA compiler is available.
+#
+# OFF or CUDA compiler unavailable:
+#   build the CPU stub.  The normal CPU verifier remains usable.
+# ------------------------------------------------------------
+option(
+    FR_SLAM_ENABLE_CUDA_LOOP_VERIFIER
+    "Build CUDA accelerated LoopVerifier"
+    ON
+)
+
+set(
+    FR_SLAM_LOOP_VERIFIER_ACCEL_SOURCE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_verifier_cuda_stub.cpp
+)
+
+set(FR_SLAM_CUDA_LOOP_VERIFIER_AVAILABLE OFF)
+
+if(FR_SLAM_ENABLE_CUDA_LOOP_VERIFIER)
+    include(CheckLanguage)
+    check_language(CUDA)
+
+    if(CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+
+        set(
+            FR_SLAM_LOOP_VERIFIER_ACCEL_SOURCE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_verifier_cuda.cu
+        )
+
+        set(FR_SLAM_CUDA_LOOP_VERIFIER_AVAILABLE ON)
+
+        set(CMAKE_CUDA_STANDARD 17)
+        set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(
+                CMAKE_CUDA_ARCHITECTURES
+                86
+                CACHE STRING
+                "CUDA architectures for FR-SLAM"
+            )
+        endif()
+
+        message(
+            STATUS
+            "FR-SLAM CUDA LoopVerifier: ENABLED "
+            "(${CMAKE_CUDA_COMPILER})"
+        )
+    else()
+        message(
+            WARNING
+            "FR-SLAM CUDA LoopVerifier requested but CUDA compiler "
+            "was not found; building CPU-only verifier"
+        )
+    endif()
+else()
+    message(
+        STATUS
+        "FR-SLAM CUDA LoopVerifier: DISABLED (CPU-only)"
+    )
+endif()
+
+
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -183,6 +252,10 @@ set(FR_SLAM_LO_FRONTEND_SOURCES
 )
 
 # --------------------------------------------------------------------------
+# LO frontend - long-memory 60/30 diagnostic
+# --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
 # LIO frontend
 # --------------------------------------------------------------------------
 set(FR_SLAM_LIO_FRONTEND_SOURCES
@@ -190,6 +263,22 @@ set(FR_SLAM_LIO_FRONTEND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_measurement.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_frontend.cpp
 )
+
+
+# --------------------------------------------------------------------------
+# LIO frontend - rotation update diagnostic
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# LIO frontend - D5 query-centered plane experiment
+# --------------------------------------------------------------------------
+set(FR_SLAM_LIO_QUERY_PLANE_FRONTEND_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/ieskf.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_measurement_query_plane.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend/lio/lio_frontend.cpp
+)
+
 
 # --------------------------------------------------------------------------
 # Ground constraint
@@ -209,6 +298,16 @@ set(FR_SLAM_MAPPING_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mapping/submap_manager.cpp
 )
 
+
+# --------------------------------------------------------------------------
+# LIO map-reference-age diagnostic
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# Mapping - 60/30 long-span same-count diagnostic
+# --------------------------------------------------------------------------
+
 # --------------------------------------------------------------------------
 # Loop closure
 # --------------------------------------------------------------------------
@@ -224,6 +323,65 @@ set(FR_SLAM_LOOP_SOURCES
 )
 
 # --------------------------------------------------------------------------
+# Loop closure - SC exact Verify reuse SHADOW diagnostic
+#
+# Formal FR_SLAM_LOOP_SOURCES remains unchanged.
+# --------------------------------------------------------------------------
+set(FR_SLAM_LOOP_SC_REUSE_DIAG_SOURCES
+    ${FR_SLAM_LOOP_SOURCES}
+)
+
+list(
+    REMOVE_ITEM
+    FR_SLAM_LOOP_SC_REUSE_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure.cpp
+)
+
+list(
+    APPEND
+    FR_SLAM_LOOP_SC_REUSE_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure_sc_reuse_diag.cpp
+)
+
+
+
+# --------------------------------------------------------------------------
+# Loop closure - SC exact Verify reuse ACTIVE V2 diagnostic
+# --------------------------------------------------------------------------
+set(FR_SLAM_LOOP_SC_REUSE_V2_DIAG_SOURCES
+    ${FR_SLAM_LOOP_SOURCES}
+)
+
+list(
+    REMOVE_ITEM
+    FR_SLAM_LOOP_SC_REUSE_V2_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure.cpp
+)
+
+list(
+    APPEND
+    FR_SLAM_LOOP_SC_REUSE_V2_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure_sc_reuse_v2_diag.cpp
+)
+
+set(FR_SLAM_LOOP_SC_REUSE_PARALLEL_V3_DIAG_SOURCES
+    ${FR_SLAM_LOOP_SOURCES}
+)
+
+list(
+    REMOVE_ITEM
+    FR_SLAM_LOOP_SC_REUSE_PARALLEL_V3_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure.cpp
+)
+
+list(
+    APPEND
+    FR_SLAM_LOOP_SC_REUSE_PARALLEL_V3_DIAG_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/loop/loop_closure_sc_reuse_parallel_v3_diag.cpp
+)
+
+
+# --------------------------------------------------------------------------
 # Backend
 # --------------------------------------------------------------------------
 set(FR_SLAM_BACKEND_SOURCES
@@ -234,6 +392,7 @@ set(FR_SLAM_BACKEND_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/global_map_backend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/post_pgo_refinement.cpp
 )
+
 
 # --------------------------------------------------------------------------
 # Third party
@@ -260,7 +419,10 @@ target_sources(
 
     ${FR_SLAM_MAPPING_SOURCES}
     ${FR_SLAM_LOOP_SOURCES}
+    ${FR_SLAM_LOOP_VERIFIER_ACCEL_SOURCE}
+
     ${FR_SLAM_BACKEND_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/pgo_ground_confidence_bridge.cpp
 
     ${FR_SLAM_THIRD_PARTY_SOURCES}
 )
@@ -348,9 +510,19 @@ target_sources(
 
     ${FR_SLAM_MAPPING_SOURCES}
     ${FR_SLAM_LOOP_SOURCES}
+    ${FR_SLAM_LOOP_VERIFIER_ACCEL_SOURCE}
     ${FR_SLAM_BACKEND_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/backend/pgo_ground_confidence_bridge.cpp
 
     ${FR_SLAM_THIRD_PARTY_SOURCES}
+)
+
+set_target_properties(
+    lio
+    PROPERTIES
+    CUDA_ARCHITECTURES 86
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
 )
 
 target_include_directories(
@@ -407,13 +579,47 @@ target_compile_definitions(
     FR_SLAM_BTC_CONFIG_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/config/btc\"
 )
 
-#   OFFLINE LIDAR-IMU ROTATION CALIBRATION
+
+
+
+
+
+# ============================================
+#   LIO GRAVITY PRIOR 0.5 DEG ABLATION
 # ============================================
 #
-# This is a normal C++ executable installed in the ROS 2 package so it can be
-# launched with `ros2 run`. It does not create an rclcpp::Node and does not
-# subscribe to topics. It reads the synchronized CSV exported by lo.
+# Single-variable ablation:
+# initial gravity uncertainty
+#   2.0 deg -> 0.5 deg
+#
+# All normal LIO frontend / IESKF / mapping /
+# backend source files remain identical.
 # ============================================
+
+
+# ============================================
+#   LIO MAP REFERENCE AGE DIAGNOSTIC
+# ============================================
+#
+# Baseline 30/15 architecture.
+#
+# Changes only:
+#   lio_measurement_ref_age_diag.cpp
+#   submap_manager_ref_age_diag.cpp
+#   map_ref_age_registry.cpp
+#
+# ============================================
+
+# ============================================================
+# Historical diagnostic / ablation executables
+#
+# Legacy experiment target definitions were archived under:
+#   experiments/legacy_cmake/
+#
+# Mature functionality has been promoted into the production
+# lio target. Runtime diagnostics remain available in the
+# production implementation.
+# ============================================================
 
 add_executable(lidar_imu_rotation_calibration)
 
@@ -498,14 +704,57 @@ install(
       DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/launch
       DESTINATION share/${PROJECT_NAME}
 )
-install(
-  TARGETS
-          lo
-          lio
-          lidar_imu_rotation_calibration
-          ground_segmentation_debug
-  RUNTIME DESTINATION lib/${PROJECT_NAME})
 
+  # ---- Offline LIO vs GT evaluator ----
+add_executable(lio_gt_evaluator
+  tools/evaluation/lio_gt_evaluator.cpp
+)
+
+target_compile_features(lio_gt_evaluator PRIVATE cxx_std_17)
+
+target_link_libraries(lio_gt_evaluator PRIVATE
+  Eigen3::Eigen
+)
+
+install(TARGETS lio_gt_evaluator
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# ---- Offline trajectory frame converter ----
+add_executable(trajectory_frame_converter
+  tools/evaluation/trajectory_frame_converter.cpp
+)
+
+target_compile_features(
+  trajectory_frame_converter
+  PRIVATE cxx_std_17
+)
+
+target_link_libraries(
+  trajectory_frame_converter
+  PRIVATE Eigen3::Eigen
+)
+
+install(
+  TARGETS trajectory_frame_converter
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# ---- Generic Odometry CSV recorder ----
+add_executable(odometry_csv_recorder
+  tools/evaluation/odometry_csv_recorder.cpp
+)
+
+target_compile_features(odometry_csv_recorder PRIVATE cxx_std_17)
+
+ament_target_dependencies(odometry_csv_recorder
+  rclcpp
+  nav_msgs
+)
+
+install(TARGETS odometry_csv_recorder
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -513,5 +762,6 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
 
 ament_package()

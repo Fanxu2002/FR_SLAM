@@ -1,3 +1,4 @@
+#include "fr_slam/backend/pgo_ground_confidence_bridge.hpp"
 #include <fstream>
 #include <filesystem>
 #include <cstdlib>
@@ -371,6 +372,121 @@ bool LioFrontend::PropagateFilterToTime(
         return false;
     }
 
+
+    // FR_IMU_INPUT_DIAG_V1
+    // Diagnostic only: summarize the exact IMU samples that will be
+    // propagated from the current IESKF time to scan_start.
+    double imu_input_dt_sum = 0.0;
+    double imu_input_dt_min =
+        std::numeric_limits<double>::infinity();
+    double imu_input_dt_max = 0.0;
+
+    Eigen::Vector3d imu_input_gyro_integral_raw_I =
+        Eigen::Vector3d::Zero();
+
+    Eigen::Vector3d imu_input_gyro_integral_corrected_I =
+        Eigen::Vector3d::Zero();
+
+    double imu_input_max_gyro_norm = 0.0;
+    double imu_input_max_gyro_time =
+        exact_imu.front().timestamp;
+
+    Eigen::Vector3d imu_input_max_gyro =
+        Eigen::Vector3d::Zero();
+
+    const Eigen::Vector3d imu_input_bg =
+        ieskf_.State().gyro_bias;
+
+    for (std::size_t i = 0;
+         i + 1 < exact_imu.size();
+         ++i)
+    {
+        const IMU_DATA &a = exact_imu[i];
+        const IMU_DATA &b = exact_imu[i + 1];
+
+        const double dt =
+            b.timestamp - a.timestamp;
+
+        if (!std::isfinite(dt) ||
+            dt <= 0.0)
+        {
+            continue;
+        }
+
+        imu_input_dt_sum += dt;
+        imu_input_dt_min =
+            std::min(imu_input_dt_min, dt);
+        imu_input_dt_max =
+            std::max(imu_input_dt_max, dt);
+
+        const Eigen::Vector3d gyro_mid_raw =
+            0.5 * (a.gyro + b.gyro);
+
+        const Eigen::Vector3d gyro_mid_corrected =
+            gyro_mid_raw - imu_input_bg;
+
+        imu_input_gyro_integral_raw_I +=
+            gyro_mid_raw * dt;
+
+        imu_input_gyro_integral_corrected_I +=
+            gyro_mid_corrected * dt;
+
+        const double norm_a = a.gyro.norm();
+        const double norm_b = b.gyro.norm();
+
+        if (norm_a > imu_input_max_gyro_norm)
+        {
+            imu_input_max_gyro_norm = norm_a;
+            imu_input_max_gyro_time = a.timestamp;
+            imu_input_max_gyro = a.gyro;
+        }
+
+        if (norm_b > imu_input_max_gyro_norm)
+        {
+            imu_input_max_gyro_norm = norm_b;
+            imu_input_max_gyro_time = b.timestamp;
+            imu_input_max_gyro = b.gyro;
+        }
+    }
+
+    constexpr double kImuInputRadToDeg =
+        57.29577951308232;
+
+    std::cout
+        << std::fixed
+        << std::setprecision(9)
+        << "LIO_IMU_INPUT_DIAG"
+        << " | target_t=" << target_time
+        << " | state_t=" << current_time
+        << " | n=" << exact_imu.size()
+        << " | covered_dt=" << imu_input_dt_sum
+        << " | dt_min=" << imu_input_dt_min
+        << " | dt_max=" << imu_input_dt_max
+        << " | bg=["
+        << imu_input_bg.x() << " "
+        << imu_input_bg.y() << " "
+        << imu_input_bg.z() << "]"
+        << " | gyro_int_raw_deg=["
+        << (
+            imu_input_gyro_integral_raw_I *
+            kImuInputRadToDeg
+        ).transpose()
+        << "]"
+        << " | gyro_int_corr_deg=["
+        << (
+            imu_input_gyro_integral_corrected_I *
+            kImuInputRadToDeg
+        ).transpose()
+        << "]"
+        << " | max_gyro_norm_rad_s="
+        << imu_input_max_gyro_norm
+        << " | max_gyro_time="
+        << imu_input_max_gyro_time
+        << " | max_gyro=["
+        << imu_input_max_gyro.transpose()
+        << "]"
+        << std::endl;
+
     const double max_imu_dt =
         ieskf_.Config().max_imu_dt;
 
@@ -433,6 +549,12 @@ bool LioFrontend::PropagateFilterToTime(
         Eigen::Vector3d::Zero();
 
     Eigen::Vector3d propagation_dv_bias_W =
+        Eigen::Vector3d::Zero();
+
+    Eigen::Vector3d propagation_dv_bias_z_only_W =
+        Eigen::Vector3d::Zero();
+
+    Eigen::Vector3d propagation_dv_bias_xy_only_W =
         Eigen::Vector3d::Zero();
 
     Eigen::Vector3d propagation_dv_gravity_W =
@@ -776,6 +898,93 @@ bool LioFrontend::PropagateFilterToTime(
                     .normalized()
                     .toRotationMatrix();
 
+
+            // ========================================================
+            // FR_ACCEL_CF_SUBSTEP_V1
+            //
+            // Diagnostic only.
+            //
+            // Export the exact IMU endpoint samples and the exact
+            // pre-substep accelerometer bias used by propagation.
+            //
+            // Offline we will replace ONLY R_WI with GT R_WI and
+            // recompute:
+            //
+            //   0.5 * [
+            //       R_GT(t0) * (a0 - ba)
+            //     + R_GT(t1) * (a1 - ba)
+            //   ] * dt
+            //
+            // No filter state is modified here.
+            // ========================================================
+            std::cerr
+                << std::fixed
+                << std::setprecision(9)
+                << "FR_ACCEL_CF_SUBSTEP_V1"
+                << " | frame_t0="
+                << current_time
+                << " | frame_t1="
+                << target_time
+                << " | t0="
+                << imu0.timestamp
+                << " | t1="
+                << imu1.timestamp
+                << " | dt="
+                << substep_dt
+                << " | a0=["
+                << imu0.accelerometer.transpose()
+                << "]"
+                << " | a1=["
+                << imu1.accelerometer.transpose()
+                << "]"
+                << " | ba=["
+                << substep_state_before.accel_bias.transpose()
+                << "]"
+                << " | bridge="
+                << (
+                    use_constant_velocity_gap_bridge
+                        ? 1
+                        : 0
+                )
+
+                // FR_ATT_GRAV_SUBSTEP_DIAG_V1
+                // Diagnostic only: export the exact endpoint
+                // gravity states and the already-computed
+                // absolute R_WI matrices used by this substep.
+                << " | g0=["
+                << substep_state_before.gravity_W.transpose()
+                << "]"
+
+                << " | g1=["
+                << substep_state_after.gravity_W.transpose()
+                << "]"
+
+                << " | R0=["
+                << R_WI_begin(0, 0) << " "
+                << R_WI_begin(0, 1) << " "
+                << R_WI_begin(0, 2) << " "
+                << R_WI_begin(1, 0) << " "
+                << R_WI_begin(1, 1) << " "
+                << R_WI_begin(1, 2) << " "
+                << R_WI_begin(2, 0) << " "
+                << R_WI_begin(2, 1) << " "
+                << R_WI_begin(2, 2)
+                << "]"
+
+                << " | R1=["
+                << R_WI_end(0, 0) << " "
+                << R_WI_end(0, 1) << " "
+                << R_WI_end(0, 2) << " "
+                << R_WI_end(1, 0) << " "
+                << R_WI_end(1, 1) << " "
+                << R_WI_end(1, 2) << " "
+                << R_WI_end(2, 0) << " "
+                << R_WI_end(2, 1) << " "
+                << R_WI_end(2, 2)
+                << "]"
+
+                << std::endl;
+
             // ----------------------------------------------------
             // Raw accelerometer contribution:
             //
@@ -812,6 +1021,46 @@ bool LioFrontend::PropagateFilterToTime(
                 (bias_accel_begin_W +
                  bias_accel_end_W);
 
+            // ====================================================
+            // FR_BIAS_COMPONENT_DIAG_V1
+            //
+            // Exact FR-attitude decomposition of accelerometer
+            // bias contribution:
+            //
+            //   b_a = b_axy + b_az
+            // ====================================================
+            const Eigen::Vector3d accel_bias_z_only_I(
+                0.0,
+                0.0,
+                substep_state_before.accel_bias.z());
+
+            const Eigen::Vector3d accel_bias_xy_only_I(
+                substep_state_before.accel_bias.x(),
+                substep_state_before.accel_bias.y(),
+                0.0);
+
+            const Eigen::Vector3d bias_z_begin_W =
+                -R_WI_begin * accel_bias_z_only_I;
+
+            const Eigen::Vector3d bias_z_end_W =
+                -R_WI_end * accel_bias_z_only_I;
+
+            const Eigen::Vector3d bias_z_mid_W =
+                0.5 *
+                (bias_z_begin_W +
+                 bias_z_end_W);
+
+            const Eigen::Vector3d bias_xy_begin_W =
+                -R_WI_begin * accel_bias_xy_only_I;
+
+            const Eigen::Vector3d bias_xy_end_W =
+                -R_WI_end * accel_bias_xy_only_I;
+
+            const Eigen::Vector3d bias_xy_mid_W =
+                0.5 *
+                (bias_xy_begin_W +
+                 bias_xy_end_W);
+
             // ----------------------------------------------------
             // Gravity contribution.
             // ----------------------------------------------------
@@ -824,6 +1073,14 @@ bool LioFrontend::PropagateFilterToTime(
 
             propagation_dv_bias_W +=
                 bias_accel_mid_W *
+                substep_dt;
+
+            propagation_dv_bias_z_only_W +=
+                bias_z_mid_W *
+                substep_dt;
+
+            propagation_dv_bias_xy_only_W +=
+                bias_xy_mid_W *
                 substep_dt;
 
             propagation_dv_gravity_W +=
@@ -941,12 +1198,43 @@ bool LioFrontend::PropagateFilterToTime(
             << propagation_start_state.V_WI.z()
             << " | vz1="
             << propagation_end_state.V_WI.z()
+            << " | v0=["
+            << propagation_start_state.V_WI.x()
+            << " "
+            << propagation_start_state.V_WI.y()
+            << " "
+            << propagation_start_state.V_WI.z()
+            << "]"
+            << " | v1=["
+            << propagation_end_state.V_WI.x()
+            << " "
+            << propagation_end_state.V_WI.y()
+            << " "
+            << propagation_end_state.V_WI.z()
+            << "]"
+            << " | dv=["
+            << actual_delta_v_W.x()
+            << " "
+            << actual_delta_v_W.y()
+            << " "
+            << actual_delta_v_W.z()
+            << "]"
             << " | dvz="
             << actual_delta_v_W.z()
             << " | raw_Wz="
             << mean_raw_accel_W.z()
             << " | bias_Wz="
             << mean_bias_accel_W.z()
+            << " | bias_z_Wz="
+            << (
+                propagation_dv_bias_z_only_W.z() /
+                propagation_diagnostic_dt
+            )
+            << " | bias_xy_Wz="
+            << (
+                propagation_dv_bias_xy_only_W.z() /
+                propagation_diagnostic_dt
+            )
             << " | gravity_Wz="
             << mean_gravity_accel_W.z()
             << " | effective_Wz="
@@ -2178,7 +2466,7 @@ bool LioFrontend::ProcessGroundMeasurement(
             << ground_updated_state.V_WI.z()
 
             << " | z="
-            
+
 << baseline_T_WL.translation().z()
             << "->"
             << candidate_T_WL.translation().z()
@@ -2266,7 +2554,7 @@ bool LioFrontend::ProcessWallMeasurement(
     // Later, if needed, this can be replaced by the frozen Ground normal
     // without changing the Wall association representation.
     // ------------------------------------------------------------------------
-    
+
     if (!ground_reference_frozen_ ||
         !ground_reference_normal_W_.allFinite() ||
         ground_reference_normal_W_.norm() <= 1.0e-9)
@@ -2308,12 +2596,12 @@ bool LioFrontend::ProcessWallMeasurement(
     constexpr double kMaximumPlaneDistanceDifferenceM =
         0.10;
 
-    
+
 constexpr double kMaximumTranslationCorrectionM =
         0.03;
 
 
-    
+
 constexpr double kMaximumYawCorrectionDeg =
         0.50;
 
@@ -3377,6 +3665,44 @@ bool LioFrontend::ProcessFrame(
         return false;
     }
 
+    // FR_PGO_GROUND_CONF_PUBLISH_V3
+    const auto publish_pgo_ground_confidence_diag =
+        [&]()
+        {
+            fr_slam::PgoGroundConfidenceRecord
+                record;
+
+            record.timestamp =
+                scan_start_time;
+
+            record.segmentation_valid =
+                last_ground_segmentation_valid_;
+
+            if (last_ground_segmentation_valid_)
+            {
+                const fr_slam::GroundSegmentationResult &ground =
+                    last_ground_segmentation_result_;
+
+                record.support_constraint_valid =
+                    ground.support_constraint_valid;
+
+                record.confidence =
+                    ground.support_constraint_confidence;
+
+                record.anchor_valid =
+                    ground.support_clearance_anchor_valid;
+
+                record.anchor_error_m =
+                    ground.support_clearance_error_m;
+
+                record.anchor_tolerance_m =
+                    ground.support_clearance_anchor_tolerance_m;
+            }
+
+            fr_slam::PublishPgoGroundConfidenceFrame(
+                record);
+        };
+
     // ========================================================================
     // LIO_Z_DIAG: state before frame propagation.
     const LioState state_before_propagation =
@@ -3546,9 +3872,9 @@ bool LioFrontend::ProcessFrame(
         result.first_mapping_frame =
             true;
 
-        
 
-        
+
+
 ProcessGroundMeasurement(
         ground_measurement_cloud,
         result.processed_frame.cloud,
@@ -3567,6 +3893,7 @@ ProcessGroundMeasurement(
         result.success =
             result.T_WL.matrix().allFinite();
 
+        publish_pgo_ground_confidence_diag();
         return result.success;
     }
 
@@ -3590,7 +3917,7 @@ ProcessGroundMeasurement(
     // iterated update.  With allow_pose_correction=false this may bootstrap
     // the active Piecewise Frozen reference, but it NEVER modifies the state.
     // ========================================================================
-    
+
     // ========================================================================
     // ========================================================================
     // FR_CONTINUOUS_GROUND_FINAL
@@ -3660,6 +3987,34 @@ ProcessGroundMeasurement(
     // ========================================================================
     fr_slam::WallAssociationResult
         joint_wall_association;
+
+    // ========================================================================
+    // FR_WALL_WORLD_V5_MEASUREMENT_OWNERSHIP
+    //
+    // Trajectory-global Persistent Wall snapshot for the real V5 estimator
+    // path. Kept separate from the legacy submap-local Wall association.
+    // ========================================================================
+    fr_slam::WallAssociationResult
+        wall_v5_world_association;
+
+    bool wall_v5_world_ready =
+        false;
+
+    Eigen::Isometry3d wall_v5_baseline_T_OL =
+        Eigen::Isometry3d::Identity();
+
+    // FR_MULTI_FAMILY_WALL_HEADING_V1_FRAME_STATE
+    bool wall_multi_family_yaw_ready =
+        false;
+
+    double wall_multi_family_target_yaw_rad =
+        0.0;
+
+    Eigen::Vector3d wall_multi_family_up_O =
+        Eigen::Vector3d::UnitZ();
+
+    Eigen::Isometry3d wall_multi_family_baseline_T_OL =
+        Eigen::Isometry3d::Identity();
 
     bool joint_wall_ready =
         false;
@@ -3742,6 +4097,1794 @@ ProcessGroundMeasurement(
                 fr_slam::StoreLatestMultiPlaneResult(
                     multi_plane_result);
 
+                // ============================================================
+                // FR_WALL_WORLD_SHADOW_V4
+                //
+                // Run the SAME validated WallAssociation implementation in the
+                // frontend world/odom frame O, with a trajectory-global
+                // lifetime.  This is diagnostic-only and MUST NOT influence
+                // any local Wall proposal or IESKF measurement.
+                //
+                // Local V1:
+                //     T_SL + reset on PRIMARY Submap change
+                //
+                // World Shadow V4:
+                //     T_OL + never reset on PRIMARY Submap change
+                // ============================================================
+                ++wall_world_shadow_frame_index_;
+
+                // FR_WALL_HORIZONTAL_FRAGMENT_MERGE_V45
+                //
+                // Enable the conservative V4.4-validated fragment fallback
+                // ONLY for the trajectory-global World Shadow association.
+                // Existing submap-local Wall V1 remains legacy.
+                wall_world_shadow_association_
+                    .SetHorizontalFragmentMergeEnabled(
+                        true);
+
+                const fr_slam::WallAssociationResult
+                    wall_world_shadow_result =
+                        wall_world_shadow_association_.Update(
+                            multi_plane_result,
+                            baseline_T_OL_wall,
+                            wall_world_shadow_frame_index_);
+
+                // FR_WALL_WORLD_V5_MEASUREMENT_OWNERSHIP
+                wall_v5_world_association =
+                    wall_world_shadow_result;
+
+                wall_v5_baseline_T_OL =
+                    baseline_T_OL_wall;
+
+                wall_v5_world_ready =
+                    !wall_v5_world_association
+                         .active_static_walls.empty();
+
+                // ================================================================
+                // ================================================================
+                // ================================================================
+                // FR_MULTI_FAMILY_WALL_HEADING_V1_BEGIN
+                //
+                // Anchored Multi-Family Frozen Wall Heading.
+                //
+                // 1. First high-quality structural direction bootstraps Family 0.
+                // 2. Family 0 freezes after several temporal observations.
+                // 3. Frozen families estimate CURRENT yaw drift.
+                // 4. A new structural family may be created only while at least
+                //    one already-frozen family is simultaneously visible.
+                // 5. The new family's heading is de-biased by that yaw drift
+                //    BEFORE it is stored.
+                //
+                // Therefore newly appearing directions do NOT inherit accumulated
+                // LIO yaw drift.
+                //
+                // Wall plane sign ambiguity is handled as:
+                //     n == -n
+                //
+                // There is NO 90-degree Manhattan assumption.
+                // ================================================================
+
+                wall_multi_family_yaw_ready =
+                    false;
+
+                wall_multi_family_target_yaw_rad =
+                    0.0;
+
+                wall_multi_family_baseline_T_OL =
+                    wall_v5_baseline_T_OL;
+
+                Eigen::Vector3d heading_up_O =
+                    Eigen::Vector3d::UnitZ();
+
+                if (ground_reference_frozen_ &&
+                    ground_reference_normal_W_.allFinite() &&
+                    ground_reference_normal_W_.norm() > 1.0e-9)
+                {
+                    heading_up_O =
+                        ground_reference_normal_W_.normalized();
+                }
+                else
+                {
+                    const LioState heading_state =
+                        ieskf_.State();
+
+                    if (heading_state.gravity_W.allFinite() &&
+                        heading_state.gravity_W.norm() > 1.0e-6)
+                    {
+                        heading_up_O =
+                            -heading_state.gravity_W.normalized();
+                    }
+                }
+
+                wall_multi_family_up_O =
+                    heading_up_O;
+
+                constexpr double
+                    kWallHeadingMinimumQuality =
+                        0.90;
+
+                constexpr std::size_t
+                    kWallHeadingBootstrapFrames =
+                        5U;
+
+                constexpr std::size_t
+                    kWallHeadingMaximumFamilies =
+                        3U;
+
+                constexpr double
+                    kWallHeadingFamilyGateDeg =
+                        15.0;
+
+                constexpr double
+                    kWallHeadingYawDeadbandDeg =
+                        0.10;
+
+                constexpr double
+                    kWallHeadingMaximumCorrectionDeg =
+                        1.50;
+
+                constexpr double
+                    kDegToRad =
+                        0.017453292519943295;
+
+                constexpr double
+                    kRadToDeg =
+                        57.29577951308232;
+
+                struct WallHeadingObservation
+                {
+                    std::size_t persistent_wall_id =
+                        std::numeric_limits<std::size_t>::max();
+
+                    Eigen::Vector3d heading_O =
+                        Eigen::Vector3d::UnitX();
+
+                    double quality =
+                        0.0;
+                };
+
+                const auto horizontalize =
+                    [&heading_up_O](
+                        const Eigen::Vector3d &normal_O,
+                        Eigen::Vector3d &heading_O) -> bool
+                {
+                    if (!normal_O.allFinite())
+                    {
+                        return false;
+                    }
+
+                    heading_O =
+                        normal_O -
+                        heading_up_O *
+                            heading_up_O.dot(
+                                normal_O);
+
+                    const double norm =
+                        heading_O.norm();
+
+                    if (!std::isfinite(norm) ||
+                        norm < 1.0e-6)
+                    {
+                        return false;
+                    }
+
+                    heading_O /=
+                        norm;
+
+                    return heading_O.allFinite();
+                };
+
+                std::vector<WallHeadingObservation>
+                    heading_observations;
+
+                heading_observations.reserve(
+                    wall_v5_world_association
+                        .active_static_walls.size());
+
+                for (const fr_slam::ActiveWallAssociation &wall :
+                     wall_v5_world_association.active_static_walls)
+                {
+                    if (!std::isfinite(wall.quality) ||
+                        wall.quality <
+                            kWallHeadingMinimumQuality)
+                    {
+                        continue;
+                    }
+
+                    Eigen::Vector3d observed_heading_O;
+
+                    if (!horizontalize(
+                            wall.observed_normal_A,
+                            observed_heading_O))
+                    {
+                        continue;
+                    }
+
+                    WallHeadingObservation observation;
+
+                    observation.persistent_wall_id =
+                        wall.persistent_wall_id;
+
+                    observation.heading_O =
+                        observed_heading_O;
+
+                    observation.quality =
+                        wall.quality;
+
+                    heading_observations.push_back(
+                        observation);
+                }
+
+                const auto get_family_reference =
+                    [&](const std::size_t family_index,
+                        Eigen::Vector3d &reference_O) -> bool
+                {
+                    if (family_index >=
+                            wall_heading_family_frozen_.size() ||
+                        family_index >=
+                            wall_heading_family_heading_O_.size() ||
+                        family_index >=
+                            wall_heading_family_bootstrap_sum_O_.size())
+                    {
+                        return false;
+                    }
+
+                    if (wall_heading_family_frozen_[
+                            family_index])
+                    {
+                        reference_O =
+                            wall_heading_family_heading_O_[
+                                family_index];
+                    }
+                    else
+                    {
+                        reference_O =
+                            wall_heading_family_bootstrap_sum_O_[
+                                family_index];
+                    }
+
+                    return horizontalize(
+                        reference_O,
+                        reference_O);
+                };
+
+                const auto compare_heading =
+                    [&](const Eigen::Vector3d &reference_O,
+                        const Eigen::Vector3d &input_O,
+                        Eigen::Vector3d &aligned_O,
+                        double &signed_error_rad,
+                        double &absolute_error_deg) -> bool
+                {
+                    if (!reference_O.allFinite() ||
+                        !input_O.allFinite())
+                    {
+                        return false;
+                    }
+
+                    aligned_O =
+                        input_O;
+
+                    if (reference_O.dot(
+                            aligned_O) < 0.0)
+                    {
+                        aligned_O =
+                            -aligned_O;
+                    }
+
+                    const double cosine =
+                        std::clamp(
+                            reference_O.dot(
+                                aligned_O),
+                            -1.0,
+                            1.0);
+
+                    absolute_error_deg =
+                        std::acos(cosine) *
+                        kRadToDeg;
+
+                    signed_error_rad =
+                        std::atan2(
+                            heading_up_O.dot(
+                                reference_O.cross(
+                                    aligned_O)),
+                            cosine);
+
+                    return
+                        aligned_O.allFinite() &&
+                        std::isfinite(
+                            absolute_error_deg) &&
+                        std::isfinite(
+                            signed_error_rad);
+                };
+
+                const auto find_best_family =
+                    [&](const Eigen::Vector3d &heading_O,
+                        const bool frozen_only,
+                        std::size_t &best_family_index,
+                        Eigen::Vector3d &best_aligned_heading_O,
+                        double &best_signed_error_rad,
+                        double &best_absolute_error_deg) -> bool
+                {
+                    bool found =
+                        false;
+
+                    best_absolute_error_deg =
+                        std::numeric_limits<double>::infinity();
+
+                    for (std::size_t family_index = 0;
+                         family_index <
+                             wall_heading_family_frozen_.size();
+                         ++family_index)
+                    {
+                        if (frozen_only &&
+                            !wall_heading_family_frozen_[
+                                family_index])
+                        {
+                            continue;
+                        }
+
+                        Eigen::Vector3d family_reference_O;
+
+                        if (!get_family_reference(
+                                family_index,
+                                family_reference_O))
+                        {
+                            continue;
+                        }
+
+                        Eigen::Vector3d aligned_heading_O;
+
+                        double signed_error_rad =
+                            0.0;
+
+                        double absolute_error_deg =
+                            0.0;
+
+                        if (!compare_heading(
+                                family_reference_O,
+                                heading_O,
+                                aligned_heading_O,
+                                signed_error_rad,
+                                absolute_error_deg))
+                        {
+                            continue;
+                        }
+
+                        if (absolute_error_deg <
+                            best_absolute_error_deg)
+                        {
+                            found =
+                                true;
+
+                            best_family_index =
+                                family_index;
+
+                            best_aligned_heading_O =
+                                aligned_heading_O;
+
+                            best_signed_error_rad =
+                                signed_error_rad;
+
+                            best_absolute_error_deg =
+                                absolute_error_deg;
+                        }
+                    }
+
+                    return
+                        found &&
+                        best_absolute_error_deg <=
+                            kWallHeadingFamilyGateDeg;
+                };
+
+                bool any_frozen_family =
+                    false;
+
+                for (const bool frozen :
+                     wall_heading_family_frozen_)
+                {
+                    if (frozen)
+                    {
+                        any_frozen_family =
+                            true;
+
+                        break;
+                    }
+                }
+
+                // ------------------------------------------------------------
+                // Stage A:
+                // Bootstrap ONLY the first global family before any reference
+                // exists. No second family is allowed at this stage.
+                // ------------------------------------------------------------
+                if (!any_frozen_family &&
+                    !heading_observations.empty())
+                {
+                    if (wall_heading_family_frozen_.empty())
+                    {
+                        const auto best_observation =
+                            std::max_element(
+                                heading_observations.begin(),
+                                heading_observations.end(),
+                                [](
+                                    const WallHeadingObservation &a,
+                                    const WallHeadingObservation &b)
+                                {
+                                    return a.quality <
+                                           b.quality;
+                                });
+
+                        wall_heading_family_heading_O_
+                            .push_back(
+                                best_observation->heading_O);
+
+                        wall_heading_family_bootstrap_sum_O_
+                            .push_back(
+                                best_observation->heading_O);
+
+                        wall_heading_family_bootstrap_count_
+                            .push_back(
+                                1U);
+
+                        wall_heading_family_frozen_
+                            .push_back(
+                                false);
+
+                        wall_heading_family_source_id_
+                            .push_back(
+                                best_observation
+                                    ->persistent_wall_id);
+
+                        wall_heading_family_last_bootstrap_frame_
+                            .push_back(
+                                wall_world_shadow_frame_index_);
+
+                        std::cout
+                            << "LIO_WALL_HEADING_FAMILY_CREATED_V1"
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | family=0"
+                            << " | source_id="
+                            << best_observation
+                                   ->persistent_wall_id
+                            << " | anchored=0"
+                            << std::endl;
+                    }
+                    else
+                    {
+                        Eigen::Vector3d family_reference_O;
+
+                        if (get_family_reference(
+                                0U,
+                                family_reference_O))
+                        {
+                            double best_angle_deg =
+                                std::numeric_limits<double>
+                                    ::infinity();
+
+                            Eigen::Vector3d
+                                best_aligned_heading_O =
+                                    Eigen::Vector3d::Zero();
+
+                            bool found =
+                                false;
+
+                            for (const WallHeadingObservation &observation :
+                                 heading_observations)
+                            {
+                                Eigen::Vector3d
+                                    aligned_heading_O;
+
+                                double signed_error_rad =
+                                    0.0;
+
+                                double absolute_error_deg =
+                                    0.0;
+
+                                if (!compare_heading(
+                                        family_reference_O,
+                                        observation.heading_O,
+                                        aligned_heading_O,
+                                        signed_error_rad,
+                                        absolute_error_deg))
+                                {
+                                    continue;
+                                }
+
+                                if (absolute_error_deg <=
+                                        kWallHeadingFamilyGateDeg &&
+                                    absolute_error_deg <
+                                        best_angle_deg)
+                                {
+                                    found =
+                                        true;
+
+                                    best_angle_deg =
+                                        absolute_error_deg;
+
+                                    best_aligned_heading_O =
+                                        aligned_heading_O;
+                                }
+                            }
+
+                            if (found &&
+                                wall_heading_family_last_bootstrap_frame_[0] !=
+                                    wall_world_shadow_frame_index_)
+                            {
+                                wall_heading_family_bootstrap_sum_O_[0] +=
+                                    best_aligned_heading_O;
+
+                                ++wall_heading_family_bootstrap_count_[0];
+
+                                wall_heading_family_last_bootstrap_frame_[0] =
+                                    wall_world_shadow_frame_index_;
+                            }
+
+                            if (wall_heading_family_bootstrap_count_[0] >=
+                                kWallHeadingBootstrapFrames)
+                            {
+                                Eigen::Vector3d frozen_heading_O =
+                                    wall_heading_family_bootstrap_sum_O_[0];
+
+                                if (horizontalize(
+                                        frozen_heading_O,
+                                        frozen_heading_O))
+                                {
+                                    wall_heading_family_heading_O_[0] =
+                                        frozen_heading_O;
+
+                                    wall_heading_family_frozen_[0] =
+                                        true;
+
+                                    any_frozen_family =
+                                        true;
+
+                                    std::cout
+                                        << "LIO_WALL_HEADING_FAMILY_FROZEN_V1"
+                                        << " | frame="
+                                        << wall_world_shadow_frame_index_
+                                        << " | family=0"
+                                        << " | samples="
+                                        << wall_heading_family_bootstrap_count_[0]
+                                        << " | heading_O=["
+                                        << frozen_heading_O.x()
+                                        << ","
+                                        << frozen_heading_O.y()
+                                        << ","
+                                        << frozen_heading_O.z()
+                                        << "]"
+                                        << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ------------------------------------------------------------
+                // Stage B:
+                // Frozen families estimate the CURRENT yaw drift.
+                // ------------------------------------------------------------
+                double weighted_sin =
+                    0.0;
+
+                double weighted_cos =
+                    0.0;
+
+                double total_weight =
+                    0.0;
+
+                std::size_t anchor_matches =
+                    0U;
+
+                if (any_frozen_family)
+                {
+                    for (const WallHeadingObservation &observation :
+                         heading_observations)
+                    {
+                        std::size_t family_index =
+                            0U;
+
+                        Eigen::Vector3d
+                            aligned_heading_O;
+
+                        double signed_error_rad =
+                            0.0;
+
+                        double absolute_error_deg =
+                            0.0;
+
+                        if (!find_best_family(
+                                observation.heading_O,
+                                true,
+                                family_index,
+                                aligned_heading_O,
+                                signed_error_rad,
+                                absolute_error_deg))
+                        {
+                            continue;
+                        }
+
+                        const double weight =
+                            std::clamp(
+                                observation.quality,
+                                0.0,
+                                1.0);
+
+                        weighted_sin +=
+                            weight *
+                            std::sin(
+                                signed_error_rad);
+
+                        weighted_cos +=
+                            weight *
+                            std::cos(
+                                signed_error_rad);
+
+                        total_weight +=
+                            weight;
+
+                        ++anchor_matches;
+                    }
+                }
+
+                const bool anchor_valid =
+                    anchor_matches > 0U &&
+                    total_weight > 1.0e-9;
+
+                double anchor_drift_rad =
+                    0.0;
+
+                if (anchor_valid)
+                {
+                    anchor_drift_rad =
+                        std::atan2(
+                            weighted_sin,
+                            weighted_cos);
+
+                    const double anchor_drift_deg =
+                        anchor_drift_rad *
+                        kRadToDeg;
+
+                    if (std::isfinite(
+                            anchor_drift_rad) &&
+                        std::abs(
+                            anchor_drift_deg) >=
+                            kWallHeadingYawDeadbandDeg)
+                    {
+                        const double maximum_correction_rad =
+                            kWallHeadingMaximumCorrectionDeg *
+                            kDegToRad;
+
+                        wall_multi_family_target_yaw_rad =
+                            std::clamp(
+                                -anchor_drift_rad,
+                                -maximum_correction_rad,
+                                maximum_correction_rad);
+
+                        wall_multi_family_yaw_ready =
+                            true;
+                    }
+
+                    if ((wall_world_shadow_frame_index_ %
+                         100U) == 0U)
+                    {
+                        std::size_t frozen_count =
+                            0U;
+
+                        for (const bool frozen :
+                             wall_heading_family_frozen_)
+                        {
+                            if (frozen)
+                            {
+                                ++frozen_count;
+                            }
+                        }
+
+                        std::cout
+                            << "LIO_MULTI_FAMILY_WALL_HEADING_V1"
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | families="
+                            << wall_heading_family_frozen_.size()
+                            << " | frozen="
+                            << frozen_count
+                            << " | anchor_matches="
+                            << anchor_matches
+                            << " | error_deg="
+                            << anchor_drift_deg
+                            << " | target_deg="
+                            << wall_multi_family_target_yaw_rad *
+                                   kRadToDeg
+                            << " | ready="
+                            << (wall_multi_family_yaw_ready
+                                    ? 1
+                                    : 0)
+                            << std::endl;
+                    }
+                }
+
+                // ------------------------------------------------------------
+                // Stage C:
+                // If an old frozen family is visible, use its yaw residual to
+                // de-bias ALL current headings before learning new families.
+                // ------------------------------------------------------------
+                if (anchor_valid)
+                {
+                    const Eigen::Matrix3d yaw_debias_rotation =
+                        Eigen::AngleAxisd(
+                            -anchor_drift_rad,
+                            heading_up_O)
+                            .toRotationMatrix();
+
+                    for (const WallHeadingObservation &observation :
+                         heading_observations)
+                    {
+                        Eigen::Vector3d corrected_heading_O =
+                            yaw_debias_rotation *
+                            observation.heading_O;
+
+                        if (!horizontalize(
+                                corrected_heading_O,
+                                corrected_heading_O))
+                        {
+                            continue;
+                        }
+
+                        std::size_t family_index =
+                            0U;
+
+                        Eigen::Vector3d
+                            aligned_heading_O;
+
+                        double signed_error_rad =
+                            0.0;
+
+                        double absolute_error_deg =
+                            0.0;
+
+                        const bool matched =
+                            find_best_family(
+                                corrected_heading_O,
+                                false,
+                                family_index,
+                                aligned_heading_O,
+                                signed_error_rad,
+                                absolute_error_deg);
+
+                        if (matched)
+                        {
+                            if (!wall_heading_family_frozen_[
+                                    family_index] &&
+                                wall_heading_family_last_bootstrap_frame_[
+                                    family_index] !=
+                                    wall_world_shadow_frame_index_)
+                            {
+                                wall_heading_family_bootstrap_sum_O_[
+                                    family_index] +=
+                                        aligned_heading_O;
+
+                                ++wall_heading_family_bootstrap_count_[
+                                    family_index];
+
+                                wall_heading_family_last_bootstrap_frame_[
+                                    family_index] =
+                                        wall_world_shadow_frame_index_;
+
+                                if (wall_heading_family_bootstrap_count_[
+                                        family_index] >=
+                                    kWallHeadingBootstrapFrames)
+                                {
+                                    Eigen::Vector3d frozen_heading_O =
+                                        wall_heading_family_bootstrap_sum_O_[
+                                            family_index];
+
+                                    if (horizontalize(
+                                            frozen_heading_O,
+                                            frozen_heading_O))
+                                    {
+                                        wall_heading_family_heading_O_[
+                                            family_index] =
+                                                frozen_heading_O;
+
+                                        wall_heading_family_frozen_[
+                                            family_index] =
+                                                true;
+
+                                        std::cout
+                                            << "LIO_WALL_HEADING_FAMILY_FROZEN_V1"
+                                            << " | frame="
+                                            << wall_world_shadow_frame_index_
+                                            << " | family="
+                                            << family_index
+                                            << " | samples="
+                                            << wall_heading_family_bootstrap_count_[
+                                                   family_index]
+                                            << " | heading_O=["
+                                            << frozen_heading_O.x()
+                                            << ","
+                                            << frozen_heading_O.y()
+                                            << ","
+                                            << frozen_heading_O.z()
+                                            << "]"
+                                            << std::endl;
+                                    }
+                                }
+                            }
+
+                            continue;
+                        }
+
+                        if (wall_heading_family_frozen_.size() >=
+                            kWallHeadingMaximumFamilies)
+                        {
+                            continue;
+                        }
+
+                        const std::size_t new_family_index =
+                            wall_heading_family_frozen_.size();
+
+                        wall_heading_family_heading_O_
+                            .push_back(
+                                corrected_heading_O);
+
+                        wall_heading_family_bootstrap_sum_O_
+                            .push_back(
+                                corrected_heading_O);
+
+                        wall_heading_family_bootstrap_count_
+                            .push_back(
+                                1U);
+
+                        wall_heading_family_frozen_
+                            .push_back(
+                                false);
+
+                        wall_heading_family_source_id_
+                            .push_back(
+                                observation.persistent_wall_id);
+
+                        wall_heading_family_last_bootstrap_frame_
+                            .push_back(
+                                wall_world_shadow_frame_index_);
+
+                        std::cout
+                            << "LIO_WALL_HEADING_FAMILY_CREATED_V1"
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | family="
+                            << new_family_index
+                            << " | source_id="
+                            << observation.persistent_wall_id
+                            << " | anchored=1"
+                            << " | anchor_error_deg="
+                            << anchor_drift_rad *
+                                   kRadToDeg
+                            << " | heading_O=["
+                            << corrected_heading_O.x()
+                            << ","
+                            << corrected_heading_O.y()
+                            << ","
+                            << corrected_heading_O.z()
+                            << "]"
+                            << std::endl;
+                    }
+                }
+
+                // FR_MULTI_FAMILY_WALL_HEADING_V1_END
+                if ((wall_world_shadow_frame_index_ % 20U) == 0U ||
+                    !wall_world_shadow_result
+                         .active_static_walls.empty())
+                {
+                    std::cout
+                        << "LIO_WALL_WORLD_SHADOW_V4"
+                        << " | submap="
+                        << submap_context.primary_submap_id
+                        << " | frame="
+                        << wall_world_shadow_frame_index_
+                        << " | persistent_total="
+                        << wall_world_shadow_result.persistent_walls
+                        << " | active_static="
+                        << wall_world_shadow_result
+                               .active_static_wall_count
+                        << " | active_ids=[";
+
+                    for (std::size_t wall_index = 0;
+                         wall_index <
+                             wall_world_shadow_result
+                                 .active_static_walls.size();
+                         ++wall_index)
+                    {
+                        if (wall_index > 0U)
+                        {
+                            std::cout << ",";
+                        }
+
+                        std::cout
+                            << wall_world_shadow_result
+                                   .active_static_walls[wall_index]
+                                   .persistent_wall_id;
+                    }
+
+                    std::cout
+                        << "]"
+                        << std::endl;
+                }
+
+                // ============================================================
+                // FR_WALL_WORLD_SHADOW_V41_GEOMETRY_AUDIT
+                //
+                // Diagnostic only:
+                //   Inspect the geometry of every ACTIVE world-persistent wall.
+                //
+                // The shadow association is already running in frontend
+                // world/odom frame O, therefore reference_*_A and observed_*_A
+                // below are world-frame quantities for this shadow instance.
+                //
+                // NO value from this block is fed back into Local Wall,
+                // Ground, Dense LIO, IESKF, Loop, or PGO.
+                // ============================================================
+                for (const fr_slam::ActiveWallAssociation &shadow_wall :
+                     wall_world_shadow_result.active_static_walls)
+                {
+                    const double signed_plane_difference_m =
+                        shadow_wall.observed_d_A -
+                        shadow_wall.reference_d_A;
+
+                    std::cout
+                        << "LIO_WALL_WORLD_TRACK_V41"
+                        << " | submap="
+                        << submap_context.primary_submap_id
+                        << " | frame="
+                        << wall_world_shadow_frame_index_
+                        << " | id="
+                        << shadow_wall.persistent_wall_id
+                        << " | quality="
+                        << shadow_wall.quality
+                        << " | normal_diff_deg="
+                        << shadow_wall.normal_difference_deg
+                        << " | plane_diff_m="
+                        << shadow_wall.plane_distance_difference_m
+                        << " | signed_d_diff_m="
+                        << signed_plane_difference_m
+                        << " | ref_d="
+                        << shadow_wall.reference_d_A
+                        << " | obs_d="
+                        << shadow_wall.observed_d_A
+                        << " | ref_n=["
+                        << shadow_wall.reference_normal_A.transpose()
+                        << "]"
+                        << " | obs_n=["
+                        << shadow_wall.observed_normal_A.transpose()
+                        << "]"
+                        << " | center=["
+                        << shadow_wall.observed_center_A.transpose()
+                        << "]"
+                        << " | radius="
+                        << shadow_wall.observed_radius_m
+                        << std::endl;
+                }
+
+
+                // ============================================================
+                // FR_WALL_WORLD_SHADOW_V42_CORRECTION
+                //
+                // Diagnostic-only correction/observability shadow.
+                //
+                // 1) Project each world-wall normal to the horizontal plane.
+                // 2) Compute the wall-normal pose translation correction that
+                //    would bring the observed wall back to the frozen wall.
+                // 3) Compute the yaw correction that would align the observed
+                //    horizontal normal with the frozen reference normal.
+                // 4) Accumulate a 2x2 horizontal observability matrix.
+                //
+                // IMPORTANT:
+                //   This block NEVER modifies the IESKF state and NEVER feeds
+                //   any quantity into the existing Local Wall path.
+                // ============================================================
+                {
+                    const Eigen::Vector3d vertical_axis_O =
+                        Eigen::Vector3d::UnitZ();
+
+                    Eigen::Matrix2d wall_xy_information =
+                        Eigen::Matrix2d::Zero();
+
+                    std::size_t usable_world_walls = 0;
+
+                    for (const fr_slam::ActiveWallAssociation &shadow_wall :
+                         wall_world_shadow_result.active_static_walls)
+                    {
+                        Eigen::Vector3d reference_horizontal_normal_O =
+                            shadow_wall.reference_normal_A -
+                            vertical_axis_O *
+                                shadow_wall.reference_normal_A.dot(
+                                    vertical_axis_O);
+
+                        Eigen::Vector3d observed_horizontal_normal_O =
+                            shadow_wall.observed_normal_A -
+                            vertical_axis_O *
+                                shadow_wall.observed_normal_A.dot(
+                                    vertical_axis_O);
+
+                        const double reference_horizontal_norm =
+                            reference_horizontal_normal_O.norm();
+
+                        const double observed_horizontal_norm =
+                            observed_horizontal_normal_O.norm();
+
+                        const bool horizontal_normals_valid =
+                            std::isfinite(reference_horizontal_norm) &&
+                            std::isfinite(observed_horizontal_norm) &&
+                            reference_horizontal_norm > 1.0e-6 &&
+                            observed_horizontal_norm > 1.0e-6;
+
+                        if (!horizontal_normals_valid)
+                        {
+                            std::cout
+                                << "LIO_WALL_WORLD_CORRECTION_V42"
+                                << " | submap="
+                                << submap_context.primary_submap_id
+                                << " | frame="
+                                << wall_world_shadow_frame_index_
+                                << " | id="
+                                << shadow_wall.persistent_wall_id
+                                << " | usable=0"
+                                << " | reason=horizontal_normal_invalid"
+                                << std::endl;
+                            continue;
+                        }
+
+                        reference_horizontal_normal_O /=
+                            reference_horizontal_norm;
+
+                        observed_horizontal_normal_O /=
+                            observed_horizontal_norm;
+
+                        if (reference_horizontal_normal_O.dot(
+                                observed_horizontal_normal_O) < 0.0)
+                        {
+                            observed_horizontal_normal_O =
+                                -observed_horizontal_normal_O;
+                        }
+
+                        const double horizontal_cross_z =
+                            observed_horizontal_normal_O.x() *
+                                reference_horizontal_normal_O.y() -
+                            observed_horizontal_normal_O.y() *
+                                reference_horizontal_normal_O.x();
+
+                        const double horizontal_dot =
+                            std::clamp(
+                                observed_horizontal_normal_O.dot(
+                                    reference_horizontal_normal_O),
+                                -1.0,
+                                1.0);
+
+                        // Signed yaw correction needed to rotate the current
+                        // observed horizontal normal into the frozen reference.
+                        const double proposed_yaw_correction_rad =
+                            std::atan2(
+                                horizontal_cross_z,
+                                horizontal_dot);
+
+                        const double proposed_yaw_correction_deg =
+                            proposed_yaw_correction_rad *
+                            180.0 / M_PI;
+
+                        // Evaluate the observed wall center directly in the
+                        // frozen reference plane.
+                        const double reference_plane_center_residual_m =
+                            shadow_wall.reference_normal_A.dot(
+                                shadow_wall.observed_center_A) +
+                            shadow_wall.reference_d_A;
+
+                        // To zero the point-to-plane residual:
+                        //   n_ref^T * delta_t = -residual.
+                        const double proposed_lateral_correction_m =
+                            -reference_plane_center_residual_m;
+
+                        const Eigen::Vector2d horizontal_normal_xy(
+                            reference_horizontal_normal_O.x(),
+                            reference_horizontal_normal_O.y());
+
+                        const double observation_weight =
+                            std::max(0.0, shadow_wall.quality);
+
+                        wall_xy_information +=
+                            observation_weight *
+                            horizontal_normal_xy *
+                            horizontal_normal_xy.transpose();
+
+                        ++usable_world_walls;
+
+                        std::cout
+                            << "LIO_WALL_WORLD_CORRECTION_V42"
+                            << " | submap="
+                            << submap_context.primary_submap_id
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | id="
+                            << shadow_wall.persistent_wall_id
+                            << " | usable=1"
+                            << " | quality="
+                            << shadow_wall.quality
+                            << " | horizontal_normal_diff_deg="
+                            << std::abs(proposed_yaw_correction_deg)
+                            << " | proposed_yaw_deg="
+                            << proposed_yaw_correction_deg
+                            << " | center_plane_residual_m="
+                            << reference_plane_center_residual_m
+                            << " | proposed_lateral_m="
+                            << proposed_lateral_correction_m
+                            << " | ref_h=["
+                            << reference_horizontal_normal_O.x()
+                            << " "
+                            << reference_horizontal_normal_O.y()
+                            << "]"
+                            << " | obs_h=["
+                            << observed_horizontal_normal_O.x()
+                            << " "
+                            << observed_horizontal_normal_O.y()
+                            << "]"
+                            << " | radius="
+                            << shadow_wall.observed_radius_m
+                            << std::endl;
+                    }
+
+                    const double h00 = wall_xy_information(0, 0);
+                    const double h01 = wall_xy_information(0, 1);
+                    const double h11 = wall_xy_information(1, 1);
+
+                    const double trace_xy = h00 + h11;
+                    const double eigen_discriminant =
+                        std::sqrt(
+                            std::max(
+                                0.0,
+                                (h00 - h11) * (h00 - h11) +
+                                4.0 * h01 * h01));
+
+                    const double lambda_max =
+                        0.5 * (trace_xy + eigen_discriminant);
+
+                    const double lambda_min =
+                        0.5 * (trace_xy - eigen_discriminant);
+
+                    const double observability_ratio =
+                        (lambda_max > 1.0e-12)
+                            ? (lambda_min / lambda_max)
+                            : 0.0;
+
+                    int horizontal_rank = 0;
+
+                    if (lambda_max > 1.0e-6)
+                    {
+                        horizontal_rank = 1;
+                    }
+
+                    // Diagnostic rank-2 criterion: the second horizontal
+                    // eigenvalue carries at least 5% of the dominant one.
+                    if (lambda_min > 1.0e-6 &&
+                        observability_ratio >= 0.05)
+                    {
+                        horizontal_rank = 2;
+                    }
+
+                    if (!wall_world_shadow_result
+                             .active_static_walls.empty())
+                    {
+                        std::cout
+                            << "LIO_WALL_WORLD_OBSERVABILITY_V42"
+                            << " | submap="
+                            << submap_context.primary_submap_id
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | active_walls="
+                            << wall_world_shadow_result
+                                   .active_static_walls.size()
+                            << " | usable_walls="
+                            << usable_world_walls
+                            << " | Hxy=["
+                            << h00
+                            << ","
+                            << h01
+                            << ";"
+                            << h01
+                            << ","
+                            << h11
+                            << "]"
+                            << " | lambda_min="
+                            << lambda_min
+                            << " | lambda_max="
+                            << lambda_max
+                            << " | ratio="
+                            << observability_ratio
+                            << " | rank="
+                            << horizontal_rank
+                            << std::endl;
+                    }
+                }
+
+
+                // ============================================================
+                // FR_WALL_WORLD_SHADOW_V43_OWNERSHIP
+                //
+                // Diagnostic-only point ownership shadow.
+                //
+                // MultiPlane/WallAssociation currently retains only plane
+                // summaries (normal/d/center/radius/quality), not original
+                // support point indices.  Therefore test whether reliable
+                // Wall measurement ownership can be reconstructed from the
+                // current processed LiDAR cloud using:
+                //
+                //   1) observed World Wall plane distance
+                //   2) observed wall tangent support radius
+                //
+                // Three plane bands are audited: 5 cm / 8 cm / 12 cm.
+                //
+                // IMPORTANT:
+                //   - NO point is removed from Dense LIO here.
+                //   - NO Wall residual is added to IESKF here.
+                //   - This block is diagnostics only.
+                // ============================================================
+                if (result.processed_frame.cloud &&
+                    !result.processed_frame.cloud->empty() &&
+                    !wall_world_shadow_result.active_static_walls.empty())
+                {
+                    constexpr double kPlaneGate05M = 0.05;
+                    constexpr double kPlaneGate08M = 0.08;
+                    constexpr double kPlaneGate12M = 0.12;
+
+                    const std::size_t input_point_count =
+                        result.processed_frame.cloud->size();
+
+                    std::size_t unique_owned_05 = 0;
+                    std::size_t ambiguous_owned_05 = 0;
+
+                    std::size_t unique_owned_08 = 0;
+                    std::size_t ambiguous_owned_08 = 0;
+
+                    std::size_t unique_owned_12 = 0;
+                    std::size_t ambiguous_owned_12 = 0;
+
+                    const Eigen::Matrix3d R_OL_shadow =
+                        baseline_T_OL_wall.rotation();
+
+                    const Eigen::Vector3d t_OL_shadow =
+                        baseline_T_OL_wall.translation();
+
+                    for (const auto &point_L :
+                         result.processed_frame.cloud->points)
+                    {
+                        const Eigen::Vector3d p_L(
+                            static_cast<double>(point_L.x),
+                            static_cast<double>(point_L.y),
+                            static_cast<double>(point_L.z));
+
+                        if (!p_L.allFinite())
+                        {
+                            continue;
+                        }
+
+                        const Eigen::Vector3d p_O =
+                            R_OL_shadow * p_L +
+                            t_OL_shadow;
+
+                        std::size_t matches_05 = 0;
+                        std::size_t matches_08 = 0;
+                        std::size_t matches_12 = 0;
+
+                        for (const fr_slam::ActiveWallAssociation &shadow_wall :
+                             wall_world_shadow_result.active_static_walls)
+                        {
+                            Eigen::Vector3d observed_normal_O =
+                                shadow_wall.observed_normal_A;
+
+                            double observed_d_O =
+                                shadow_wall.observed_d_A;
+
+                            const double normal_norm =
+                                observed_normal_O.norm();
+
+                            if (!observed_normal_O.allFinite() ||
+                                !std::isfinite(observed_d_O) ||
+                                !shadow_wall.observed_center_A.allFinite() ||
+                                !std::isfinite(shadow_wall.observed_radius_m) ||
+                                normal_norm < 1.0e-9 ||
+                                shadow_wall.observed_radius_m <= 0.0)
+                            {
+                                continue;
+                            }
+
+                            observed_normal_O /= normal_norm;
+                            observed_d_O /= normal_norm;
+
+                            const double plane_distance_m =
+                                std::abs(
+                                    observed_normal_O.dot(p_O) +
+                                    observed_d_O);
+
+                            const Eigen::Vector3d center_delta_O =
+                                p_O -
+                                shadow_wall.observed_center_A;
+
+                            const Eigen::Vector3d tangent_delta_O =
+                                center_delta_O -
+                                observed_normal_O *
+                                    observed_normal_O.dot(
+                                        center_delta_O);
+
+                            const double tangent_distance_m =
+                                tangent_delta_O.norm();
+
+                            const bool inside_support =
+                                std::isfinite(tangent_distance_m) &&
+                                tangent_distance_m <=
+                                    shadow_wall.observed_radius_m;
+
+                            if (!inside_support)
+                            {
+                                continue;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate05M)
+                            {
+                                ++matches_05;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate08M)
+                            {
+                                ++matches_08;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate12M)
+                            {
+                                ++matches_12;
+                            }
+                        }
+
+                        if (matches_05 == 1U)
+                        {
+                            ++unique_owned_05;
+                        }
+                        else if (matches_05 > 1U)
+                        {
+                            ++ambiguous_owned_05;
+                        }
+
+                        if (matches_08 == 1U)
+                        {
+                            ++unique_owned_08;
+                        }
+                        else if (matches_08 > 1U)
+                        {
+                            ++ambiguous_owned_08;
+                        }
+
+                        if (matches_12 == 1U)
+                        {
+                            ++unique_owned_12;
+                        }
+                        else if (matches_12 > 1U)
+                        {
+                            ++ambiguous_owned_12;
+                        }
+                    }
+
+                    const auto fraction =
+                        [input_point_count](std::size_t count) -> double
+                        {
+                            if (input_point_count == 0U)
+                            {
+                                return 0.0;
+                            }
+
+                            return static_cast<double>(count) /
+                                   static_cast<double>(input_point_count);
+                        };
+
+                    std::cout
+                        << "LIO_WALL_WORLD_OWNERSHIP_V43"
+                        << " | submap="
+                        << submap_context.primary_submap_id
+                        << " | frame="
+                        << wall_world_shadow_frame_index_
+                        << " | walls="
+                        << wall_world_shadow_result
+                               .active_static_walls.size()
+                        << " | input="
+                        << input_point_count
+                        << " | unique05="
+                        << unique_owned_05
+                        << " | ambiguous05="
+                        << ambiguous_owned_05
+                        << " | frac05="
+                        << fraction(unique_owned_05)
+                        << " | unique08="
+                        << unique_owned_08
+                        << " | ambiguous08="
+                        << ambiguous_owned_08
+                        << " | frac08="
+                        << fraction(unique_owned_08)
+                        << " | unique12="
+                        << unique_owned_12
+                        << " | ambiguous12="
+                        << ambiguous_owned_12
+                        << " | frac12="
+                        << fraction(unique_owned_12)
+                        << std::endl;
+
+                    // Per-wall support counts. These are deliberately reported
+                    // independently; when two Wall tracks overlap, a point may
+                    // appear in both per-wall counts. The frame-level
+                    // ambiguousXX fields above expose that overlap explicitly.
+                    for (const fr_slam::ActiveWallAssociation &shadow_wall :
+                         wall_world_shadow_result.active_static_walls)
+                    {
+                        Eigen::Vector3d observed_normal_O =
+                            shadow_wall.observed_normal_A;
+
+                        double observed_d_O =
+                            shadow_wall.observed_d_A;
+
+                        const double normal_norm =
+                            observed_normal_O.norm();
+
+                        if (!observed_normal_O.allFinite() ||
+                            !std::isfinite(observed_d_O) ||
+                            !shadow_wall.observed_center_A.allFinite() ||
+                            !std::isfinite(shadow_wall.observed_radius_m) ||
+                            normal_norm < 1.0e-9 ||
+                            shadow_wall.observed_radius_m <= 0.0)
+                        {
+                            continue;
+                        }
+
+                        observed_normal_O /= normal_norm;
+                        observed_d_O /= normal_norm;
+
+                        std::size_t wall_owned_05 = 0;
+                        std::size_t wall_owned_08 = 0;
+                        std::size_t wall_owned_12 = 0;
+
+                        for (const auto &point_L :
+                             result.processed_frame.cloud->points)
+                        {
+                            const Eigen::Vector3d p_L(
+                                static_cast<double>(point_L.x),
+                                static_cast<double>(point_L.y),
+                                static_cast<double>(point_L.z));
+
+                            if (!p_L.allFinite())
+                            {
+                                continue;
+                            }
+
+                            const Eigen::Vector3d p_O =
+                                R_OL_shadow * p_L +
+                                t_OL_shadow;
+
+                            const double plane_distance_m =
+                                std::abs(
+                                    observed_normal_O.dot(p_O) +
+                                    observed_d_O);
+
+                            const Eigen::Vector3d center_delta_O =
+                                p_O -
+                                shadow_wall.observed_center_A;
+
+                            const Eigen::Vector3d tangent_delta_O =
+                                center_delta_O -
+                                observed_normal_O *
+                                    observed_normal_O.dot(
+                                        center_delta_O);
+
+                            const double tangent_distance_m =
+                                tangent_delta_O.norm();
+
+                            if (!std::isfinite(tangent_distance_m) ||
+                                tangent_distance_m >
+                                    shadow_wall.observed_radius_m)
+                            {
+                                continue;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate05M)
+                            {
+                                ++wall_owned_05;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate08M)
+                            {
+                                ++wall_owned_08;
+                            }
+
+                            if (plane_distance_m <= kPlaneGate12M)
+                            {
+                                ++wall_owned_12;
+                            }
+                        }
+
+                        std::cout
+                            << "LIO_WALL_WORLD_OWNERSHIP_TRACK_V43"
+                            << " | submap="
+                            << submap_context.primary_submap_id
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | id="
+                            << shadow_wall.persistent_wall_id
+                            << " | quality="
+                            << shadow_wall.quality
+                            << " | radius="
+                            << shadow_wall.observed_radius_m
+                            << " | owned05="
+                            << wall_owned_05
+                            << " | owned08="
+                            << wall_owned_08
+                            << " | owned12="
+                            << wall_owned_12
+                            << std::endl;
+                    }
+                }
+
+
+                // ============================================================
+                // FR_WALL_WORLD_SHADOW_V44_DUPLICATE
+                //
+                // Diagnostic-only duplicate persistent-wall audit.
+                //
+                // Same-frame clustering currently compares FULL 3D wall
+                // normals. Two fragments of the same nearly-vertical wall can
+                // therefore fail the 5 deg cluster gate when their Z
+                // components differ, even if their horizontal normals and
+                // physical plane locations are almost identical.
+                //
+                // NO persistent IDs are merged here.
+                // NO Wall / Dense / IESKF behavior is changed.
+                // ============================================================
+                if (wall_world_shadow_result.active_static_walls.size() >= 2U)
+                {
+                    constexpr double kShadowMaximumHorizontalAngleDeg = 0.75;
+                    constexpr double kShadowMaximumPlaneDifferenceM = 0.08;
+                    constexpr double kShadowMaximumSymmetricPlaneSeparationM =
+                        0.08;
+                    constexpr double kShadowMaximumSupportGapM = 0.50;
+
+                    std::size_t duplicate_pair_count = 0U;
+
+                    for (std::size_t i = 0;
+                         i < wall_world_shadow_result.active_static_walls.size();
+                         ++i)
+                    {
+                        for (std::size_t j = i + 1U;
+                             j < wall_world_shadow_result.active_static_walls.size();
+                             ++j)
+                        {
+                            const fr_slam::ActiveWallAssociation &wall_a =
+                                wall_world_shadow_result.active_static_walls[i];
+
+                            const fr_slam::ActiveWallAssociation &wall_b =
+                                wall_world_shadow_result.active_static_walls[j];
+
+                            Eigen::Vector3d normal_a =
+                                wall_a.observed_normal_A;
+
+                            Eigen::Vector3d normal_b =
+                                wall_b.observed_normal_A;
+
+                            double d_a =
+                                wall_a.observed_d_A;
+
+                            double d_b =
+                                wall_b.observed_d_A;
+
+                            const double norm_a = normal_a.norm();
+                            const double norm_b = normal_b.norm();
+
+                            if (!normal_a.allFinite() ||
+                                !normal_b.allFinite() ||
+                                !std::isfinite(d_a) ||
+                                !std::isfinite(d_b) ||
+                                !wall_a.observed_center_A.allFinite() ||
+                                !wall_b.observed_center_A.allFinite() ||
+                                !std::isfinite(wall_a.observed_radius_m) ||
+                                !std::isfinite(wall_b.observed_radius_m) ||
+                                norm_a < 1.0e-9 ||
+                                norm_b < 1.0e-9)
+                            {
+                                continue;
+                            }
+
+                            normal_a /= norm_a;
+                            normal_b /= norm_b;
+                            d_a /= norm_a;
+                            d_b /= norm_b;
+
+                            // Canonicalize B relative to A.
+                            if (normal_a.dot(normal_b) < 0.0)
+                            {
+                                normal_b = -normal_b;
+                                d_b = -d_b;
+                            }
+
+                            const double full_dot =
+                                std::clamp(
+                                    normal_a.dot(normal_b),
+                                    -1.0,
+                                    1.0);
+
+                            const double full_normal_angle_deg =
+                                std::acos(full_dot) *
+                                180.0 / M_PI;
+
+                            Eigen::Vector3d horizontal_a(
+                                normal_a.x(),
+                                normal_a.y(),
+                                0.0);
+
+                            Eigen::Vector3d horizontal_b(
+                                normal_b.x(),
+                                normal_b.y(),
+                                0.0);
+
+                            const double horizontal_norm_a =
+                                horizontal_a.norm();
+
+                            const double horizontal_norm_b =
+                                horizontal_b.norm();
+
+                            if (horizontal_norm_a < 1.0e-9 ||
+                                horizontal_norm_b < 1.0e-9)
+                            {
+                                continue;
+                            }
+
+                            horizontal_a /= horizontal_norm_a;
+                            horizontal_b /= horizontal_norm_b;
+
+                            if (horizontal_a.dot(horizontal_b) < 0.0)
+                            {
+                                horizontal_b = -horizontal_b;
+                            }
+
+                            const double horizontal_dot =
+                                std::clamp(
+                                    horizontal_a.dot(horizontal_b),
+                                    -1.0,
+                                    1.0);
+
+                            const double horizontal_angle_deg =
+                                std::acos(horizontal_dot) *
+                                180.0 / M_PI;
+
+                            const double plane_difference_m =
+                                std::abs(d_a - d_b);
+
+                            const double a_plane_at_b_center_m =
+                                std::abs(
+                                    normal_a.dot(
+                                        wall_b.observed_center_A) +
+                                    d_a);
+
+                            const double b_plane_at_a_center_m =
+                                std::abs(
+                                    normal_b.dot(
+                                        wall_a.observed_center_A) +
+                                    d_b);
+
+                            const double symmetric_plane_separation_m =
+                                0.5 *
+                                (
+                                    a_plane_at_b_center_m +
+                                    b_plane_at_a_center_m
+                                );
+
+                            Eigen::Vector3d mean_normal =
+                                normal_a + normal_b;
+
+                            if (!mean_normal.allFinite() ||
+                                mean_normal.norm() < 1.0e-9)
+                            {
+                                mean_normal = normal_a;
+                            }
+                            else
+                            {
+                                mean_normal.normalize();
+                            }
+
+                            const Eigen::Vector3d center_delta =
+                                wall_a.observed_center_A -
+                                wall_b.observed_center_A;
+
+                            const Eigen::Vector3d tangential_delta =
+                                center_delta -
+                                mean_normal *
+                                    mean_normal.dot(center_delta);
+
+                            const double tangential_distance_m =
+                                tangential_delta.norm();
+
+                            const double support_gap_m =
+                                std::max(
+                                    0.0,
+                                    tangential_distance_m -
+                                        std::max(
+                                            0.0,
+                                            wall_a.observed_radius_m) -
+                                        std::max(
+                                            0.0,
+                                            wall_b.observed_radius_m));
+
+                            const bool duplicate_candidate =
+                                std::isfinite(horizontal_angle_deg) &&
+                                horizontal_angle_deg <=
+                                    kShadowMaximumHorizontalAngleDeg &&
+                                std::isfinite(plane_difference_m) &&
+                                plane_difference_m <=
+                                    kShadowMaximumPlaneDifferenceM &&
+                                std::isfinite(
+                                    symmetric_plane_separation_m) &&
+                                symmetric_plane_separation_m <=
+                                    kShadowMaximumSymmetricPlaneSeparationM &&
+                                std::isfinite(support_gap_m) &&
+                                support_gap_m <=
+                                    kShadowMaximumSupportGapM;
+
+                            const bool fragmentation_signature =
+                                duplicate_candidate &&
+                                full_normal_angle_deg > 5.0;
+
+                            if (duplicate_candidate)
+                            {
+                                ++duplicate_pair_count;
+                            }
+
+                            std::cout
+                                << "LIO_WALL_WORLD_DUPLICATE_V44"
+                                << " | submap="
+                                << submap_context.primary_submap_id
+                                << " | frame="
+                                << wall_world_shadow_frame_index_
+                                << " | id_a="
+                                << wall_a.persistent_wall_id
+                                << " | id_b="
+                                << wall_b.persistent_wall_id
+                                << " | full_angle_deg="
+                                << full_normal_angle_deg
+                                << " | horizontal_angle_deg="
+                                << horizontal_angle_deg
+                                << " | plane_diff_m="
+                                << plane_difference_m
+                                << " | symmetric_plane_sep_m="
+                                << symmetric_plane_separation_m
+                                << " | support_gap_m="
+                                << support_gap_m
+                                << " | radius_a="
+                                << wall_a.observed_radius_m
+                                << " | radius_b="
+                                << wall_b.observed_radius_m
+                                << " | quality_a="
+                                << wall_a.quality
+                                << " | quality_b="
+                                << wall_b.quality
+                                << " | duplicate_candidate="
+                                << (duplicate_candidate ? 1 : 0)
+                                << " | fragmentation_signature="
+                                << (fragmentation_signature ? 1 : 0)
+                                << std::endl;
+                        }
+                    }
+
+                    std::cout
+                        << "LIO_WALL_WORLD_DUPLICATE_SUMMARY_V44"
+                        << " | submap="
+                        << submap_context.primary_submap_id
+                        << " | frame="
+                        << wall_world_shadow_frame_index_
+                        << " | active_walls="
+                        << wall_world_shadow_result.active_static_walls.size()
+                        << " | duplicate_pairs="
+                        << duplicate_pair_count
+                        << std::endl;
+                }
+
                 joint_wall_baseline_T_SL =
                     submap_context
                         .T_O_S_creation
@@ -3814,7 +5957,7 @@ ProcessGroundMeasurement(
         }
     }
 
-    
+
     // ========================================================================
     // CONTINUOUS PIECEWISE FROZEN GROUND LIFECYCLE
     //
@@ -4216,13 +6359,13 @@ ProcessGroundMeasurement(
                             kSwitchPhysicalSlopeDeg =
                                 2.50;
 
-                        
+
 
                         constexpr double
                             kActiveSafeNormalDeg =
                                 5.00;
 
-                        
+
 
                         constexpr std::size_t
                             kPendingRequiredFrames =
@@ -4831,7 +6974,7 @@ ProcessGroundMeasurement(
     //   - current Ground plane comes from this frame
     //   - reference is the current active frozen piece
     //   - these snapshots do NOT change during IEKF iterations
-    
+
     // ========================================================================
     // FR_JOINT_WALL_FINAL_PREP
     //
@@ -6591,7 +8734,7 @@ bool joint_ground_ready =
     }
 
 
-    
+
     std::function<
         bool(
             const LioState &,
@@ -7121,7 +9264,7 @@ bool joint_ground_ready =
                     kPositionEpsilon;
             }
 
-            
+
             // ================================================================
             // GROUND FINAL DOF OWNERSHIP
             //
@@ -7214,13 +9357,10 @@ bool joint_ground_ready =
 
             if (joint_ground_ready)
             {
-                constexpr double
-                    kGroundHeightHuberSigma =
-                        3.0;
+                constexpr double kGroundHeightHuberDeltaM = 0.30;
 
                 const double height_huber_delta_m =
-                    kGroundHeightHuberSigma *
-                    height_sigma_m;
+                    kGroundHeightHuberDeltaM;
 
                 const double absolute_height_residual_m =
                     std::abs(
@@ -7891,8 +10031,1159 @@ bool joint_ground_ready =
                     joint_gradient.allFinite();
             };
 
-    
+
     // ========================================================================
+
+    // ========================================================================
+    // FR_WALL_WORLD_V5_MEASUREMENT_OWNERSHIP
+    //
+    // REAL World Persistent Wall measurement path.
+    //
+    // Current observed Wall:
+    //   point ownership only.
+    //
+    // Frozen World Persistent Wall:
+    //   actual point-to-plane residual inside the SAME IEKF iteration.
+    //
+    // Trusted Wall-owned points are removed from generic Dense LiDAR.
+    // Ambiguous / weak Wall points remain in Dense.
+    // ========================================================================
+
+    pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        wall_v5_dense_scan_L =
+            measurement_scan_L;
+
+    std::vector<Eigen::Vector3d>
+        wall_v5_owned_points_L;
+
+    std::vector<std::size_t>
+        wall_v5_owned_wall_indices;
+
+    std::vector<std::size_t>
+        wall_v5_owned_count_per_wall;
+
+    std::vector<Eigen::Vector3d>
+        wall_v5_reference_normals_O;
+
+    std::vector<double>
+        wall_v5_reference_ds_O;
+
+    std::vector<bool>
+        wall_v5_trusted_wall;
+
+    std::size_t wall_v5_ambiguous_points =
+        0U;
+
+    std::size_t wall_v5_candidate_owned_points =
+        0U;
+
+    bool wall_v5_measurement_ready =
+        false;
+
+    if (config_.wall_constraint_enable &&
+        wall_v5_world_ready &&
+        measurement_scan_L &&
+        !measurement_scan_L->empty() &&
+        wall_v5_baseline_T_OL.matrix().allFinite())
+    {
+        constexpr double kOwnershipPlaneBandM =
+            0.08;
+
+        constexpr double kMinimumWallQuality =
+            0.80;
+
+        constexpr std::size_t
+            kMinimumOwnedPointsPerWall =
+                20U;
+
+        constexpr std::size_t
+            kMinimumDensePoints =
+                200U;
+
+        const std::size_t input_point_count =
+            measurement_scan_L->size();
+
+        const std::size_t wall_count =
+            wall_v5_world_association
+                .active_static_walls.size();
+
+        std::vector<int> owner_index(
+            input_point_count,
+            -1);
+
+        wall_v5_owned_count_per_wall.assign(
+            wall_count,
+            0U);
+
+        wall_v5_reference_normals_O.assign(
+            wall_count,
+            Eigen::Vector3d::Zero());
+
+        wall_v5_reference_ds_O.assign(
+            wall_count,
+            0.0);
+
+        wall_v5_trusted_wall.assign(
+            wall_count,
+            false);
+
+        const Eigen::Matrix3d R_OL_baseline =
+            wall_v5_baseline_T_OL.rotation();
+
+        const Eigen::Vector3d t_OL_baseline =
+            wall_v5_baseline_T_OL.translation();
+
+        for (std::size_t point_index = 0;
+             point_index < input_point_count;
+             ++point_index)
+        {
+            const LIDAR_POINT &point_L =
+                measurement_scan_L->points[
+                    point_index];
+
+            const Eigen::Vector3d p_L(
+                static_cast<double>(point_L.x),
+                static_cast<double>(point_L.y),
+                static_cast<double>(point_L.z));
+
+            if (!p_L.allFinite())
+            {
+                continue;
+            }
+
+            const Eigen::Vector3d p_O =
+                R_OL_baseline * p_L +
+                t_OL_baseline;
+
+            std::size_t match_count =
+                0U;
+
+            std::size_t matched_wall_index =
+                0U;
+
+            for (std::size_t wall_index = 0;
+                 wall_index < wall_count;
+                 ++wall_index)
+            {
+                const fr_slam::ActiveWallAssociation &wall =
+                    wall_v5_world_association
+                        .active_static_walls[
+                            wall_index];
+
+                if (!std::isfinite(wall.quality) ||
+                    wall.quality <
+                        kMinimumWallQuality ||
+                    !wall.observed_normal_A.allFinite() ||
+                    !std::isfinite(wall.observed_d_A) ||
+                    !wall.observed_center_A.allFinite() ||
+                    !std::isfinite(
+                        wall.observed_radius_m) ||
+                    wall.observed_radius_m <= 0.0)
+                {
+                    continue;
+                }
+
+                Eigen::Vector3d observed_normal_O =
+                    wall.observed_normal_A;
+
+                double observed_d_O =
+                    wall.observed_d_A;
+
+                const double observed_normal_norm =
+                    observed_normal_O.norm();
+
+                if (!std::isfinite(
+                        observed_normal_norm) ||
+                    observed_normal_norm <
+                        1.0e-9)
+                {
+                    continue;
+                }
+
+                observed_normal_O /=
+                    observed_normal_norm;
+
+                observed_d_O /=
+                    observed_normal_norm;
+
+                const double plane_distance_m =
+                    std::abs(
+                        observed_normal_O.dot(p_O) +
+                        observed_d_O);
+
+                if (!std::isfinite(
+                        plane_distance_m) ||
+                    plane_distance_m >
+                        kOwnershipPlaneBandM)
+                {
+                    continue;
+                }
+
+                const Eigen::Vector3d center_delta_O =
+                    p_O -
+                    wall.observed_center_A;
+
+                const Eigen::Vector3d tangent_delta_O =
+                    center_delta_O -
+                    observed_normal_O *
+                        observed_normal_O.dot(
+                            center_delta_O);
+
+                const double tangent_distance_m =
+                    tangent_delta_O.norm();
+
+                if (!std::isfinite(
+                        tangent_distance_m) ||
+                    tangent_distance_m >
+                        wall.observed_radius_m)
+                {
+                    continue;
+                }
+
+                ++match_count;
+                matched_wall_index =
+                    wall_index;
+            }
+
+            if (match_count == 1U)
+            {
+                owner_index[point_index] =
+                    static_cast<int>(
+                        matched_wall_index);
+
+                ++wall_v5_owned_count_per_wall[
+                    matched_wall_index];
+
+                ++wall_v5_candidate_owned_points;
+            }
+            else if (match_count > 1U)
+            {
+                ++wall_v5_ambiguous_points;
+            }
+        }
+
+        Eigen::Vector3d up_O =
+            Eigen::Vector3d::UnitZ();
+
+        if (ground_reference_frozen_ &&
+            ground_reference_normal_W_.allFinite() &&
+            ground_reference_normal_W_.norm() >
+                1.0e-9)
+        {
+            up_O =
+                ground_reference_normal_W_
+                    .normalized();
+        }
+        else
+        {
+            const LioState wall_v5_snapshot_state =
+                ieskf_.State();
+
+            if (wall_v5_snapshot_state
+                    .gravity_W
+                    .allFinite() &&
+                wall_v5_snapshot_state
+                    .gravity_W
+                    .norm() >
+                    1.0e-6)
+            {
+                up_O =
+                    -wall_v5_snapshot_state
+                         .gravity_W
+                         .normalized();
+            }
+        }
+
+        for (std::size_t wall_index = 0;
+             wall_index < wall_count;
+             ++wall_index)
+        {
+            const fr_slam::ActiveWallAssociation &wall =
+                wall_v5_world_association
+                    .active_static_walls[
+                        wall_index];
+
+            if (wall_v5_owned_count_per_wall[
+                    wall_index] <
+                    kMinimumOwnedPointsPerWall ||
+                !std::isfinite(wall.quality) ||
+                wall.quality <
+                    kMinimumWallQuality ||
+                !wall.reference_normal_A.allFinite() ||
+                !std::isfinite(
+                    wall.reference_d_A))
+            {
+                continue;
+            }
+
+            Eigen::Vector3d reference_normal_O =
+                wall.reference_normal_A;
+
+            double reference_d_O =
+                wall.reference_d_A;
+
+            const double reference_normal_norm =
+                reference_normal_O.norm();
+
+            if (!std::isfinite(
+                    reference_normal_norm) ||
+                reference_normal_norm <
+                    1.0e-9)
+            {
+                continue;
+            }
+
+            reference_normal_O /=
+                reference_normal_norm;
+
+            reference_d_O /=
+                reference_normal_norm;
+
+            const Eigen::Vector3d reference_anchor_O =
+                -reference_d_O *
+                reference_normal_O;
+
+            Eigen::Vector3d
+                horizontal_reference_normal_O =
+                    reference_normal_O -
+                    up_O *
+                        up_O.dot(
+                            reference_normal_O);
+
+            const double horizontal_norm =
+                horizontal_reference_normal_O
+                    .norm();
+
+            if (!std::isfinite(
+                    horizontal_norm) ||
+                horizontal_norm <
+                    1.0e-6)
+            {
+                continue;
+            }
+
+            horizontal_reference_normal_O /=
+                horizontal_norm;
+
+            const double horizontal_reference_d_O =
+                -horizontal_reference_normal_O.dot(
+                    reference_anchor_O);
+
+            if (!std::isfinite(
+                    horizontal_reference_d_O))
+            {
+                continue;
+            }
+
+            wall_v5_reference_normals_O[
+                wall_index] =
+                    horizontal_reference_normal_O;
+
+            wall_v5_reference_ds_O[
+                wall_index] =
+                    horizontal_reference_d_O;
+
+            wall_v5_trusted_wall[
+                wall_index] =
+                    true;
+        }
+
+        pcl::PointCloud<LIDAR_POINT>::Ptr
+            dense_candidate_L(
+                new pcl::PointCloud<LIDAR_POINT>());
+
+        dense_candidate_L->points.reserve(
+            input_point_count);
+
+        wall_v5_owned_points_L.reserve(
+            wall_v5_candidate_owned_points);
+
+        wall_v5_owned_wall_indices.reserve(
+            wall_v5_candidate_owned_points);
+
+        for (std::size_t point_index = 0;
+             point_index < input_point_count;
+             ++point_index)
+        {
+            const int owner =
+                owner_index[point_index];
+
+            if (owner >= 0 &&
+                static_cast<std::size_t>(owner) <
+                    wall_v5_trusted_wall.size() &&
+                wall_v5_trusted_wall[
+                    static_cast<std::size_t>(
+                        owner)])
+            {
+                const LIDAR_POINT &point_L =
+                    measurement_scan_L->points[
+                        point_index];
+
+                wall_v5_owned_points_L.emplace_back(
+                    static_cast<double>(point_L.x),
+                    static_cast<double>(point_L.y),
+                    static_cast<double>(point_L.z));
+
+                wall_v5_owned_wall_indices.push_back(
+                    static_cast<std::size_t>(
+                        owner));
+
+                continue;
+            }
+
+            dense_candidate_L->points.push_back(
+                measurement_scan_L->points[
+                    point_index]);
+        }
+
+        dense_candidate_L->width =
+            static_cast<std::uint32_t>(
+                dense_candidate_L->points.size());
+
+        dense_candidate_L->height =
+            1U;
+
+        dense_candidate_L->is_dense =
+            measurement_scan_L->is_dense;
+
+        std::size_t trusted_wall_count =
+            0U;
+
+        for (const bool trusted :
+             wall_v5_trusted_wall)
+        {
+            if (trusted)
+            {
+                ++trusted_wall_count;
+            }
+        }
+
+        const bool dense_count_safe =
+            dense_candidate_L->size() >=
+                kMinimumDensePoints &&
+            dense_candidate_L->size() * 4U >=
+                input_point_count;
+
+        const bool wall_count_safe =
+            trusted_wall_count > 0U &&
+            !wall_v5_owned_points_L.empty();
+
+        wall_v5_measurement_ready =
+            dense_count_safe &&
+            wall_count_safe;
+
+        if (wall_v5_measurement_ready)
+        {
+            wall_v5_dense_scan_L =
+                dense_candidate_L;
+        }
+        else
+        {
+            wall_v5_dense_scan_L =
+                measurement_scan_L;
+
+            wall_v5_owned_points_L.clear();
+            wall_v5_owned_wall_indices.clear();
+        }
+
+        static std::size_t
+            wall_v5_partition_counter =
+                0U;
+
+        ++wall_v5_partition_counter;
+
+        if ((wall_v5_partition_counter %
+             20U) == 1U ||
+            wall_v5_ambiguous_points > 0U)
+        {
+            std::cout
+                << "LIO_WALL_WORLD_V5_PARTITION"
+                << " | frame="
+                << wall_world_shadow_frame_index_
+                << " | walls="
+                << wall_count
+                << " | trusted_walls="
+                << trusted_wall_count
+                << " | input="
+                << input_point_count
+                << " | candidate_owned="
+                << wall_v5_candidate_owned_points
+                << " | owned="
+                << wall_v5_owned_points_L.size()
+                << " | ambiguous="
+                << wall_v5_ambiguous_points
+                << " | dense="
+                << wall_v5_dense_scan_L->size()
+                << " | ready="
+                << (wall_v5_measurement_ready
+                        ? 1
+                        : 0)
+                << std::endl;
+        }
+    }
+
+    std::function<
+        bool(
+            const LioState &,
+            Ieskf::StateMatrix &,
+            Ieskf::StateVector &)>
+        joint_observation_builder_wall_v5 =
+            [this,
+             &joint_observation_builder,
+             wall_v5_measurement_ready,
+             wall_v5_owned_points_L,
+             wall_v5_owned_wall_indices,
+             wall_v5_owned_count_per_wall,
+             wall_v5_reference_normals_O,
+             wall_v5_reference_ds_O,
+             wall_v5_trusted_wall,
+             wall_v5_world_association,
+             wall_multi_family_yaw_ready,
+             wall_multi_family_target_yaw_rad,
+             wall_multi_family_up_O,
+             wall_multi_family_baseline_T_OL](
+                const LioState &linearization_state,
+                Ieskf::StateMatrix &joint_information,
+                Ieskf::StateVector &joint_gradient)
+            {
+                if (!joint_observation_builder(
+                        linearization_state,
+                        joint_information,
+                        joint_gradient))
+                {
+                    return false;
+                }
+
+                if (!wall_v5_measurement_ready &&
+                    !wall_multi_family_yaw_ready)
+                {
+                    return true;
+                }
+
+                constexpr double kWallSigmaM =
+                    0.05;
+
+                constexpr double kHuberDeltaM =
+                    0.10;
+
+                constexpr double kRotationEpsilon =
+                    1.0e-6;
+
+                constexpr double kPositionEpsilon =
+                    1.0e-5;
+
+                const auto evaluate_residual =
+                    [this,
+                     &wall_v5_reference_normals_O,
+                     &wall_v5_reference_ds_O](
+                        const LioState &test_state,
+                        const Eigen::Vector3d &point_L,
+                        const std::size_t wall_index,
+                        double &residual) -> bool
+                    {
+                        if (wall_index >=
+                                wall_v5_reference_normals_O
+                                    .size() ||
+                            wall_index >=
+                                wall_v5_reference_ds_O
+                                    .size())
+                        {
+                            return false;
+                        }
+
+                        const Eigen::Isometry3d T_OL =
+                            StateToLidarPose(
+                                test_state);
+
+                        if (!T_OL.matrix().allFinite())
+                        {
+                            return false;
+                        }
+
+                        const Eigen::Vector3d p_O =
+                            T_OL * point_L;
+
+                        residual =
+                            wall_v5_reference_normals_O[
+                                wall_index]
+                                .dot(p_O) +
+                            wall_v5_reference_ds_O[
+                                wall_index];
+
+                        return std::isfinite(
+                            residual);
+                    };
+
+                std::size_t used_points =
+                    0U;
+
+                Ieskf::StateMatrix
+                    wall_information =
+                        Ieskf::StateMatrix::Zero();
+
+                Ieskf::StateVector
+                    wall_gradient =
+                        Ieskf::StateVector::Zero();
+
+                for (std::size_t point_index = 0;
+                     point_index <
+                         wall_v5_owned_points_L.size();
+                     ++point_index)
+                {
+                    if (point_index >=
+                        wall_v5_owned_wall_indices.size())
+                    {
+                        break;
+                    }
+
+                    const std::size_t wall_index =
+                        wall_v5_owned_wall_indices[
+                            point_index];
+
+                    if (wall_index >=
+                            wall_v5_trusted_wall.size() ||
+                        !wall_v5_trusted_wall[
+                            wall_index] ||
+                        wall_index >=
+                            wall_v5_owned_count_per_wall
+                                .size() ||
+                        wall_v5_owned_count_per_wall[
+                            wall_index] == 0U ||
+                        wall_index >=
+                            wall_v5_world_association
+                                .active_static_walls
+                                .size())
+                    {
+                        continue;
+                    }
+
+                    const Eigen::Vector3d &point_L =
+                        wall_v5_owned_points_L[
+                            point_index];
+
+                    double residual =
+                        0.0;
+
+                    if (!evaluate_residual(
+                            linearization_state,
+                            point_L,
+                            wall_index,
+                            residual))
+                    {
+                        continue;
+                    }
+
+                    Ieskf::StateVector jacobian =
+                        Ieskf::StateVector::Zero();
+
+                    for (int axis = 0;
+                         axis < 3;
+                         ++axis)
+                    {
+                        Eigen::Vector3d axis_vector =
+                            Eigen::Vector3d::Zero();
+
+                        axis_vector(axis) =
+                            1.0;
+
+                        LioState plus_state =
+                            linearization_state;
+
+                        LioState minus_state =
+                            linearization_state;
+
+                        const Eigen::Quaterniond dq_plus(
+                            Eigen::AngleAxisd(
+                                kRotationEpsilon,
+                                axis_vector));
+
+                        const Eigen::Quaterniond dq_minus(
+                            Eigen::AngleAxisd(
+                                -kRotationEpsilon,
+                                axis_vector));
+
+                        plus_state.Q_WI =
+                            (
+                                linearization_state.Q_WI
+                                    .normalized() *
+                                dq_plus
+                            ).normalized();
+
+                        minus_state.Q_WI =
+                            (
+                                linearization_state.Q_WI
+                                    .normalized() *
+                                dq_minus
+                            ).normalized();
+
+                        double residual_plus =
+                            0.0;
+
+                        double residual_minus =
+                            0.0;
+
+                        if (!evaluate_residual(
+                                plus_state,
+                                point_L,
+                                wall_index,
+                                residual_plus) ||
+                            !evaluate_residual(
+                                minus_state,
+                                point_L,
+                                wall_index,
+                                residual_minus))
+                        {
+                            continue;
+                        }
+
+                        jacobian(
+                            LioStateIndex::ROTATION +
+                            axis) =
+                                (
+                                    residual_plus -
+                                    residual_minus
+                                ) /
+                                (
+                                    2.0 *
+                                    kRotationEpsilon
+                                );
+                    }
+
+                    for (int axis = 0;
+                         axis < 3;
+                         ++axis)
+                    {
+                        LioState plus_state =
+                            linearization_state;
+
+                        LioState minus_state =
+                            linearization_state;
+
+                        plus_state.P_WI(axis) +=
+                            kPositionEpsilon;
+
+                        minus_state.P_WI(axis) -=
+                            kPositionEpsilon;
+
+                        double residual_plus =
+                            0.0;
+
+                        double residual_minus =
+                            0.0;
+
+                        if (!evaluate_residual(
+                                plus_state,
+                                point_L,
+                                wall_index,
+                                residual_plus) ||
+                            !evaluate_residual(
+                                minus_state,
+                                point_L,
+                                wall_index,
+                                residual_minus))
+                        {
+                            continue;
+                        }
+
+                        jacobian(
+                            LioStateIndex::POSITION +
+                            axis) =
+                                (
+                                    residual_plus -
+                                    residual_minus
+                                ) /
+                                (
+                                    2.0 *
+                                    kPositionEpsilon
+                                );
+                    }
+
+                    if (!jacobian.allFinite())
+                    {
+                        continue;
+                    }
+
+                    const double abs_residual =
+                        std::abs(residual);
+
+                    const double huber_weight =
+                        abs_residual <=
+                                kHuberDeltaM
+                            ? 1.0
+                            : kHuberDeltaM /
+                                std::max(
+                                    abs_residual,
+                                    1.0e-12);
+
+                    const double wall_quality =
+                        std::clamp(
+                            wall_v5_world_association
+                                .active_static_walls[
+                                    wall_index]
+                                .quality,
+                            0.0,
+                            1.0);
+
+                    const double per_point_information =
+                        wall_quality *
+                        huber_weight /
+                        (
+                            kWallSigmaM *
+                            kWallSigmaM *
+                            static_cast<double>(
+                                wall_v5_owned_count_per_wall[
+                                    wall_index])
+                        );
+
+                    if (!std::isfinite(
+                            per_point_information) ||
+                        per_point_information <=
+                            0.0)
+                    {
+                        continue;
+                    }
+
+                    wall_information +=
+                        per_point_information *
+                        jacobian *
+                        jacobian.transpose();
+
+                    wall_gradient +=
+                        per_point_information *
+                        jacobian *
+                        residual;
+
+                    ++used_points;
+                }
+
+
+                // ================================================================
+                // FR_MULTI_FAMILY_WALL_HEADING_V1_IEKF
+                //
+                // One trajectory-global heading observation.
+                // Translation is untouched. The scalar residual is rotation
+                // around the trusted Ground/gravity up direction.
+                // ================================================================
+                if (wall_multi_family_yaw_ready)
+                {
+
+
+
+
+
+
+
+constexpr double kWallHeadingYawSigmaRad =
+                        0.02 * 0.017453292519943295;
+
+                    constexpr double kRotationEpsilon =
+                        1.0e-6;
+
+                    const auto evaluate_heading_delta =
+                        [this,
+                         baseline_T_OL = wall_multi_family_baseline_T_OL,
+                         up_O = wall_multi_family_up_O](
+                            const LioState &test_state,
+                            double &heading_delta_rad) -> bool
+                    {
+                        const Eigen::Isometry3d T_OL =
+                            StateToLidarPose(test_state);
+
+                        if (!T_OL.matrix().allFinite() ||
+                            !baseline_T_OL.matrix().allFinite() ||
+                            !up_O.allFinite() ||
+                            up_O.norm() < 1.0e-9)
+                        {
+                            return false;
+                        }
+
+                        const Eigen::Vector3d up =
+                            up_O.normalized();
+
+                        const auto project_axis =
+                            [&up](
+                                const Eigen::Matrix3d &R,
+                                const Eigen::Vector3d &axis,
+                                Eigen::Vector3d &projected) -> bool
+                        {
+                            projected = R * axis;
+
+                            projected -=
+                                up * up.dot(projected);
+
+                            const double norm =
+                                projected.norm();
+
+                            if (!std::isfinite(norm) ||
+                                norm < 1.0e-8)
+                            {
+                                return false;
+                            }
+
+                            projected /= norm;
+
+                            return projected.allFinite();
+                        };
+
+                        Eigen::Vector3d baseline_axis_O;
+                        Eigen::Vector3d current_axis_O;
+
+                        bool valid =
+                            project_axis(
+                                baseline_T_OL.rotation(),
+                                Eigen::Vector3d::UnitX(),
+                                baseline_axis_O) &&
+                            project_axis(
+                                T_OL.rotation(),
+                                Eigen::Vector3d::UnitX(),
+                                current_axis_O);
+
+                        if (!valid)
+                        {
+                            valid =
+                                project_axis(
+                                    baseline_T_OL.rotation(),
+                                    Eigen::Vector3d::UnitY(),
+                                    baseline_axis_O) &&
+                                project_axis(
+                                    T_OL.rotation(),
+                                    Eigen::Vector3d::UnitY(),
+                                    current_axis_O);
+                        }
+
+                        if (!valid)
+                        {
+                            return false;
+                        }
+
+                        const double cosine =
+                            std::clamp(
+                                baseline_axis_O.dot(
+                                    current_axis_O),
+                                -1.0,
+                                1.0);
+
+                        heading_delta_rad =
+                            std::atan2(
+                                up.dot(
+                                    baseline_axis_O.cross(
+                                        current_axis_O)),
+                                cosine);
+
+                        return std::isfinite(
+                            heading_delta_rad);
+                    };
+
+                    double current_heading_delta_rad =
+                        0.0;
+
+                    if (!evaluate_heading_delta(
+                            linearization_state,
+                            current_heading_delta_rad))
+                    {
+                        return false;
+                    }
+
+                    const double heading_residual =
+                        current_heading_delta_rad -
+                        wall_multi_family_target_yaw_rad;
+
+                    Ieskf::StateVector heading_jacobian =
+                        Ieskf::StateVector::Zero();
+
+                    for (int axis = 0;
+                         axis < 3;
+                         ++axis)
+                    {
+                        Eigen::Vector3d axis_vector =
+                            Eigen::Vector3d::Zero();
+
+                        axis_vector(axis) = 1.0;
+
+                        LioState plus_state =
+                            linearization_state;
+
+                        LioState minus_state =
+                            linearization_state;
+
+                        const Eigen::Quaterniond dq_plus(
+                            Eigen::AngleAxisd(
+                                kRotationEpsilon,
+                                axis_vector));
+
+                        const Eigen::Quaterniond dq_minus(
+                            Eigen::AngleAxisd(
+                                -kRotationEpsilon,
+                                axis_vector));
+
+                        plus_state.Q_WI =
+                            (
+                                linearization_state.Q_WI.normalized() *
+                                dq_plus
+                            ).normalized();
+
+                        minus_state.Q_WI =
+                            (
+                                linearization_state.Q_WI.normalized() *
+                                dq_minus
+                            ).normalized();
+
+                        double plus_heading =
+                            0.0;
+
+                        double minus_heading =
+                            0.0;
+
+                        if (!evaluate_heading_delta(
+                                plus_state,
+                                plus_heading) ||
+                            !evaluate_heading_delta(
+                                minus_state,
+                                minus_heading))
+                        {
+                            return false;
+                        }
+
+                        heading_jacobian(
+                            LioStateIndex::ROTATION +
+                            axis) =
+                                (
+                                    plus_heading -
+                                    minus_heading
+                                ) /
+                                (
+                                    2.0 *
+                                    kRotationEpsilon
+                                );
+                    }
+
+                    if (!heading_jacobian.allFinite())
+                    {
+                        return false;
+                    }
+
+
+                    // ============================================================
+                    const double heading_information =
+                        1.0 /
+                        (
+                            kWallHeadingYawSigmaRad *
+                            kWallHeadingYawSigmaRad
+                        );
+
+                    wall_information +=
+                        heading_information *
+                        heading_jacobian *
+                        heading_jacobian.transpose();
+
+                    wall_gradient +=
+                        heading_information *
+                        heading_jacobian *
+                        heading_residual;
+
+                    static bool
+                        wall_gt_diag_has_last_frame =
+                            false;
+
+                    static std::size_t
+                        wall_gt_diag_last_frame =
+                            0U;
+
+                    if (!wall_gt_diag_has_last_frame ||
+                        wall_gt_diag_last_frame !=
+                            wall_world_shadow_frame_index_)
+                    {
+                        wall_gt_diag_has_last_frame =
+                            true;
+
+                        wall_gt_diag_last_frame =
+                            wall_world_shadow_frame_index_;
+
+                        std::cout
+                            << "LIO_WALL_GT_DIAG_V1"
+                            << " | frame="
+                            << wall_world_shadow_frame_index_
+                            << " | target_deg="
+                            << wall_multi_family_target_yaw_rad *
+                                   57.29577951308232
+                            << " | current_deg="
+                            << current_heading_delta_rad *
+                                   57.29577951308232
+                            << " | residual_deg="
+                            << heading_residual *
+                                   57.29577951308232
+                            << " | information="
+                            << heading_information
+                            << std::endl;
+                    }
+                }
+                if (!wall_information.allFinite() ||
+                    !wall_gradient.allFinite())
+                {
+                    return false;
+                }
+
+                wall_information =
+                    0.5 *
+                    (
+                        wall_information +
+                        wall_information.transpose()
+                    );
+
+                joint_information +=
+                    wall_information;
+
+                joint_gradient +=
+                    wall_gradient;
+
+                static std::size_t
+                    wall_v5_joint_counter =
+                        0U;
+
+                ++wall_v5_joint_counter;
+
+                if ((wall_v5_joint_counter %
+                     100U) == 1U)
+                {
+                    std::cout
+                        << "LIO_WALL_WORLD_V5_JOINT"
+                        << " | used_points="
+                        << used_points
+                        << " | info_pos_diag=["
+                        << wall_information(
+                               LioStateIndex::POSITION,
+                               LioStateIndex::POSITION)
+                        << " "
+                        << wall_information(
+                               LioStateIndex::POSITION + 1,
+                               LioStateIndex::POSITION + 1)
+                        << " "
+                        << wall_information(
+                               LioStateIndex::POSITION + 2,
+                               LioStateIndex::POSITION + 2)
+                        << "]"
+                        << " | info_rot_diag=["
+                        << wall_information(
+                               LioStateIndex::ROTATION,
+                               LioStateIndex::ROTATION)
+                        << " "
+                        << wall_information(
+                               LioStateIndex::ROTATION + 1,
+                               LioStateIndex::ROTATION + 1)
+                        << " "
+                        << wall_information(
+                               LioStateIndex::ROTATION + 2,
+                               LioStateIndex::ROTATION + 2)
+                        << "]"
+                        << std::endl;
+                }
+
+                return
+                    joint_information.allFinite() &&
+                    joint_gradient.allFinite();
+            };
+
+
     // FR_JOINT_WALL_FINAL_BUILDER
     //
     // Existing joint_observation_builder = Ground only.
@@ -8732,18 +12023,121 @@ bool joint_ground_ready =
             << std::endl;
     }
 
+    // ========================================================================
+    // FR_WALL_YAW_OWNERSHIP_BUILDER_V2
+    //
+    // Ownership only:
+    // rank-1 rotation direction corresponding to rotation about World up.
+    //
+    // This matrix is NEVER added as a measurement.
+    // It only tells IESKF which Dense-LiDAR direction should be softened.
+    // ========================================================================
+    std::function<
+        bool(
+            const LioState &,
+            Ieskf::StateMatrix &)>
+        wall_yaw_ownership_builder =
+            [wall_multi_family_yaw_ready,
+             wall_multi_family_up_O](
+                const LioState &linearization_state,
+                Ieskf::StateMatrix &ownership_information)
+            {
+                ownership_information =
+                    Ieskf::StateMatrix::Zero();
+
+                if (!wall_multi_family_yaw_ready)
+                {
+                    return true;
+                }
+
+                if (!wall_multi_family_up_O.allFinite() ||
+                    wall_multi_family_up_O.norm() < 1.0e-9 ||
+                    !linearization_state.Q_WI.coeffs().allFinite())
+                {
+                    return false;
+                }
+
+                const Eigen::Vector3d up_O =
+                    wall_multi_family_up_O.normalized();
+
+                // Error rotation is applied on the RIGHT:
+                //
+                //     Q_WI_new = Q_WI * dq
+                //
+                // Therefore World-up must be expressed in the IMU tangent frame.
+                Eigen::Vector3d yaw_axis_I =
+                    linearization_state.Q_WI
+                        .normalized()
+                        .conjugate() *
+                    up_O;
+
+                const double yaw_axis_norm =
+                    yaw_axis_I.norm();
+
+                if (!std::isfinite(yaw_axis_norm) ||
+                    yaw_axis_norm < 1.0e-9)
+                {
+                    return false;
+                }
+
+                yaw_axis_I /=
+                    yaw_axis_norm;
+
+                Ieskf::StateVector yaw_direction =
+                    Ieskf::StateVector::Zero();
+
+                yaw_direction.segment<3>(
+                    LioStateIndex::ROTATION) =
+                        yaw_axis_I;
+
+                ownership_information =
+                    yaw_direction *
+                    yaw_direction.transpose();
+
+                return ownership_information.allFinite();
+            };
+
 if (!ieskf_.IteratedLidarUpdate(
-            measurement_scan_L,
+            wall_v5_dense_scan_L,
             *prepared_target,
             measurement_builder_,
             result.lidar_update,
-            &joint_observation_builder_final,
-            nullptr))
+            &joint_observation_builder_wall_v5,
+            &wall_yaw_ownership_builder))
     {
         std::cerr
             << "LIO_REJECT | stage=JOINT_LIDAR_GROUND_UPDATE"
             << std::endl;
         return false;
+    }
+
+    // FR_SCAN_ACCEPT_V1
+    {
+        const std::size_t scan_points =
+            wall_v5_dense_scan_L
+                ? wall_v5_dense_scan_L->size()
+                : 0U;
+
+        const std::size_t correspondences =
+            result.lidar_update.correspondences;
+
+        const double acceptance_ratio =
+            scan_points > 0U
+                ? static_cast<double>(correspondences) /
+                      static_cast<double>(scan_points)
+                : 0.0;
+
+        std::cerr
+            << std::fixed
+            << std::setprecision(9)
+            << "FR_SCAN_ACCEPT"
+            << " | t=" << scan_start_time
+            << " | scan_points=" << scan_points
+            << " | corr=" << correspondences
+            << " | acceptance=" << acceptance_ratio
+            << " | downweighted="
+            << result.lidar_update.downweighted_correspondences
+            << std::endl;
     }
 
     // ========================================================================
@@ -8753,9 +12147,9 @@ if (!ieskf_.IteratedLidarUpdate(
     // support planes for BOOTSTRAP.  Once frozen, it performs the Ground
     // IESKF update on roll / pitch / z.
     // ========================================================================
-    
 
-    
+
+
 // Ground is already fused inside FR_JOINT_GROUND_V1.
 //
 // DO NOT perform a second GroundStateUpdate / GroundPoseUpdate here.
@@ -9022,9 +12416,89 @@ if (!ieskf_.IteratedLidarUpdate(
     constexpr double kLioStateRadToDeg =
         57.29577951308232;
 
+
+    // FR_IMU_PROP_ROT_DIAG_V1
+    //
+    // True persistent-filter propagation:
+    //   state_before_propagation -> predicted_state @ scan_start.
+    //
+    // Local/right rotation:
+    //   R_pred = R_pre * Exp(dtheta_local)
+    const Eigen::Matrix3d imu_delta_rotation_local =
+        state_before_propagation.Q_WI
+            .toRotationMatrix()
+            .transpose() *
+        predicted_state.Q_WI
+            .toRotationMatrix();
+
+    const Eigen::AngleAxisd imu_delta_angle_axis(
+        imu_delta_rotation_local);
+
+    const Eigen::Vector3d imu_delta_theta_local_rad =
+        imu_delta_angle_axis.axis() *
+        imu_delta_angle_axis.angle();
+
+    // Equivalent world/left rotation vector.
+    const Eigen::Vector3d imu_delta_theta_world_rad =
+        state_before_propagation.Q_WI
+            .toRotationMatrix() *
+        imu_delta_theta_local_rad;
+
+    const Eigen::Vector3d imu_delta_theta_local_deg =
+        imu_delta_theta_local_rad *
+        kLioStateRadToDeg;
+
+    const Eigen::Vector3d imu_delta_theta_world_deg =
+        imu_delta_theta_world_rad *
+        kLioStateRadToDeg;
+
+    const double imu_propagation_dt =
+        predicted_state.timestamp -
+        state_before_propagation.timestamp;
+
     const double lidar_delta_rotation_deg =
         predicted_state.Q_WI.angularDistance(
             posterior_state.Q_WI) *
+        kLioStateRadToDeg;
+
+    // FR_ROT_UPDATE_DIAG_V1
+    //
+    // Right/local correction:
+    //   R_post = R_pred * Exp(dtheta_local)
+    //
+    // World/left correction:
+    //   R_post = Exp(dtheta_world) * R_pred
+    //
+    // Therefore:
+    //   dtheta_world = R_pred * dtheta_local
+    //
+    // The world-frame Y component is the quantity of primary
+    // interest for the observed X->Z spatial tilt.
+    const Eigen::Matrix3d lidar_delta_rotation_local =
+        predicted_state.Q_WI
+            .toRotationMatrix()
+            .transpose() *
+        posterior_state.Q_WI
+            .toRotationMatrix();
+
+    const Eigen::AngleAxisd lidar_delta_angle_axis(
+        lidar_delta_rotation_local);
+
+    const Eigen::Vector3d lidar_delta_theta_local_rad =
+        lidar_delta_angle_axis.axis() *
+        lidar_delta_angle_axis.angle();
+
+    const Eigen::Vector3d lidar_delta_theta_world_rad =
+        predicted_state.Q_WI
+            .toRotationMatrix() *
+        lidar_delta_theta_local_rad;
+
+    const Eigen::Vector3d lidar_delta_theta_local_deg =
+        lidar_delta_theta_local_rad *
+        kLioStateRadToDeg;
+
+    const Eigen::Vector3d lidar_delta_theta_world_deg =
+        lidar_delta_theta_world_rad *
         kLioStateRadToDeg;
 
     const double lidar_delta_extrinsic_rotation_deg =
@@ -9039,6 +12513,43 @@ if (!ieskf_.IteratedLidarUpdate(
     const Eigen::Isometry3d posterior_T_WL =
         StateToLidarPose(
             posterior_state);
+
+    // FR_PRE_POST_POSE_V1
+    // Diagnostic only:
+    // PRE  = IMU propagated LiDAR pose before the iterated LiDAR update.
+    // POST = LiDAR pose after the complete iterated LiDAR update.
+    // Both poses are expressed in the same FR world frame.
+    {
+        const Eigen::Quaterniond q_pre(
+            predicted_T_WL.rotation());
+
+        const Eigen::Quaterniond q_post(
+            posterior_T_WL.rotation());
+
+        std::cerr
+            << std::setprecision(17)
+            << "FR_PRE_POST_POSE_V1"
+            << " t=" << scan_start_time
+            << " pre=["
+            << predicted_T_WL.translation().x() << " "
+            << predicted_T_WL.translation().y() << " "
+            << predicted_T_WL.translation().z() << " "
+            << q_pre.x() << " "
+            << q_pre.y() << " "
+            << q_pre.z() << " "
+            << q_pre.w()
+            << "]"
+            << " post=["
+            << posterior_T_WL.translation().x() << " "
+            << posterior_T_WL.translation().y() << " "
+            << posterior_T_WL.translation().z() << " "
+            << q_post.x() << " "
+            << q_post.y() << " "
+            << q_post.z() << " "
+            << q_post.w()
+            << "]"
+            << std::endl;
+    }
 
     const double predicted_lidar_z =
         predicted_T_WL.translation().z();
@@ -9151,6 +12662,32 @@ if (!ieskf_.IteratedLidarUpdate(
         << lidar_delta_velocity_WI.y() << " "
         << lidar_delta_velocity_WI.z() << "]"
         << " | dR_WI_deg=" << lidar_delta_rotation_deg
+        << " | dR_local_deg=["
+        << lidar_delta_theta_local_deg.x() << " "
+        << lidar_delta_theta_local_deg.y() << " "
+        << lidar_delta_theta_local_deg.z() << "]"
+        << " | dR_world_deg=["
+        << lidar_delta_theta_world_deg.x() << " "
+        << lidar_delta_theta_world_deg.y() << " "
+        << lidar_delta_theta_world_deg.z() << "]"
+        << " | dR_world_y_deg="
+        << lidar_delta_theta_world_deg.y()
+        << " | imu_pre_t="
+        << state_before_propagation.timestamp
+        << " | imu_pred_t="
+        << predicted_state.timestamp
+        << " | imu_dt="
+        << imu_propagation_dt
+        << " | imu_dR_local_deg=["
+        << imu_delta_theta_local_deg.x() << " "
+        << imu_delta_theta_local_deg.y() << " "
+        << imu_delta_theta_local_deg.z() << "]"
+        << " | imu_dR_world_deg=["
+        << imu_delta_theta_world_deg.x() << " "
+        << imu_delta_theta_world_deg.y() << " "
+        << imu_delta_theta_world_deg.z() << "]"
+        << " | imu_dR_world_y_deg="
+        << imu_delta_theta_world_deg.y()
         << " | ba=["
         << posterior_state.accel_bias.x() << " "
         << posterior_state.accel_bias.y() << " "
@@ -9207,6 +12744,9 @@ if (!ieskf_.IteratedLidarUpdate(
 
     result.success =
         true;
+
+    // FR_PGO_GROUND_CONF_PUBLISH_NORMAL_V3
+    publish_pgo_ground_confidence_diag();
 
     return true;
 }

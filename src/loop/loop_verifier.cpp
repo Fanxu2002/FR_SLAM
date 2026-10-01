@@ -21,6 +21,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/search/kdtree.h>
+#include "fr_slam/loop/loop_verifier_cuda.hpp"
 
 namespace
 {
@@ -1347,6 +1348,128 @@ namespace
             static_cast<std::size_t>(
                 kShadowPlaneKnn));
 
+        // ========================================================
+        // LOOP_VERIFIER_CUDA_KNN
+        //
+        // Persistent target upload once per solver call.
+        // GPU supplies K=5 correspondences.
+        // K=5/K=6 ambiguous queries fall back to the original
+        // PCL nearestKSearch.
+        //
+        // All downstream plane fitting / residual / H / b logic
+        // remains unchanged.
+        // ========================================================
+        std::vector<float> gpu_active_target_xyz(
+            target.cloud->size() * 3U);
+
+        for (std::size_t i = 0U;
+             i < target.cloud->size();
+             ++i)
+        {
+            const pcl::PointXYZ &p =
+                target.cloud->points[i];
+
+            gpu_active_target_xyz[
+                i * 3U + 0U] = p.x;
+
+            gpu_active_target_xyz[
+                i * 3U + 1U] = p.y;
+
+            gpu_active_target_xyz[
+                i * 3U + 2U] = p.z;
+        }
+
+
+        fr_slam_cuda::
+            PersistentKnn5Handle
+                gpu_active_handle = nullptr;
+
+        double gpu_active_setup_ms = 0.0;
+        int gpu_active_create_error = 0;
+
+
+        const bool cuda_backend_requested =
+            config.backend !=
+                LoopVerifierBackend::Cpu;
+
+        bool gpu_active_ready = false;
+
+        if (cuda_backend_requested)
+        {
+            gpu_active_ready =
+                fr_slam_cuda::
+                    CreatePersistentKnn5(
+                        gpu_active_target_xyz.data(),
+                        target.cloud->size(),
+                        source.cloud->size(),
+                        gpu_active_handle,
+                        gpu_active_setup_ms,
+                        gpu_active_create_error);
+        }
+
+        // Explicit CUDA means CUDA availability is part of the requested
+        // runtime configuration.  Auto is allowed to fall back to CPU.
+        if (config.backend ==
+                LoopVerifierBackend::Cuda &&
+            !gpu_active_ready)
+        {
+            std::cerr
+                << "LoopVerifier CUDA backend initialization failed"
+                << " | cuda_error="
+                << gpu_active_create_error
+                << std::endl;
+
+            return false;
+        }
+
+
+        std::size_t gpu_active_calls = 0U;
+        // ====================================================
+        // GPU_PERSISTENT_FUSED_ACTIVE_V3
+        //
+        // Immutable source cloud for this solver call.
+        // Uploaded by the fused CUDA backend only on its first GN call.
+        // ====================================================
+        std::vector<float>
+            gpu_fused_source_xyz(
+                source.cloud->size() * 3U);
+
+        for (std::size_t i = 0U;
+             i < source.cloud->size();
+             ++i)
+        {
+            const pcl::PointXYZ &p =
+                source.cloud->points[i];
+
+            gpu_fused_source_xyz[
+                i * 3U + 0U] = p.x;
+
+            gpu_fused_source_xyz[
+                i * 3U + 1U] = p.y;
+
+            gpu_fused_source_xyz[
+                i * 3U + 2U] = p.z;
+        }
+
+
+        std::size_t gpu_fused_calls = 0U;
+        std::size_t gpu_fused_failed_calls = 0U;
+
+        double gpu_fused_source_upload_sum_ms = 0.0;
+        double gpu_fused_transform_sum_ms = 0.0;
+        double gpu_fused_knn_sum_ms = 0.0;
+        double gpu_fused_geometry_sum_ms = 0.0;
+        double gpu_fused_total_sum_ms = 0.0;
+
+
+        std::size_t gpu_active_failed_calls = 0U;
+        std::size_t gpu_active_queries = 0U;
+        std::size_t gpu_active_cpu_fallback_queries = 0U;
+
+        double gpu_active_kernel_sum_ms = 0.0;
+        double gpu_active_total_sum_ms = 0.0;
+
+
         for (std::size_t iteration = 0;
              iteration < config.max_iterations;
              ++iteration)
@@ -1379,30 +1502,310 @@ namespace
             const Eigen::Vector3d sensor_origin_target =
                 T_target_source.translation();
 
-            for (const pcl::PointXYZ &source_point :
-                 source.cloud->points)
+            // ====================================================
+            // GPU_PERSISTENT_FUSED_ACTIVE_V3
+            //
+            // GPU:
+            //   transform
+            //   K=6 retrieval
+            //   plane
+            //   residual/J
+            //   Huber
+            //   geometry H/b
+            //   Ground H/b
+            //
+            // CPU:
+            //   only K5/K6-boundary or GPU-invalid fallback queries.
+            // ====================================================
+
+            const std::size_t gpu_query_count =
+                source.cloud->size();
+
+
+            double T_gpu[12] =
             {
+                T_target_source.rotation()(0,0),
+                T_target_source.rotation()(0,1),
+                T_target_source.rotation()(0,2),
+                T_target_source.translation().x(),
+
+                T_target_source.rotation()(1,0),
+                T_target_source.rotation()(1,1),
+                T_target_source.rotation()(1,2),
+                T_target_source.translation().y(),
+
+                T_target_source.rotation()(2,0),
+                T_target_source.rotation()(2,1),
+                T_target_source.rotation()(2,2),
+                T_target_source.translation().z()
+            };
+
+
+            double gpu_H_geometry_raw[36] = {};
+            double gpu_b_geometry_raw[6] = {};
+
+            double gpu_H_ground_raw[36] = {};
+            double gpu_b_ground_raw[6] = {};
+
+
+            std::vector<double>
+                gpu_fused_ranges(
+                    gpu_query_count,
+                    std::numeric_limits<double>::
+                        quiet_NaN());
+
+            std::vector<unsigned char>
+                gpu_fused_range_valid(
+                    gpu_query_count,
+                    0U);
+
+            // Default = CPU fallback.
+            // A successful fused call overwrites the full mask.
+            std::vector<unsigned char>
+                gpu_fused_cpu_fallback(
+                    gpu_query_count,
+                    1U);
+
+
+            double gpu_raw_sse = 0.0;
+            double gpu_robust_sse = 0.0;
+            double gpu_robust_weight_sum = 0.0;
+
+
+            fr_slam_cuda::
+                PersistentFusedStats
+                    gpu_fused_stats;
+
+
+            bool gpu_fused_ok = false;
+
+
+            ++gpu_fused_calls;
+
+            gpu_active_queries +=
+                gpu_query_count;
+
+
+            if (gpu_active_ready)
+            {
+                gpu_fused_ok =
+                    fr_slam_cuda::
+                        QueryPersistentFusedPlaneHessian(
+                            gpu_active_handle,
+
+                            gpu_fused_source_xyz.data(),
+                            gpu_query_count,
+
+                            T_gpu,
+
+                            2.0e-5f,
+                            1.0e-5f,
+
+                            maximum_squared_distance,
+                            kShadowMaxPlaneFitError,
+                            config.point_to_plane_max_residual,
+                            config.point_to_plane_huber_delta,
+
+                            config.enable_ground_constraint,
+                            ground_normal_cosine_threshold,
+                            config.ground_min_below_sensor_m,
+                            config.ground_max_residual,
+                            config.ground_huber_delta,
+                            config.ground_weight,
+
+                            gpu_H_geometry_raw,
+                            gpu_b_geometry_raw,
+
+                            gpu_H_ground_raw,
+                            gpu_b_ground_raw,
+
+                            gpu_fused_ranges.data(),
+                            gpu_fused_range_valid.data(),
+
+                            gpu_fused_cpu_fallback.data(),
+
+                            gpu_raw_sse,
+                            gpu_robust_sse,
+                            gpu_robust_weight_sum,
+
+                            gpu_fused_stats);
+            }
+
+
+            if (gpu_fused_ok)
+            {
+                gpu_fused_source_upload_sum_ms +=
+                    gpu_fused_stats.source_upload_ms;
+
+                gpu_fused_transform_sum_ms +=
+                    gpu_fused_stats.transform_kernel_ms;
+
+                gpu_fused_knn_sum_ms +=
+                    gpu_fused_stats.knn_kernel_ms;
+
+                gpu_fused_geometry_sum_ms +=
+                    gpu_fused_stats.geometry_kernel_ms;
+
+                gpu_fused_total_sum_ms +=
+                    gpu_fused_stats.total_ms;
+
+
+                // Preserve old GPU timing counters so existing
+                // diagnostics still remain meaningful enough.
+                gpu_active_kernel_sum_ms +=
+                    gpu_fused_stats.knn_kernel_ms;
+
+                gpu_active_total_sum_ms +=
+                    gpu_fused_stats.total_ms;
+
+
+                for (int r = 0;
+                     r < 6;
+                     ++r)
+                {
+                    for (int c = 0;
+                         c < 6;
+                         ++c)
+                    {
+                        H_geometry(r,c) +=
+                            gpu_H_geometry_raw[
+                                r * 6 + c];
+
+                        H_ground(r,c) +=
+                            gpu_H_ground_raw[
+                                r * 6 + c];
+                    }
+
+
+                    b_geometry(r) +=
+                        gpu_b_geometry_raw[r];
+
+                    b_ground(r) +=
+                        gpu_b_ground_raw[r];
+                }
+
+
+                raw_squared_error_sum +=
+                    gpu_raw_sse;
+
+                robust_squared_error_sum +=
+                    gpu_robust_sse;
+
+                robust_weight_sum +=
+                    gpu_robust_weight_sum;
+
+
+                diagnostic.correspondences +=
+                    gpu_fused_stats.correspondences;
+
+                diagnostic.downweighted +=
+                    gpu_fused_stats.downweighted;
+
+                diagnostic.plane_fit_failures +=
+                    gpu_fused_stats.plane_fit_failures;
+
+                diagnostic.ground_correspondences +=
+                    gpu_fused_stats.ground_correspondences;
+
+                diagnostic.ground_downweighted +=
+                    gpu_fused_stats.ground_downweighted;
+
+
+                // Source-order range collection.
+                for (std::size_t qi = 0U;
+                     qi < gpu_query_count;
+                     ++qi)
+                {
+                    if (gpu_fused_range_valid[qi] != 0U &&
+                        std::isfinite(
+                            gpu_fused_ranges[qi]) &&
+                        gpu_fused_ranges[qi] >
+                            1.0e-9)
+                    {
+                        correspondence_ranges.push_back(
+                            gpu_fused_ranges[qi]);
+                    }
+                }
+            }
+            else
+            {
+                ++gpu_fused_failed_calls;
+                ++gpu_active_failed_calls;
+
+                std::fill(
+                    gpu_fused_cpu_fallback.begin(),
+                    gpu_fused_cpu_fallback.end(),
+                    1U);
+            }
+
+
+            // ----------------------------------------------------
+            // CPU FALLBACK ONLY
+            // ----------------------------------------------------
+
+            std::vector<int>
+                neighbor_indices(
+                    static_cast<std::size_t>(
+                        kShadowPlaneKnn));
+
+            std::vector<float>
+                neighbor_squared_distances(
+                    static_cast<std::size_t>(
+                        kShadowPlaneKnn));
+
+
+            for (std::size_t qi = 0U;
+                 qi < source.cloud->size();
+                 ++qi)
+            {
+                if (gpu_fused_ok &&
+                    gpu_fused_cpu_fallback[qi] == 0U)
+                {
+                    continue;
+                }
+
+
+                const pcl::PointXYZ &source_point =
+                    source.cloud->points[qi];
+
+
                 const Eigen::Vector3d p_source(
-                    static_cast<double>(source_point.x),
-                    static_cast<double>(source_point.y),
-                    static_cast<double>(source_point.z));
+                    static_cast<double>(
+                        source_point.x),
+                    static_cast<double>(
+                        source_point.y),
+                    static_cast<double>(
+                        source_point.z));
+
 
                 const Eigen::Vector3d p_target =
                     T_target_source *
                     p_source;
+
 
                 if (!p_target.allFinite())
                 {
                     continue;
                 }
 
+
+                ++gpu_active_cpu_fallback_queries;
+
+
                 pcl::PointXYZ query;
+
                 query.x =
-                    static_cast<float>(p_target.x());
+                    static_cast<float>(
+                        p_target.x());
+
                 query.y =
-                    static_cast<float>(p_target.y());
+                    static_cast<float>(
+                        p_target.y());
+
                 query.z =
-                    static_cast<float>(p_target.z());
+                    static_cast<float>(
+                        p_target.z());
+
 
                 const int found =
                     target.kdtree->nearestKSearch(
@@ -1411,24 +1814,31 @@ namespace
                         neighbor_indices,
                         neighbor_squared_distances);
 
-                if (found < kShadowPlaneKnn)
+
+                if (found <
+                    kShadowPlaneKnn)
                 {
                     continue;
                 }
+
 
                 const double nearest_squared_distance =
                     static_cast<double>(
                         neighbor_squared_distances[0]);
 
-                if (!std::isfinite(nearest_squared_distance) ||
+
+                if (!std::isfinite(
+                        nearest_squared_distance) ||
                     nearest_squared_distance >
                         maximum_squared_distance)
                 {
                     continue;
                 }
 
+
                 Eigen::Vector3d plane_point;
                 Eigen::Vector3d plane_normal;
+
 
                 if (!FitShadowPlane(
                         target.cloud,
@@ -1440,10 +1850,12 @@ namespace
                     continue;
                 }
 
+
                 const double residual =
                     plane_normal.dot(
                         p_target -
                         plane_point);
+
 
                 if (!std::isfinite(residual) ||
                     std::abs(residual) >
@@ -1452,35 +1864,47 @@ namespace
                     continue;
                 }
 
-                const Eigen::Vector3d lever_arm_target =
-                    p_target -
-                    sensor_origin_target;
+
+                const Eigen::Vector3d
+                    lever_arm_target =
+                        p_target -
+                        sensor_origin_target;
+
 
                 if (!lever_arm_target.allFinite())
                 {
                     continue;
                 }
 
-                // Sensor-centered perturbation, order = [rx ry rz tx ty tz].
-                Eigen::Matrix<double, 1, 6> J =
-                    Eigen::Matrix<double, 1, 6>::Zero();
 
-                J.block<1, 3>(0, 0) =
+                // Sensor-centered perturbation.
+                // Order = [rx ry rz tx ty tz].
+                Eigen::Matrix<double, 1, 6> J =
+                    Eigen::Matrix<double, 1, 6>::
+                        Zero();
+
+
+                J.block<1,3>(0,0) =
                     lever_arm_target.cross(
-                                        plane_normal)
+                        plane_normal)
                         .transpose();
 
-                J.block<1, 3>(0, 3) =
+
+                J.block<1,3>(0,3) =
                     plane_normal.transpose();
+
 
                 const double absolute_residual =
                     std::abs(residual);
 
+
                 double huber_weight = 1.0;
+
 
                 if (absolute_residual >
                         config.point_to_plane_huber_delta &&
-                    absolute_residual > 1.0e-12)
+                    absolute_residual >
+                        1.0e-12)
                 {
                     huber_weight =
                         config.point_to_plane_huber_delta /
@@ -1489,30 +1913,37 @@ namespace
                     ++diagnostic.downweighted;
                 }
 
+
                 H_geometry.noalias() +=
                     huber_weight *
                     J.transpose() *
                     J;
+
 
                 b_geometry.noalias() +=
                     huber_weight *
                     J.transpose() *
                     residual;
 
+
                 raw_squared_error_sum +=
                     residual *
                     residual;
+
 
                 robust_squared_error_sum +=
                     huber_weight *
                     residual *
                     residual;
 
+
                 robust_weight_sum +=
                     huber_weight;
 
+
                 const double range =
                     lever_arm_target.norm();
+
 
                 if (std::isfinite(range) &&
                     range > 1.0e-9)
@@ -1521,43 +1952,42 @@ namespace
                         range);
                 }
 
+
                 ++diagnostic.correspondences;
 
-                // ------------------------------------------------------------
-                // Loop-local ground-like extra information.
-                //
-                // Unlike realtime frontend Ground V1.3, LoopVerifier currently
-                // does not receive a persisted GroundSegmentationResult for a
-                // Keyframe.  Therefore V2 infers ground-like correspondences
-                // conservatively from the already-fitted target plane:
-                //   * normal close to target-frame +/-Z,
-                //   * source point is below the current LiDAR origin,
-                //   * small point-to-plane residual.
-                //
-                // The Jacobian is then projected to [roll,pitch,z] exactly as
-                // in frontend Ground V1.3: rz / tx / ty are zeroed.
-                // ------------------------------------------------------------
+
+                // ------------------------------------------------
+                // Exact existing Ground branch.
+                // Preserve [roll,pitch,z].
+                // ------------------------------------------------
+
                 if (config.enable_ground_constraint &&
-                    std::abs(plane_normal.z()) >=
+                    std::abs(
+                        plane_normal.z()) >=
                         ground_normal_cosine_threshold &&
                     lever_arm_target.z() <=
                         -config.ground_min_below_sensor_m &&
                     absolute_residual <=
                         config.ground_max_residual)
                 {
-                    Eigen::Matrix<double, 1, 6> J_ground =
-                        J;
+                    Eigen::Matrix<double, 1, 6>
+                        J_ground =
+                            J;
 
-                    J_ground(0, 2) = 0.0; // yaw
-                    J_ground(0, 3) = 0.0; // x
-                    J_ground(0, 4) = 0.0; // y
+
+                    J_ground(0,2) = 0.0;
+                    J_ground(0,3) = 0.0;
+                    J_ground(0,4) = 0.0;
+
 
                     double ground_robust_weight =
                         1.0;
 
+
                     if (absolute_residual >
                             config.ground_huber_delta &&
-                        absolute_residual > 1.0e-12)
+                        absolute_residual >
+                            1.0e-12)
                     {
                         ground_robust_weight =
                             config.ground_huber_delta /
@@ -1566,23 +1996,28 @@ namespace
                         ++diagnostic.ground_downweighted;
                     }
 
+
                     const double final_ground_weight =
                         config.ground_weight *
                         ground_robust_weight;
+
 
                     H_ground.noalias() +=
                         final_ground_weight *
                         J_ground.transpose() *
                         J_ground;
 
+
                     b_ground.noalias() +=
                         final_ground_weight *
                         J_ground.transpose() *
                         residual;
 
+
                     ++diagnostic.ground_correspondences;
                 }
             }
+
 
             if (diagnostic.correspondences <
                     kLoopP2PlaneMinimumCorrespondences ||
@@ -1951,6 +2386,66 @@ namespace
                 break;
             }
         }
+
+        std::cout
+            << "LOOP_VERIFIER_CUDA"
+            << " | calls="
+            << gpu_fused_calls
+            << " | failed_calls="
+            << gpu_fused_failed_calls
+            << " | source_upload_sum_ms="
+            << gpu_fused_source_upload_sum_ms
+            << " | transform_sum_ms="
+            << gpu_fused_transform_sum_ms
+            << " | knn_sum_ms="
+            << gpu_fused_knn_sum_ms
+            << " | geometry_sum_ms="
+            << gpu_fused_geometry_sum_ms
+            << " | total_sum_ms="
+            << gpu_fused_total_sum_ms
+            << " | cpu_fallback_queries="
+            << gpu_active_cpu_fallback_queries
+            << std::endl;
+
+
+        fr_slam_cuda::
+            DestroyPersistentKnn5(
+                gpu_active_handle);
+
+
+        const double gpu_active_fallback_ratio =
+            gpu_active_queries > 0U
+                ? static_cast<double>(
+                      gpu_active_cpu_fallback_queries) /
+                      static_cast<double>(
+                          gpu_active_queries)
+                : 0.0;
+
+
+        std::cout
+            << "LOOP_VERIFIER_CUDA_KNN"
+            << " | ready="
+            << (gpu_active_ready ? 1 : 0)
+            << " | setup_ms="
+            << gpu_active_setup_ms
+            << " | calls="
+            << gpu_active_calls
+            << " | failed_calls="
+            << gpu_active_failed_calls
+            << " | queries="
+            << gpu_active_queries
+            << " | cpu_fallback="
+            << gpu_active_cpu_fallback_queries
+            << " | fallback_ratio="
+            << gpu_active_fallback_ratio
+            << " | kernel_sum_ms="
+            << gpu_active_kernel_sum_ms
+            << " | total_sum_ms="
+            << gpu_active_total_sum_ms
+            << " | create_error="
+            << gpu_active_create_error
+            << std::endl;
+
 
         return solved_at_least_once &&
                T_target_source.matrix().allFinite();

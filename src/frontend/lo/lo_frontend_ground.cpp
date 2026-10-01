@@ -314,7 +314,7 @@
 
             runtime.diagnostics_stream.open(
                 diagnostics_directory /
-                    "ground_frontend_diagnostics.csv",
+                    "ground_frontend_diagnostics_legacy.csv",
                 std::ios::out |
                     std::ios::trunc);
 

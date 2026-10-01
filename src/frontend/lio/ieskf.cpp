@@ -1471,6 +1471,201 @@ bool Ieskf::IteratedLidarUpdate(
     // Ground / Wall state machines and residuals are unchanged.
     constexpr bool kEnableStructuralSubspaceOwnershipProjection = false;
 
+    // ========================================================================
+    // FR_DENSE_YAW_SOFT_OWNERSHIP_V2
+    //
+    // Reduce only Dense LiDAR information in an explicitly supplied
+    // structural ownership subspace.
+    //
+    // alpha = 0.10 means:
+    //
+    //     H yaw-yaw      -> 0.10
+    //     H yaw-cross    -> sqrt(0.10)
+    //
+    // Prior information is untouched.
+    // Structural measurements are added AFTER this operation.
+    // ========================================================================
+
+constexpr double kDenseStructuralOwnershipAlpha =
+        1.00;
+
+    const auto apply_dense_soft_ownership =
+        [structural_ownership_builder](
+            const LioState &linearization_state,
+            LioMeasurementResult &dense_measurement,
+            const char *stage) -> bool
+        {
+            if (structural_ownership_builder == nullptr)
+            {
+                return true;
+            }
+
+            StateMatrix ownership_information =
+                StateMatrix::Zero();
+
+            if (!(*structural_ownership_builder)(
+                    linearization_state,
+                    ownership_information))
+            {
+                return false;
+            }
+
+            ownership_information =
+                0.5 *
+                (
+                    ownership_information +
+                    ownership_information.transpose()
+                );
+
+            if (!ownership_information.allFinite())
+            {
+                return false;
+            }
+
+            Eigen::SelfAdjointEigenSolver<StateMatrix>
+                ownership_solver(
+                    ownership_information);
+
+            if (ownership_solver.info() !=
+                Eigen::Success)
+            {
+                return false;
+            }
+
+            const auto ownership_values =
+                ownership_solver.eigenvalues();
+
+            const auto ownership_vectors =
+                ownership_solver.eigenvectors();
+
+            if (!ownership_values.allFinite() ||
+                !ownership_vectors.allFinite())
+            {
+                return false;
+            }
+
+            const double maximum_eigenvalue =
+                ownership_values.maxCoeff();
+
+            if (!std::isfinite(maximum_eigenvalue) ||
+                maximum_eigenvalue <= 1.0e-12)
+            {
+                return true;
+            }
+
+            const double threshold =
+                std::max(
+                    1.0e-8,
+                    maximum_eigenvalue *
+                        1.0e-6);
+
+            StateMatrix owned_projector =
+                StateMatrix::Zero();
+
+            std::size_t owned_rank =
+                0U;
+
+            for (int index = 0;
+                 index < STATE_DIM;
+                 ++index)
+            {
+                if (ownership_values(index) >
+                    threshold)
+                {
+                    const StateVector direction =
+                        ownership_vectors.col(
+                            index);
+
+                    owned_projector.noalias() +=
+                        direction *
+                        direction.transpose();
+
+                    ++owned_rank;
+                }
+            }
+
+            if (owned_rank == 0U)
+            {
+                return true;
+            }
+
+            const double retained_scale =
+                std::sqrt(
+                    kDenseStructuralOwnershipAlpha);
+
+            const StateMatrix soft_transform =
+                StateMatrix::Identity() -
+                (1.0 - retained_scale) *
+                    owned_projector;
+
+            const double dense_info_before =
+                (
+                    owned_projector *
+                    dense_measurement.information
+                ).trace();
+
+            dense_measurement.information =
+                soft_transform.transpose() *
+                dense_measurement.information *
+                soft_transform;
+
+            dense_measurement.gradient =
+                soft_transform.transpose() *
+                dense_measurement.gradient;
+
+            dense_measurement.information =
+                0.5 *
+                (
+                    dense_measurement.information +
+                    dense_measurement.information.transpose()
+                );
+
+            if (!dense_measurement.information.allFinite() ||
+                !dense_measurement.gradient.allFinite())
+            {
+                return false;
+            }
+
+            const double dense_info_after =
+                (
+                    owned_projector *
+                    dense_measurement.information
+                ).trace();
+
+            static std::size_t soft_ownership_counter =
+                0U;
+
+            ++soft_ownership_counter;
+
+            if ((soft_ownership_counter % 100U) == 1U)
+            {
+                std::cout
+                    << "LIO_DENSE_YAW_SOFT_OWNERSHIP_V2"
+                    << " | stage="
+                    << stage
+                    << " | rank="
+                    << owned_rank
+                    << " | alpha="
+                    << kDenseStructuralOwnershipAlpha
+                    << " | dense_info_before="
+                    << dense_info_before
+                    << " | dense_info_after="
+                    << dense_info_after
+                    << " | ratio="
+                    << (
+                        std::abs(dense_info_before) >
+                                1.0e-12
+                            ? dense_info_after /
+                                  dense_info_before
+                            : 0.0
+                       )
+                    << std::endl;
+            }
+
+            return true;
+        };
+
+
     for (int iteration = 0;
          iteration <
          config_.max_lidar_iterations;
@@ -1695,6 +1890,14 @@ bool Ieskf::IteratedLidarUpdate(
                     }
                 }
             }
+            if (!apply_dense_soft_ownership(
+                    current_state,
+                    measurement,
+                    "ITERATION"))
+            {
+                return false;
+            }
+
 
             measurement.information +=
                 joint_information;
@@ -2186,6 +2389,485 @@ bool Ieskf::IteratedLidarUpdate(
                     kVelocityZ) -
                 decomposed_vz_increment;
 
+            // ============================================================
+            // FR_ROTATION_INFORMATION_DIAG_V1
+            //
+            // Diagnostic only.
+            //
+            // Rotation state uses a right/local perturbation:
+            //
+            //     R_new = R * Exp(dtheta_local)
+            //
+            // Therefore world-Y maps into the local tangent as:
+            //
+            //     dtheta_local = R_WI^T * e_y_world
+            //
+            // This lets us inspect the LiDAR/prior information specifically
+            // along the world-Y attitude direction responsible for X->Z
+            // slope, instead of interpreting local component #1 as world-Y.
+            // ============================================================
+            constexpr double kRadToDegDiag =
+                57.2957795130823208768;
+
+            const Eigen::Vector3d rotation_info_diag =
+                rotation_information.diagonal();
+
+            Eigen::Vector3d rotation_info_eigenvalues =
+                Eigen::Vector3d::Zero();
+
+            {
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                    rotation_info_solver(
+                        rotation_information);
+
+                if (rotation_info_solver.info() ==
+                        Eigen::Success &&
+                    rotation_info_solver.eigenvalues().allFinite())
+                {
+                    rotation_info_eigenvalues =
+                        rotation_info_solver.eigenvalues();
+                }
+            }
+
+            const Eigen::Matrix3d prior_rotation_covariance =
+                prior_covariance.block<3, 3>(
+                    LioStateIndex::ROTATION,
+                    LioStateIndex::ROTATION);
+
+            const Eigen::Vector3d prior_rot_var_diag =
+                prior_rotation_covariance.diagonal();
+
+            Eigen::Vector3d prior_rot_std_deg =
+                Eigen::Vector3d::Zero();
+
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                prior_rot_std_deg(axis) =
+                    std::sqrt(
+                        std::max(
+                            0.0,
+                            prior_rot_var_diag(axis))) *
+                    kRadToDegDiag;
+            }
+
+            const Eigen::Matrix3d R_WI_prior_diag =
+                prior_state.Q_WI
+                    .normalized()
+                    .toRotationMatrix();
+
+            const Eigen::Vector3d world_y_local =
+                R_WI_prior_diag.transpose() *
+                Eigen::Vector3d::UnitY();
+
+            const double measurement_info_world_y =
+                world_y_local.dot(
+                    rotation_information *
+                    world_y_local);
+
+            const double prior_var_world_y =
+                world_y_local.dot(
+                    prior_rotation_covariance *
+                    world_y_local);
+
+            const double prior_std_world_y_deg =
+                std::sqrt(
+                    std::max(
+                        0.0,
+                        prior_var_world_y)) *
+                kRadToDegDiag;
+
+            StateVector world_y_state_direction =
+                StateVector::Zero();
+
+            world_y_state_direction.segment<3>(
+                LioStateIndex::ROTATION) =
+                world_y_local;
+
+            const double prior_info_world_y =
+                world_y_state_direction.dot(
+                    prior_information *
+                    world_y_state_direction);
+
+            const double system_info_world_y =
+                world_y_state_direction.dot(
+                    system_matrix *
+                    world_y_state_direction);
+
+            const double measurement_to_prior_info_ratio =
+                prior_info_world_y > 1.0e-12
+                    ? measurement_info_world_y /
+                          prior_info_world_y
+                    : 0.0;
+
+            const Eigen::Vector3d increment_rotation_local =
+                increment.segment<3>(
+                    LioStateIndex::ROTATION);
+
+            const Eigen::Vector3d increment_rotation_local_deg =
+                increment_rotation_local *
+                kRadToDegDiag;
+
+            const Eigen::Vector3d increment_rotation_world_deg =
+                R_WI_prior_diag *
+                increment_rotation_local *
+                kRadToDegDiag;
+
+            // ============================================================
+            // FR_MARGINALIZED_ROTATION_DIAG_V1
+            //
+            // Measurement-only rotation information after eliminating
+            // translation:
+            //
+            //   L_r|p = L_rr - L_rp * L_pp^+ * L_pr
+            //
+            //   g_r|p = g_r  - L_rp * L_pp^+ * g_p
+            //
+            // and the corresponding LiDAR-only rotation step:
+            //
+            //   dtheta = -L_r|p^+ * g_r|p
+            //
+            // Diagnostic only. Estimator behavior is unchanged.
+            // ============================================================
+
+            Eigen::Matrix3d translation_information_pinv =
+                Eigen::Matrix3d::Zero();
+
+            {
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                    translation_info_solver(
+                        translation_information);
+
+                if (translation_info_solver.info() ==
+                        Eigen::Success &&
+                    translation_info_solver.eigenvalues().allFinite() &&
+                    translation_info_solver.eigenvectors().allFinite())
+                {
+                    const Eigen::Vector3d values =
+                        translation_info_solver.eigenvalues();
+
+                    const double maximum =
+                        values.cwiseAbs().maxCoeff();
+
+                    Eigen::Vector3d inverse_values =
+                        Eigen::Vector3d::Zero();
+
+                    if (maximum > 1.0e-12)
+                    {
+                        constexpr double kMargEigenThreshold =
+                            1.0e-9;
+
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            if (values(i) >
+                                kMargEigenThreshold *
+                                    maximum)
+                            {
+                                inverse_values(i) =
+                                    1.0 / values(i);
+                            }
+                        }
+
+                        translation_information_pinv =
+                            translation_info_solver.eigenvectors() *
+                            inverse_values.asDiagonal() *
+                            translation_info_solver.eigenvectors().transpose();
+                    }
+                }
+            }
+
+            Eigen::Matrix3d marginalized_rotation_information =
+                rotation_information -
+                rotation_translation_information *
+                    translation_information_pinv *
+                    translation_rotation_information;
+
+            marginalized_rotation_information =
+                0.5 *
+                (
+                    marginalized_rotation_information +
+                    marginalized_rotation_information.transpose()
+                );
+
+            const Eigen::Vector3d rotation_gradient =
+                measurement.gradient.segment<3>(
+                    LioStateIndex::ROTATION);
+
+            const Eigen::Vector3d translation_gradient =
+                measurement.gradient.segment<3>(
+                    LioStateIndex::POSITION);
+
+            // FR_MEAS_ONLY_TRANSLATION_V1
+            //
+            // Eliminate rotation from the 6-DoF LiDAR pose measurement:
+            //
+            //   Lambda_t^S =
+            //       Lambda_tt - Lambda_tr Lambda_rr^+ Lambda_rt
+            //
+            //   g_t^S =
+            //       g_t - Lambda_tr Lambda_rr^+ g_r
+            //
+            // The resulting LiDAR-only translation step is:
+            //
+            //   dt = -(Lambda_t^S)^+ g_t^S
+            //
+            // No IMU prior / covariance is involved here.
+            const Eigen::Vector3d schur_translation_gradient =
+                translation_gradient -
+                translation_rotation_information *
+                    rotation_information_pinv *
+                    rotation_gradient;
+
+            Eigen::Matrix3d
+                schur_translation_information_pinv =
+                    Eigen::Matrix3d::Zero();
+
+            {
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                    solver(
+                        schur_translation_information);
+
+                if (solver.info() == Eigen::Success &&
+                    solver.eigenvalues().allFinite() &&
+                    solver.eigenvectors().allFinite())
+                {
+                    const Eigen::Vector3d eigenvalues =
+                        solver.eigenvalues();
+
+                    const double maximum =
+                        eigenvalues.cwiseAbs().maxCoeff();
+
+                    Eigen::Vector3d inverse_values =
+                        Eigen::Vector3d::Zero();
+
+                    if (maximum > 1.0e-12)
+                    {
+                        constexpr double kTranslationEigenThreshold =
+                            1.0e-9;
+
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            if (eigenvalues(i) >
+                                kTranslationEigenThreshold *
+                                    maximum)
+                            {
+                                inverse_values(i) =
+                                    1.0 / eigenvalues(i);
+                            }
+                        }
+
+                        schur_translation_information_pinv =
+                            solver.eigenvectors() *
+                            inverse_values.asDiagonal() *
+                            solver.eigenvectors().transpose();
+                    }
+                }
+            }
+
+            const Eigen::Vector3d
+                lidar_only_translation_schur =
+                    -schur_translation_information_pinv *
+                        schur_translation_gradient;
+
+            const Eigen::Vector3d marginalized_rotation_gradient =
+                rotation_gradient -
+                rotation_translation_information *
+                    translation_information_pinv *
+                    translation_gradient;
+
+            Eigen::Vector3d marginalized_rotation_eigenvalues =
+                Eigen::Vector3d::Zero();
+
+            Eigen::Matrix3d marginalized_rotation_information_pinv =
+                Eigen::Matrix3d::Zero();
+
+            {
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d>
+                    marginalized_rotation_solver(
+                        marginalized_rotation_information);
+
+                if (marginalized_rotation_solver.info() ==
+                        Eigen::Success &&
+                    marginalized_rotation_solver
+                        .eigenvalues()
+                        .allFinite() &&
+                    marginalized_rotation_solver
+                        .eigenvectors()
+                        .allFinite())
+                {
+                    marginalized_rotation_eigenvalues =
+                        marginalized_rotation_solver
+                            .eigenvalues();
+
+                    const double maximum =
+                        marginalized_rotation_eigenvalues
+                            .cwiseAbs()
+                            .maxCoeff();
+
+                    Eigen::Vector3d inverse_values =
+                        Eigen::Vector3d::Zero();
+
+                    if (maximum > 1.0e-12)
+                    {
+                        constexpr double kMargEigenThreshold =
+                            1.0e-9;
+
+                        for (int i = 0; i < 3; ++i)
+                        {
+                            if (marginalized_rotation_eigenvalues(i) >
+                                kMargEigenThreshold *
+                                    maximum)
+                            {
+                                inverse_values(i) =
+                                    1.0 /
+                                    marginalized_rotation_eigenvalues(i);
+                            }
+                        }
+
+                        marginalized_rotation_information_pinv =
+                            marginalized_rotation_solver.eigenvectors() *
+                            inverse_values.asDiagonal() *
+                            marginalized_rotation_solver.eigenvectors().transpose();
+                    }
+                }
+            }
+
+            const Eigen::Vector3d lidar_only_rotation_local =
+                -marginalized_rotation_information_pinv *
+                    marginalized_rotation_gradient;
+
+            const Eigen::Vector3d lidar_only_rotation_world_deg =
+                R_WI_prior_diag *
+                lidar_only_rotation_local *
+                kRadToDegDiag;
+
+            const double raw_gradient_world_y =
+                world_y_local.dot(
+                    rotation_gradient);
+
+            const double marginalized_gradient_world_y =
+                world_y_local.dot(
+                    marginalized_rotation_gradient);
+
+            const double marginalized_info_world_y =
+                world_y_local.dot(
+                    marginalized_rotation_information *
+                    world_y_local);
+
+            const double marginalized_to_raw_info_ratio_world_y =
+                measurement_info_world_y > 1.0e-12
+                    ? marginalized_info_world_y /
+                          measurement_info_world_y
+                    : 0.0;
+
+            const double raw_scalar_step_world_y_deg =
+                measurement_info_world_y > 1.0e-12
+                    ? (-raw_gradient_world_y /
+                       measurement_info_world_y) *
+                          kRadToDegDiag
+                    : 0.0;
+
+            const double lidar_only_world_y_deg =
+                lidar_only_rotation_world_deg.y();
+
+            std::cerr
+                << "LIO_ROT_INFO_DIAG"
+                << " | t="
+                << prior_state.timestamp
+                << " | corr="
+                << measurement.correspondences
+
+                << " | rot_info_diag=["
+                << rotation_info_diag.x() << " "
+                << rotation_info_diag.y() << " "
+                << rotation_info_diag.z()
+                << "]"
+
+                << " | rot_info_eig=["
+                << rotation_info_eigenvalues.x() << " "
+                << rotation_info_eigenvalues.y() << " "
+                << rotation_info_eigenvalues.z()
+                << "]"
+
+                << " | prior_rot_var=["
+                << prior_rot_var_diag.x() << " "
+                << prior_rot_var_diag.y() << " "
+                << prior_rot_var_diag.z()
+                << "]"
+
+                << " | prior_rot_std_deg=["
+                << prior_rot_std_deg.x() << " "
+                << prior_rot_std_deg.y() << " "
+                << prior_rot_std_deg.z()
+                << "]"
+
+                << " | world_y_local=["
+                << world_y_local.x() << " "
+                << world_y_local.y() << " "
+                << world_y_local.z()
+                << "]"
+
+                << " | meas_info_wy="
+                << measurement_info_world_y
+
+                << " | prior_var_wy="
+                << prior_var_world_y
+
+                << " | prior_std_wy_deg="
+                << prior_std_world_y_deg
+
+                << " | prior_info_wy="
+                << prior_info_world_y
+
+                << " | system_info_wy="
+                << system_info_world_y
+
+                << " | meas_prior_ratio_wy="
+                << measurement_to_prior_info_ratio
+
+                << " | inc0_rot_local_deg=["
+                << increment_rotation_local_deg.x() << " "
+                << increment_rotation_local_deg.y() << " "
+                << increment_rotation_local_deg.z()
+                << "]"
+
+                << " | inc0_rot_world_deg=["
+                << increment_rotation_world_deg.x() << " "
+                << increment_rotation_world_deg.y() << " "
+                << increment_rotation_world_deg.z()
+                << "]"
+
+                << " | raw_grad_wy="
+                << raw_gradient_world_y
+
+                << " | raw_scalar_step_wy_deg="
+                << raw_scalar_step_world_y_deg
+
+                << " | marg_rot_eig=["
+                << marginalized_rotation_eigenvalues.x() << " "
+                << marginalized_rotation_eigenvalues.y() << " "
+                << marginalized_rotation_eigenvalues.z()
+                << "]"
+
+                << " | marg_info_wy="
+                << marginalized_info_world_y
+
+                << " | marg_raw_ratio_wy="
+                << marginalized_to_raw_info_ratio_world_y
+
+                << " | marg_grad_wy="
+                << marginalized_gradient_world_y
+
+                << " | lidar_only_rot_world_deg=["
+                << lidar_only_rotation_world_deg.x() << " "
+                << lidar_only_rotation_world_deg.y() << " "
+                << lidar_only_rotation_world_deg.z()
+                << "]"
+
+                << " | lidar_only_wy_deg="
+                << lidar_only_world_y_deg
+
+                << std::endl;
+
             std::cerr
                 << "LIO OBS"
                 << " | t="
@@ -2226,6 +2908,22 @@ bool Ieskf::IteratedLidarUpdate(
                 << " | weak_z="
                 << weakest_translation_z
 
+                << " | meas_only_dt=["
+                << lidar_only_translation_schur.x()
+                << " "
+                << lidar_only_translation_schur.y()
+                << " "
+                << lidar_only_translation_schur.z()
+                << "]"
+                << " | meas_only_dz="
+                << lidar_only_translation_schur.z()
+                << " | schur_grad_t=["
+                << schur_translation_gradient.x()
+                << " "
+                << schur_translation_gradient.y()
+                << " "
+                << schur_translation_gradient.z()
+                << "]"
                 << " | schur_z_frac="
                 << schur_z_fraction
 
@@ -2367,6 +3065,44 @@ bool Ieskf::IteratedLidarUpdate(
             break;
         }
     }
+
+    // FR_FULL_ROT_UPDATE_V1
+    //
+    // Total state change over ALL LiDAR IEKF iterations:
+    //
+    //   prior_state -> current_state
+    //
+    // BoxMinus returns:
+    //
+    //   Log(R_prior^T * R_current)
+    //
+    // so the rotation block is the complete local/reference-frame
+    // rotation correction for this LiDAR update.
+    const StateVector full_lidar_update =
+        BoxMinus(
+            current_state,
+            prior_state);
+
+    constexpr double kRadToDegFullRot =
+        57.2957795130823208768;
+
+    const Eigen::Vector3d full_rot_local_deg =
+        full_lidar_update.segment<3>(
+            LioStateIndex::ROTATION) *
+        kRadToDegFullRot;
+
+    std::cerr
+        << "FR_FULL_ROT_UPDATE_V1"
+        << " | t=" << prior_state.timestamp
+        << " | iterations=" << result.iterations
+        << " | full_rot_local_deg=["
+        << full_rot_local_deg.x()
+        << " "
+        << full_rot_local_deg.y()
+        << " "
+        << full_rot_local_deg.z()
+        << "]"
+        << std::endl;
 
     LioMeasurementResult final_measurement;
 
@@ -2576,6 +3312,14 @@ bool Ieskf::IteratedLidarUpdate(
                 }
             }
         }
+        if (!apply_dense_soft_ownership(
+                state_,
+                final_measurement,
+                "FINAL"))
+        {
+            return false;
+        }
+
 
         final_measurement.information +=
             final_joint_information;
@@ -3280,7 +4024,7 @@ bool Ieskf::InjectCorrectedLidarPose(
 {
     if (!initialized_ ||
         !StateIsFinite(state_) ||
-        
+
 !corrected_T_WL.matrix().allFinite() ||
         !corrected_V_WI.allFinite()
 )
@@ -3347,7 +4091,7 @@ bool Ieskf::InjectCorrectedLidarPose(
     corrected_state.Q_WI =
         corrected_Q_WI;
 
-    
+
 corrected_state.P_WI =
         corrected_T_WI.translation();
 
@@ -3593,7 +4337,7 @@ bool Ieskf::GroundPoseUpdate(
     return true;
 }
 
-        
+
 
 bool Ieskf::GroundStateUpdate(
     const Eigen::Isometry3d &corrected_T_WL,
@@ -3921,7 +4665,7 @@ bool Ieskf::GroundStateUpdate(
 }
 
 bool Ieskf::ConfigIsValid(
-    
+
     const IeskfConfig &config) const
 {
     if (!std::isfinite(config.max_imu_dt) ||
