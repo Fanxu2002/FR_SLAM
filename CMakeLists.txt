@@ -764,4 +764,18 @@ if(BUILD_TESTING)
 endif()
 
 
+
+# ============================================================
+# FR-SLAM PRODUCTION RUNTIME INSTALL
+# ============================================================
+
+install(
+    TARGETS
+        lo
+        lio
+        lidar_imu_rotation_calibration
+        ground_segmentation_debug
+    RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
 ament_package()
