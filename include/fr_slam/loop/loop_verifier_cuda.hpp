@@ -170,6 +170,19 @@ struct PersistentFusedStats
     double knn_kernel_ms = 0.0;
     double geometry_kernel_ms = 0.0;
 
+    // Wall-clock diagnostics outside CUDA kernel event intervals.
+    double setup_ms = 0.0;
+    double memset_ms = 0.0;
+    double sync_wait_ms = 0.0;
+
+    double d2h_accumulator_ms = 0.0;
+    double d2h_fallback_ms = 0.0;
+    double d2h_ranges_ms = 0.0;
+    double d2h_valid_ms = 0.0;
+    double d2h_sync_ms = 0.0;
+
+    double postprocess_ms = 0.0;
+
     double total_ms = 0.0;
 
     int cuda_error = 0;

@@ -1459,6 +1459,18 @@ namespace
         double gpu_fused_transform_sum_ms = 0.0;
         double gpu_fused_knn_sum_ms = 0.0;
         double gpu_fused_geometry_sum_ms = 0.0;
+        double gpu_fused_setup_sum_ms = 0.0;
+        double gpu_fused_memset_sum_ms = 0.0;
+        double gpu_fused_sync_wait_sum_ms = 0.0;
+
+        double gpu_fused_d2h_accumulator_sum_ms = 0.0;
+        double gpu_fused_d2h_fallback_sum_ms = 0.0;
+        double gpu_fused_d2h_ranges_sum_ms = 0.0;
+        double gpu_fused_d2h_valid_sum_ms = 0.0;
+        double gpu_fused_d2h_sync_sum_ms = 0.0;
+
+        double gpu_fused_postprocess_sum_ms = 0.0;
+
         double gpu_fused_total_sum_ms = 0.0;
 
 
@@ -1645,6 +1657,33 @@ namespace
 
                 gpu_fused_geometry_sum_ms +=
                     gpu_fused_stats.geometry_kernel_ms;
+
+                gpu_fused_setup_sum_ms +=
+                    gpu_fused_stats.setup_ms;
+
+                gpu_fused_memset_sum_ms +=
+                    gpu_fused_stats.memset_ms;
+
+                gpu_fused_sync_wait_sum_ms +=
+                    gpu_fused_stats.sync_wait_ms;
+
+                gpu_fused_d2h_accumulator_sum_ms +=
+                    gpu_fused_stats.d2h_accumulator_ms;
+
+                gpu_fused_d2h_fallback_sum_ms +=
+                    gpu_fused_stats.d2h_fallback_ms;
+
+                gpu_fused_d2h_ranges_sum_ms +=
+                    gpu_fused_stats.d2h_ranges_ms;
+
+                gpu_fused_d2h_valid_sum_ms +=
+                    gpu_fused_stats.d2h_valid_ms;
+
+                gpu_fused_d2h_sync_sum_ms +=
+                    gpu_fused_stats.d2h_sync_ms;
+
+                gpu_fused_postprocess_sum_ms +=
+                    gpu_fused_stats.postprocess_ms;
 
                 gpu_fused_total_sum_ms +=
                     gpu_fused_stats.total_ms;
@@ -2389,6 +2428,14 @@ namespace
 
         std::cout
             << "LOOP_VERIFIER_CUDA"
+            << " | source_points="
+            << source.cloud->size()
+            << " | target_points="
+            << target.cloud->size()
+            << " | iterations_completed="
+            << iterations_completed
+            << " | max_iterations="
+            << config.max_iterations
             << " | calls="
             << gpu_fused_calls
             << " | failed_calls="
@@ -2401,6 +2448,24 @@ namespace
             << gpu_fused_knn_sum_ms
             << " | geometry_sum_ms="
             << gpu_fused_geometry_sum_ms
+            << " | setup_sum_ms="
+            << gpu_fused_setup_sum_ms
+            << " | memset_sum_ms="
+            << gpu_fused_memset_sum_ms
+            << " | sync_wall_sum_ms="
+            << gpu_fused_sync_wait_sum_ms
+            << " | d2h_accumulator_sum_ms="
+            << gpu_fused_d2h_accumulator_sum_ms
+            << " | d2h_fallback_sum_ms="
+            << gpu_fused_d2h_fallback_sum_ms
+            << " | d2h_ranges_sum_ms="
+            << gpu_fused_d2h_ranges_sum_ms
+            << " | d2h_valid_sum_ms="
+            << gpu_fused_d2h_valid_sum_ms
+            << " | d2h_sync_sum_ms="
+            << gpu_fused_d2h_sync_sum_ms
+            << " | postprocess_sum_ms="
+            << gpu_fused_postprocess_sum_ms
             << " | total_sum_ms="
             << gpu_fused_total_sum_ms
             << " | cpu_fallback_queries="
