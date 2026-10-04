@@ -96,6 +96,13 @@ fr_slam:
     #   "auto" -> CUDA when available, otherwise CPU fallback
     loop_verifier_backend: "cpu"
 
+    # Post-PGO derived refined-map scheduling:
+    #   off   = realtime priority; final refinement on /save_slam_maps
+    #   sync  = legacy synchronous refinement
+    #   async = latest-only background refinement
+    post_pgo_refinement_mode: "async"
+    post_pgo_refinement_loop_stride: 8
+
     loop_retrieval_mode: "scan_context_single"
 
     # ============================================================

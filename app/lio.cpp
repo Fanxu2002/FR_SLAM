@@ -5931,8 +5931,39 @@ private:
             return;
         }
 
+        // Final-save refinement:
+        // Online refinement may be disabled for realtime backend performance.
+        // Before exporting, rebuild the derived refined map once from the
+        // latest main PoseGraph so the saved refined_map corresponds to the
+        // final graph state.
+        const std::size_t final_loop_edges =
+            scan_to_local_map_->PoseGraphLoopEdgeCount();
+
+        if (final_loop_edges > 0)
+        {
+            const bool final_refinement_ok =
+                scan_to_local_map_->ForcePostPgoRefinementForSave();
+
+            if (!final_refinement_ok)
+            {
+                response->success = false;
+                response->message =
+                    "Final post-PGO refinement failed before save.";
+                return;
+            }
+        }
+
         const RegistrationScan2LocalMap::BackendMapSnapshot snapshot =
             scan_to_local_map_->GetBackendMapSnapshot();
+
+        if (snapshot.refined_revision !=
+            snapshot.global_revision)
+        {
+            response->success = false;
+            response->message =
+                "Refined map revision does not match final global map revision.";
+            return;
+        }
 
         if (!snapshot.raw_map ||
             !snapshot.optimized_map ||
@@ -7102,6 +7133,51 @@ private:
             this->get_logger(),
             "LoopVerifier backend: %s",
             configured_loop_verifier_backend.c_str());
+
+        // ========================================================
+        // Post-PGO refinement scheduling.
+        //
+        // off   : online OFF, final refinement at save
+        // sync  : legacy synchronous online refinement
+        // async : latest-only asynchronous refinement worker
+        // ========================================================
+        const std::string configured_post_pgo_refinement_mode =
+            this->declare_parameter<std::string>(
+                "post_pgo_refinement_mode",
+                "off");
+
+        if (configured_post_pgo_refinement_mode != "off" &&
+            configured_post_pgo_refinement_mode != "sync" &&
+            configured_post_pgo_refinement_mode != "async")
+        {
+            RCLCPP_ERROR(
+                this->get_logger(),
+                "Invalid post_pgo_refinement_mode: %s",
+                configured_post_pgo_refinement_mode.c_str());
+
+            throw std::runtime_error(
+                "Invalid post_pgo_refinement_mode");
+        }
+
+        config.post_pgo_refinement_mode =
+            configured_post_pgo_refinement_mode;
+
+        const std::int64_t configured_post_pgo_refinement_loop_stride =
+            this->declare_parameter<std::int64_t>(
+                "post_pgo_refinement_loop_stride",
+                8);
+
+        config.post_pgo_refinement_loop_stride =
+            static_cast<std::size_t>(
+                std::max(
+                    std::int64_t{1},
+                    configured_post_pgo_refinement_loop_stride));
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Post-PGO refinement | mode=%s | loop_stride=%zu",
+            config.post_pgo_refinement_mode.c_str(),
+            config.post_pgo_refinement_loop_stride);
 
         config.consistency.use_temporal_consistency =
             this->declare_parameter<bool>(

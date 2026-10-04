@@ -9258,6 +9258,10 @@ if (!sc_window_shadow)
     loop_timing.optimization_accepted = true;
     loop_timing.loop_edge_accepted = true;
 
+    // New main PoseGraph solution.  Async refinement results produced from
+    // any older epoch are now stale even if they finish successfully later.
+    ++pose_graph_optimization_epoch_;
+
     has_last_online_loop_edge_ = true;
     last_online_loop_current_keyframe_id_ = current_id;
     last_online_loop_historical_keyframe_id_ = historical_id;
@@ -9341,9 +9345,25 @@ if (!sc_window_shadow)
     double backend_refine_ms_v1 =
         0.0;
 
-    constexpr std::size_t
+    const std::size_t
         kPostPgoRefineLoopStrideV2 =
-            8U;
+            std::max<std::size_t>(
+                1U,
+                loop_runtime_config_
+                    .post_pgo_refinement_loop_stride);
+
+    const std::string &
+        post_pgo_refinement_mode_v3 =
+            loop_runtime_config_
+                .post_pgo_refinement_mode;
+
+    const bool
+        post_pgo_refinement_sync_v3 =
+            post_pgo_refinement_mode_v3 == "sync";
+
+    const bool
+        post_pgo_refinement_async_v3 =
+            post_pgo_refinement_mode_v3 == "async";
 
     const std::size_t
         loop_edge_count_v2 =
@@ -9351,6 +9371,7 @@ if (!sc_window_shadow)
 
     const bool
         run_post_pgo_refine_v2 =
+            post_pgo_refinement_sync_v3 &&
             global_map_rebuilt &&
             (
                 loop_edge_count_v2 == 1U ||
@@ -9359,6 +9380,32 @@ if (!sc_window_shadow)
                     kPostPgoRefineLoopStrideV2
                 ) == 0U
             );
+
+    if (post_pgo_refinement_async_v3 &&
+        global_map_rebuilt &&
+        (
+            loop_edge_count_v2 == 1U ||
+            (
+                loop_edge_count_v2 %
+                kPostPgoRefineLoopStrideV2
+            ) == 0U
+        ))
+    {
+        const bool async_submit_ok =
+            SubmitPostPgoRefinementJob();
+
+        std::cout
+            << "BACKEND_REFINE_ASYNC_DISPATCH_V1"
+            << " | current_kf="
+            << current_id
+            << " | loop_edges="
+            << loop_edge_count_v2
+            << " | stride="
+            << kPostPgoRefineLoopStrideV2
+            << " | submitted="
+            << (async_submit_ok ? 1 : 0)
+            << std::endl;
+    }
 
     if (run_post_pgo_refine_v2)
     {

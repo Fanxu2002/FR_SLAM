@@ -93,6 +93,559 @@ void RegistrationScan2LocalMap::StopBackendWorker()
     }
 }
 
+// ============================================================================
+// Async Post-PGO refinement worker.
+//
+// V1 infrastructure only:
+//     - lifecycle
+//     - immutable snapshot jobs
+//     - latest-only pending slot
+//
+// Heavy refinement computation runs on the dedicated worker.
+// ============================================================================
+void RegistrationScan2LocalMap::StartPostPgoRefinementWorker()
+{
+    if (loop_runtime_config_.post_pgo_refinement_mode != "async")
+    {
+        return;
+    }
+
+    bool expected = false;
+
+    if (!refinement_worker_running_.compare_exchange_strong(
+            expected,
+            true))
+    {
+        return;
+    }
+
+    refinement_worker_thread_ =
+        std::thread(
+            &RegistrationScan2LocalMap::PostPgoRefinementLoop,
+            this);
+
+    std::cout
+        << "BACKEND_REFINE_ASYNC_WORKER_START_V1"
+        << " | mode=async"
+        << std::endl;
+}
+
+void RegistrationScan2LocalMap::StopPostPgoRefinementWorker()
+{
+    if (!refinement_worker_running_.exchange(false))
+    {
+        if (refinement_worker_thread_.joinable())
+        {
+            refinement_worker_thread_.join();
+        }
+
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(
+            refinement_worker_mutex_);
+
+        pending_refinement_job_.reset();
+        completed_refinement_result_.reset();
+        refinement_result_ready_.store(false);
+    }
+
+    refinement_worker_condition_.notify_all();
+
+    if (refinement_worker_thread_.joinable())
+    {
+        refinement_worker_thread_.join();
+    }
+
+    std::cout
+        << "BACKEND_REFINE_ASYNC_WORKER_STOP_V1"
+        << std::endl;
+}
+
+bool RegistrationScan2LocalMap::SubmitPostPgoRefinementJob()
+{
+    if (loop_runtime_config_.post_pgo_refinement_mode != "async" ||
+        !refinement_worker_running_.load() ||
+        global_map_revision_ == 0 ||
+        backend_keyframes_.empty() ||
+        pose_graph_.NodeCount() == 0)
+    {
+        return false;
+    }
+
+    auto job =
+        std::make_unique<PostPgoRefinementJob>();
+
+    job->pgo_epoch =
+        pose_graph_optimization_epoch_;
+
+    job->source_global_revision =
+        global_map_revision_;
+
+    job->loop_edges =
+        pose_graph_.LoopEdgeCount();
+
+    // IMPORTANT:
+    // This method is called by the single backend thread.  Therefore these
+    // copies are made while backend_keyframes_ / pose_graph_ are not being
+    // mutated by another backend operation.
+    //
+    // Keyframe clouds are immutable shared buffers, so copying Keyframe history
+    // does not duplicate all point data.
+    job->keyframes =
+        backend_keyframes_;
+
+    job->pose_graph =
+        pose_graph_;
+
+    bool replaced_pending = false;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            refinement_worker_mutex_);
+
+        replaced_pending =
+            static_cast<bool>(
+                pending_refinement_job_);
+
+        if (replaced_pending)
+        {
+            ++refinement_jobs_replaced_;
+        }
+
+        pending_refinement_job_ =
+            std::move(job);
+
+        ++refinement_jobs_submitted_;
+    }
+
+    refinement_worker_condition_.notify_one();
+
+    std::cout
+        << "BACKEND_REFINE_ASYNC_SUBMIT_V1"
+        << " | pgo_epoch=" << pose_graph_optimization_epoch_
+        << " | global_revision=" << global_map_revision_
+        << " | loop_edges=" << pose_graph_.LoopEdgeCount()
+        << " | keyframes=" << backend_keyframes_.size()
+        << " | replaced_pending="
+        << (replaced_pending ? 1 : 0)
+        << " | submitted_total="
+        << refinement_jobs_submitted_
+        << " | replaced_total="
+        << refinement_jobs_replaced_
+        << std::endl;
+
+    return true;
+}
+
+bool RegistrationScan2LocalMap::TryCommitCompletedPostPgoRefinementResult()
+{
+    std::unique_ptr<PostPgoRefinementResult>
+        result;
+
+    {
+        std::lock_guard<std::mutex> lock(
+            refinement_worker_mutex_);
+
+        if (!completed_refinement_result_)
+        {
+            refinement_result_ready_.store(false);
+            return false;
+        }
+
+        result =
+            std::move(
+                completed_refinement_result_);
+
+        // This completed slot has now been consumed by the backend thread.
+        refinement_result_ready_.store(false);
+    }
+
+    if (!result ||
+        !result->success)
+    {
+        std::cout
+            << "BACKEND_REFINE_ASYNC_DROP_V2"
+            << " | reason=COMPUTE_FAILED"
+            << std::endl;
+
+        return false;
+    }
+
+    // ------------------------------------------------------------
+    // Authoritative stale-result guard.
+    //
+    // global_map_revision_ is NOT used here because ordinary Keyframe
+    // growth changes it.  Only a newer accepted main PGO invalidates
+    // the immutable refinement snapshot.
+    // ------------------------------------------------------------
+    if (result->pgo_epoch !=
+        pose_graph_optimization_epoch_)
+    {
+        std::cout
+            << "BACKEND_REFINE_ASYNC_DROP_V2"
+            << " | reason=STALE_PGO_EPOCH"
+            << " | result_epoch="
+            << result->pgo_epoch
+            << " | live_epoch="
+            << pose_graph_optimization_epoch_
+            << std::endl;
+
+        return false;
+    }
+
+    const std::size_t source_count =
+        result->source_keyframe_ids.size();
+
+    if (source_count == 0 ||
+        result->refined_poses.size() != source_count ||
+        result->adjusted.size() != source_count ||
+        backend_keyframes_.size() < source_count)
+    {
+        std::cout
+            << "BACKEND_REFINE_ASYNC_DROP_V2"
+            << " | reason=SIZE_MISMATCH"
+            << " | source_count="
+            << source_count
+            << " | live_keyframes="
+            << backend_keyframes_.size()
+            << std::endl;
+
+        return false;
+    }
+
+    // Backend history is append-only.  Verify that the worker snapshot is
+    // still exactly the prefix of the live backend history.
+    for (std::size_t i = 0;
+         i < source_count;
+         ++i)
+    {
+        if (backend_keyframes_[i].id !=
+            result->source_keyframe_ids[i])
+        {
+            std::cout
+                << "BACKEND_REFINE_ASYNC_DROP_V2"
+                << " | reason=KEYFRAME_PREFIX_MISMATCH"
+                << " | index=" << i
+                << " | result_id="
+                << result->source_keyframe_ids[i]
+                << " | live_id="
+                << backend_keyframes_[i].id
+                << std::endl;
+
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // Build a COMPLETE pose array for the CURRENT live backend.
+    //
+    // Snapshot KFs may receive async refined poses.
+    // KFs appended while the worker was running use their current main
+    // PoseGraph estimates and remain unadjusted.
+    // ------------------------------------------------------------
+    std::vector<
+        Eigen::Isometry3d,
+        Eigen::aligned_allocator<Eigen::Isometry3d>>
+        commit_poses(
+            backend_keyframes_.size(),
+            Eigen::Isometry3d::Identity());
+
+    std::vector<bool>
+        commit_adjusted(
+            backend_keyframes_.size(),
+            false);
+
+    for (std::size_t i = 0;
+         i < backend_keyframes_.size();
+         ++i)
+    {
+        const PoseGraphNode *node =
+            pose_graph_.GetNode(
+                backend_keyframes_[i].id);
+
+        if (node == nullptr ||
+            !node->T_WK.matrix().allFinite())
+        {
+            std::cout
+                << "BACKEND_REFINE_ASYNC_DROP_V2"
+                << " | reason=LIVE_GRAPH_POSE_INVALID"
+                << " | keyframe="
+                << backend_keyframes_[i].id
+                << std::endl;
+
+            return false;
+        }
+
+        commit_poses[i] =
+            node->T_WK;
+    }
+
+    for (std::size_t i = 0;
+         i < source_count;
+         ++i)
+    {
+        if (!result->adjusted[i])
+        {
+            continue;
+        }
+
+        if (!result->refined_poses[i]
+                 .matrix()
+                 .allFinite())
+        {
+            std::cout
+                << "BACKEND_REFINE_ASYNC_DROP_V2"
+                << " | reason=REFINED_POSE_NONFINITE"
+                << " | keyframe="
+                << backend_keyframes_[i].id
+                << std::endl;
+
+            return false;
+        }
+
+        commit_poses[i] =
+            result->refined_poses[i];
+
+        commit_adjusted[i] =
+            true;
+    }
+
+    IncrementalGlobalMap::UpdateStats
+        refined_stats;
+
+    const bool update_ok =
+        incremental_global_map_.UpdateRefinedOverrides(
+            backend_keyframes_,
+            commit_poses,
+            commit_adjusted,
+            refined_stats);
+
+    const pcl::PointCloud<LIDAR_POINT>::ConstPtr
+        refined_map =
+            incremental_global_map_.GetRefinedMap();
+
+    if (!update_ok ||
+        !refined_map ||
+        refined_map->empty())
+    {
+        std::cout
+            << "BACKEND_REFINE_ASYNC_DROP_V2"
+            << " | reason=REFINED_MAP_UPDATE_FAILED"
+            << std::endl;
+
+        return false;
+    }
+
+    // The committed refined map is now based on the CURRENT optimized map
+    // plus the still-valid refinement overrides, so its public map revision is
+    // the current global revision, not the old source revision.
+    refined_map_revision_ =
+        global_map_revision_;
+
+    if (result->historical_debug)
+    {
+        refinement_historical_target_debug_ =
+            result->historical_debug;
+    }
+
+    if (result->before_debug)
+    {
+        refinement_current_before_debug_ =
+            result->before_debug;
+    }
+
+    if (result->after_debug)
+    {
+        refinement_current_after_debug_ =
+            result->after_debug;
+    }
+
+    if (result->historical_debug ||
+        result->before_debug ||
+        result->after_debug)
+    {
+        refinement_debug_revision_ =
+            global_map_revision_;
+    }
+
+    std::size_t adjusted_count = 0;
+
+    for (const bool adjusted :
+         commit_adjusted)
+    {
+        if (adjusted)
+        {
+            ++adjusted_count;
+        }
+    }
+
+    std::cout
+        << "BACKEND_REFINE_ASYNC_COMMIT_V2"
+        << " | pgo_epoch="
+        << result->pgo_epoch
+        << " | source_global_revision="
+        << result->source_global_revision
+        << " | live_global_revision="
+        << global_map_revision_
+        << " | source_keyframes="
+        << source_count
+        << " | live_keyframes="
+        << backend_keyframes_.size()
+        << " | adjusted="
+        << adjusted_count
+        << " | refined_points="
+        << refined_map->size()
+        << std::endl;
+
+    return true;
+}
+
+void RegistrationScan2LocalMap::PostPgoRefinementLoop()
+{
+    while (true)
+    {
+        std::unique_ptr<PostPgoRefinementJob>
+            job;
+
+        {
+            std::unique_lock<std::mutex> lock(
+                refinement_worker_mutex_);
+
+            refinement_worker_condition_.wait(
+                lock,
+                [this]()
+                {
+                    return
+                        !refinement_worker_running_.load() ||
+                        static_cast<bool>(
+                            pending_refinement_job_);
+                });
+
+            if (!refinement_worker_running_.load() &&
+                !pending_refinement_job_)
+            {
+                break;
+            }
+
+            if (!pending_refinement_job_)
+            {
+                continue;
+            }
+
+            job =
+                std::move(
+                    pending_refinement_job_);
+        }
+
+        if (!job)
+        {
+            continue;
+        }
+
+        // ------------------------------------------------------------
+        // Asynchronous Post-PGO refinement compute.
+        //
+        // Heavy work:
+        //   historical target
+        //   voxel
+        //   PrepareTarget
+        //   Align
+        //   temporary local PoseGraph
+        //   local PGO
+        //
+        // All live map mutation remains on the main backend thread.
+        // ------------------------------------------------------------
+        auto result =
+            std::make_unique<PostPgoRefinementResult>();
+
+        const std::chrono::steady_clock::time_point
+            async_compute_start =
+                std::chrono::steady_clock::now();
+
+        bool compute_ok = false;
+
+        try
+        {
+            compute_ok =
+                ComputePostPgoRefinementAsync(
+                    *job,
+                    *result);
+        }
+        catch (const std::exception &exception)
+        {
+            std::cerr
+                << "BACKEND_REFINE_ASYNC_COMPUTE_EXCEPTION_V3"
+                << " | what=" << exception.what()
+                << std::endl;
+
+            compute_ok = false;
+        }
+        catch (...)
+        {
+            std::cerr
+                << "BACKEND_REFINE_ASYNC_COMPUTE_EXCEPTION_V3"
+                << " | what=unknown"
+                << std::endl;
+
+            compute_ok = false;
+        }
+
+        result->success =
+            compute_ok &&
+            result->success;
+
+        std::size_t async_adjusted_count = 0;
+
+        for (const bool adjusted :
+             result->adjusted)
+        {
+            if (adjusted)
+            {
+                ++async_adjusted_count;
+            }
+        }
+
+        const bool async_result_success =
+            result->success;
+
+        const double async_compute_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() -
+                async_compute_start)
+                .count();
+
+        {
+            std::lock_guard<std::mutex> lock(
+                refinement_worker_mutex_);
+
+            // Latest completed result wins.  The backend commit performs the
+            // authoritative PGO-epoch stale check.
+            completed_refinement_result_ =
+                std::move(result);
+
+            refinement_result_ready_.store(true);
+        }
+
+        // Wake the MAIN backend worker.  Commit must stay single-writer on
+        // backend state; the refinement worker never commits the map itself.
+        backend_condition_.notify_one();
+
+        std::cout
+            << "BACKEND_REFINE_ASYNC_JOB_V3"
+            << " | pgo_epoch=" << job->pgo_epoch
+            << " | global_revision=" << job->source_global_revision
+            << " | loop_edges=" << job->loop_edges
+            << " | keyframes=" << job->keyframes.size()
+            << " | success=" << (async_result_success ? 1 : 0)
+            << " | adjusted=" << async_adjusted_count
+            << " | compute_ms=" << async_compute_ms
+            << " | status=compute_result_ready"
+            << std::endl;
+    }
+}
+
 bool RegistrationScan2LocalMap::BuildFinishedSubmapSnapshot(
     std::size_t submap_id,
     BackendSubmapSnapshot &snapshot) const
@@ -349,6 +902,11 @@ void RegistrationScan2LocalMap::ProcessBackendJob(
                 std::chrono::steady_clock::now());
     }
 
+    // Commit completed async refinement only on the single backend thread.
+    // This keeps incremental_global_map_, revisions and backend history
+    // single-writer.
+    TryCommitCompletedPostPgoRefinementResult();
+
     RefreshBackendOutputSnapshot();
 
     std::size_t remaining_queue = 0;
@@ -383,13 +941,27 @@ void RegistrationScan2LocalMap::BackendLoop()
                 [this]()
                 {
                     return !backend_running_.load() ||
-                           !backend_queue_.empty();
+                           !backend_queue_.empty() ||
+                           refinement_result_ready_.load();
                 });
 
             if (!backend_running_.load() &&
-                backend_queue_.empty())
+                backend_queue_.empty() &&
+                !refinement_result_ready_.load())
             {
                 break;
+            }
+
+            // A completed refinement result is committed only by this backend
+            // thread.  Do it before consuming the next Keyframe job.
+            if (refinement_result_ready_.load())
+            {
+                lock.unlock();
+
+                TryCommitCompletedPostPgoRefinementResult();
+                RefreshBackendOutputSnapshot();
+
+                continue;
             }
 
             if (backend_queue_.empty())

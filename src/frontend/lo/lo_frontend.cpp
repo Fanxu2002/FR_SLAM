@@ -3089,6 +3089,10 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
           MakeBackendRefinementRegistrationConfig(
               registration_config)),
 
+      async_refinement_registration_(
+          MakeBackendRefinementRegistrationConfig(
+              registration_config)),
+
       // Submap V1 defaults:
       //     15 keyframes / Submap
       //     5-keyframe overlap
@@ -3161,12 +3165,15 @@ RegistrationScan2LocalMap::RegistrationScan2LocalMap(
         loop_consistency_checker_.GetConfig();
 
     RefreshBackendOutputSnapshot();
+    StartPostPgoRefinementWorker();
     StartBackendWorker();
 }
 
 RegistrationScan2LocalMap::~RegistrationScan2LocalMap()
 {
+    // Stop the main backend first so no new refinement jobs can be submitted.
     StopBackendWorker();
+    StopPostPgoRefinementWorker();
     RemoveGroundIcpRuntime(this);
 }
 
@@ -5808,9 +5815,10 @@ RegistrationScan2LocalMap::PoseGraphLoopEdgeCount() const
 
 void RegistrationScan2LocalMap::Reset()
 {
-    // Stop the backend first so no backend-owned state is being read/written
-    // while the frontend and backend histories are cleared.
+    // Stop the backend first so no new asynchronous refinement snapshots can
+    // be submitted while backend-owned state is being cleared.
     StopBackendWorker();
+    StopPostPgoRefinementWorker();
 
     // Reset the pure-LiDAR Ground V4 temporal/anchor state together with the
     // rest of the frontend so a new SLAM session bootstraps its own clearance.
@@ -5869,6 +5877,8 @@ void RegistrationScan2LocalMap::Reset()
     refined_keyframe_poses_.clear();
     refined_keyframe_pose_was_adjusted_.clear();
 
+    pose_graph_optimization_epoch_ = 0;
+
     global_map_revision_ = 0;
     refined_map_revision_ = 0;
     refinement_debug_revision_ = 0;
@@ -5887,5 +5897,6 @@ void RegistrationScan2LocalMap::Reset()
     initialized_ = false;
 
     RefreshBackendOutputSnapshot();
+    StartPostPgoRefinementWorker();
     StartBackendWorker();
 }

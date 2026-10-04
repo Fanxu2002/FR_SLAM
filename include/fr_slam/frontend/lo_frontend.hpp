@@ -84,6 +84,21 @@ struct LoopRuntimeConfig
     std::size_t btc_window_size = 7;
     std::size_t btc_window_stride = 4;
     std::size_t btc_min_valid_dense_keyframes = 5;
+
+    // Post-PGO derived-map refinement scheduling.
+    //
+    // off:
+    //     No online refinement. /save_slam_maps forces one final refinement.
+    //
+    // sync:
+    //     Legacy behavior. Refinement runs synchronously in the backend thread.
+    //
+    // async:
+    //     Dedicated latest-only refinement worker.
+    //     The worker implementation is wired separately.
+    std::string post_pgo_refinement_mode = "off";
+
+    std::size_t post_pgo_refinement_loop_stride = 8;
 };
 
 class RegistrationScan2LocalMap
@@ -341,6 +356,77 @@ private:
         BackendSubmapSnapshot finished_submap;
     };
 
+    // ========================================================================
+    // Asynchronous Post-PGO refinement.
+    //
+    // Jobs are immutable snapshots created by the main backend thread.
+    // The refinement worker never reads live backend_keyframes_ / pose_graph_.
+    // ========================================================================
+    struct PostPgoRefinementJob
+    {
+        // Changes ONLY when the main PoseGraph is successfully optimized.
+        // Ordinary incremental Keyframe/map growth does not change this epoch.
+        std::size_t pgo_epoch = 0;
+
+        // Diagnostic only.  Do NOT use this as the stale-result guard because
+        // global_map_revision_ also changes during ordinary map growth.
+        std::size_t source_global_revision = 0;
+
+        std::size_t loop_edges = 0;
+
+        std::vector<Keyframe> keyframes;
+        PoseGraph pose_graph;
+    };
+
+    struct PostPgoRefinementResult
+    {
+        std::size_t pgo_epoch = 0;
+        std::size_t source_global_revision = 0;
+        std::size_t source_keyframe_count = 0;
+
+        bool success = false;
+
+        // IDs make the result independent of later live-vector growth.
+        std::vector<std::size_t> keyframe_ids;
+
+        std::vector<
+            Eigen::Isometry3d,
+            Eigen::aligned_allocator<Eigen::Isometry3d>>
+            refined_poses;
+
+        std::vector<bool> adjusted;
+
+        // IDs of the immutable snapshot Keyframes corresponding to
+        // refined_poses / adjusted.  Backend commit verifies that this
+        // snapshot is still a prefix of the live append-only history.
+        std::vector<std::size_t> source_keyframe_ids;
+
+        pcl::PointCloud<LIDAR_POINT>::Ptr historical_debug;
+        pcl::PointCloud<LIDAR_POINT>::Ptr before_debug;
+        pcl::PointCloud<LIDAR_POINT>::Ptr after_debug;
+    };
+
+    void StartPostPgoRefinementWorker();
+    void StopPostPgoRefinementWorker();
+    void PostPgoRefinementLoop();
+
+    // Called only from the backend thread after a successful PGO/global-map
+    // revision.  The pending slot is latest-only: a newer job replaces an
+    // older job that has not started yet.
+    bool SubmitPostPgoRefinementJob();
+
+    // Main-backend-thread only.  Never called from the refinement worker.
+    // Commits the latest completed async result if its PGO epoch is still
+    // current.
+    bool TryCommitCompletedPostPgoRefinementResult();
+
+    // Heavy Post-PGO refinement computation executed exclusively by the
+    // dedicated refinement worker from an immutable backend snapshot.
+    // It must not modify live backend map / graph state.
+    bool ComputePostPgoRefinementAsync(
+        const PostPgoRefinementJob &job,
+        PostPgoRefinementResult &result);
+
     void StartBackendWorker();
     void StopBackendWorker();
     void BackendLoop();
@@ -525,8 +611,13 @@ private:
     // Frontend registration instance.
     LidarRegistration registration_;
 
-    // Separate backend registration instance for Post-PGO refinement.
+    // Separate backend registration instance for synchronous / final-save
+    // Post-PGO refinement.
     LidarRegistration backend_refinement_registration_;
+
+    // Dedicated registration instance owned exclusively by the asynchronous
+    // refinement worker.  Never shared with the main backend thread.
+    LidarRegistration async_refinement_registration_;
 
     // Frontend / geometry organization only.
     SubmapManager submap_manager_;
@@ -540,6 +631,30 @@ private:
     std::atomic<bool> backend_running_{false};
     std::size_t backend_backlog_warning_threshold_ = 6;
 
+    // Dedicated latest-only Post-PGO refinement worker.
+    //
+    // Maximum work backlog:
+    //     1 running job + 1 pending latest job.
+    //
+    // The worker operates only on immutable snapshots.
+    std::mutex refinement_worker_mutex_;
+    std::condition_variable refinement_worker_condition_;
+    std::thread refinement_worker_thread_;
+    std::atomic<bool> refinement_worker_running_{false};
+
+    std::unique_ptr<PostPgoRefinementJob>
+        pending_refinement_job_;
+
+    std::unique_ptr<PostPgoRefinementResult>
+        completed_refinement_result_;
+
+    // Set by the refinement worker after publishing a completed result.
+    // The main backend worker consumes and clears it.
+    std::atomic<bool> refinement_result_ready_{false};
+
+    std::size_t refinement_jobs_submitted_ = 0;
+    std::size_t refinement_jobs_replaced_ = 0;
+
     // Backend-owned immutable history copied from the frontend.
     std::vector<Keyframe> backend_keyframes_;
     std::vector<BackendSubmapSnapshot> backend_finished_submaps_;
@@ -550,6 +665,10 @@ private:
     // V8: g2o optimizer. It updates only PoseGraph node estimates.
     // The live Scan-to-LocalMap frontend T_WL_ remains untouched.
     PoseGraphOptimizer pose_graph_optimizer_;
+
+    // Used only by the async refinement worker.  Never shared with the main
+    // backend PoseGraph optimizer.
+    PoseGraphOptimizer async_refinement_pose_graph_optimizer_;
 
     LoopDetector loop_detector_;
     LoopVerifier loop_verifier_;
@@ -1014,6 +1133,12 @@ private:
         refined_keyframe_poses_;
 
     std::vector<bool> refined_keyframe_pose_was_adjusted_;
+
+    // Main-PoseGraph optimization generation.
+    //
+    // Unlike global_map_revision_, this changes ONLY after a successfully
+    // accepted main PGO.  Async refinement uses it as the stale-result guard.
+    std::size_t pose_graph_optimization_epoch_ = 0;
 
     std::size_t global_map_revision_ = 0;
 
