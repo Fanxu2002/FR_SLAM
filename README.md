@@ -27,45 +27,6 @@ A PDF version of the system diagram is also available:
 
 ---
 
-## Pipeline
-
-```text
-LiDAR + IMU
-    │
-    ▼
-Preprocessing / Deskew
-    │
-    ▼
-IMU Propagation
-    │
-    ▼
-Scan-to-Local-Map LiDAR Update
-    │
-    ├── Ground Constraint
-    └── Wall Constraint
-    │
-    ▼
-IESKF / LIO Pose
-    │
-    ▼
-Local Map + Keyframes
-    │
-    ▼
-Loop Candidate Retrieval
-    │
-    ▼
-Geometric Verification
-    │
-    ▼
-Pose Graph Optimization
-    │
-    ▼
-Asynchronous Post-PGO Refinement
-    │
-    ▼
-Optimized Trajectory + Global Map
-```
-
 ---
 
 ## Key Features
