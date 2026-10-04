@@ -2,13 +2,6 @@
 
 FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR-Inertial Odometry (LIO), structural constraints, loop closure, pose-graph optimization, CUDA-accelerated loop verification, post-PGO map refinement, and global map export.
 
-## Contributors
-
-- **Fan Xu** — Kyoto University
-- **Huang Xiaohan** — College of Mechanical and Electronic Engineering, Northwest A&F University (NWAFU)
-
-**Equal contribution:** Fan Xu and Huang Xiaohan contributed equally to this project.
-
 ## System Overview
 
 <p align="center">
@@ -21,15 +14,24 @@ FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR-Inertial Odometry (LIO), s
 
 ## Mapping Results
 
-<p align="center">
-  <b>Top View</b>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b>3D View</b>
-</p>
-
-<p align="center">
-  <img src="docs/FR_SLAM_Global_Map_Top_View.png" alt="FR-SLAM Global Map - Top View" width="420" height="300">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/FR_SLAM_Global_Map_3D_View.png" alt="FR-SLAM Global Map - 3D View" width="420" height="300">
-</p>
+<table align="center">
+  <tr>
+    <td align="center" valign="top">
+      <b>Top View</b><br><br>
+      <img src="docs/FR_SLAM_Global_Map_Top_View.png"
+           alt="FR-SLAM Global Map - Top View"
+           width="390"
+           height="290">
+    </td>
+    <td align="center" valign="top">
+      <b>3D View</b><br><br>
+      <img src="docs/FR_SLAM_Global_Map_3D_View.png"
+           alt="FR-SLAM Global Map - 3D View"
+           width="390"
+           height="290">
+    </td>
+  </tr>
+</table>
 
 ## Build
 
@@ -88,3 +90,11 @@ post_pgo_refinement_loop_stride: 8
 ## License
 
 Apache-2.0
+
+## Contributors
+
+- **Fan Xu** — Kyoto University
+- **Huang Xiaohan** — College of Mechanical and Electronic Engineering, Northwest A&F University (NWAFU)
+
+**Equal contribution:** Fan Xu and Huang Xiaohan contributed equally to this project.
+
