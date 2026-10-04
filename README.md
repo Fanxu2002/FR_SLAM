@@ -86,9 +86,16 @@ post_pgo_refinement_mode: "async"
 post_pgo_refinement_loop_stride: 8
 ```
 
-## Demo
 
-https://github.com/user-attachments/assets/b335c305-ebd7-4d81-80b5-f00bc73c70aa
+## Mapping Results
+
+**Top View**
+
+![FR-SLAM Global Map - Top View](docs/FR_SLAM_Global_Map_Top_View.png)
+
+**3D View**
+
+![FR-SLAM Global Map - 3D View](docs/FR_SLAM_Global_Map_3D_View.png)
 
 ## Documentation
 
