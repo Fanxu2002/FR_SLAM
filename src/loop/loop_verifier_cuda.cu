@@ -3252,6 +3252,345 @@ __device__ bool SmallestEigenvector3x3V1(
 }
 
 
+__device__ bool SmallestEigenvector3x3V2Fast(
+    const double covariance[3][3],
+    double normal[3],
+    bool &used_v1_fallback)
+{
+    used_v1_fallback = false;
+
+
+    const double a00 = covariance[0][0];
+    const double a01 = covariance[0][1];
+    const double a02 = covariance[0][2];
+
+    const double a11 = covariance[1][1];
+    const double a12 = covariance[1][2];
+
+    const double a22 = covariance[2][2];
+
+
+    if (!isfinite(a00) ||
+        !isfinite(a01) ||
+        !isfinite(a02) ||
+        !isfinite(a11) ||
+        !isfinite(a12) ||
+        !isfinite(a22))
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    // ------------------------------------------------------------
+    // Analytic eigenvalues for a real symmetric 3x3 matrix.
+    // ------------------------------------------------------------
+
+    const double q =
+        (a00 + a11 + a22) /
+        3.0;
+
+
+    const double b00 = a00 - q;
+    const double b11 = a11 - q;
+    const double b22 = a22 - q;
+
+
+    const double p2 =
+        b00 * b00 +
+        b11 * b11 +
+        b22 * b22 +
+        2.0 *
+            (
+                a01 * a01 +
+                a02 * a02 +
+                a12 * a12
+            );
+
+
+    if (!isfinite(p2) ||
+        p2 <= 1.0e-30)
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    const double p =
+        sqrt(
+            p2 /
+            6.0);
+
+
+    if (!isfinite(p) ||
+        p <= 1.0e-15)
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    const double inv_p =
+        1.0 /
+        p;
+
+
+    const double c00 =
+        b00 * inv_p;
+
+    const double c01 =
+        a01 * inv_p;
+
+    const double c02 =
+        a02 * inv_p;
+
+    const double c11 =
+        b11 * inv_p;
+
+    const double c12 =
+        a12 * inv_p;
+
+    const double c22 =
+        b22 * inv_p;
+
+
+    const double det_c =
+        c00 * c11 * c22 +
+        2.0 *
+            c01 * c02 * c12 -
+        c00 * c12 * c12 -
+        c11 * c02 * c02 -
+        c22 * c01 * c01;
+
+
+    double r =
+        0.5 *
+        det_c;
+
+
+    if (!isfinite(r))
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    if (r < -1.0)
+    {
+        r = -1.0;
+    }
+    else if (r > 1.0)
+    {
+        r = 1.0;
+    }
+
+
+    constexpr double kTwoPiOverThree =
+        2.094395102393195492308428922186335;
+
+
+    const double phi =
+        acos(r) /
+        3.0;
+
+
+    const double lambda_min =
+        q +
+        2.0 *
+            p *
+            cos(
+                phi +
+                kTwoPiOverThree);
+
+
+    if (!isfinite(lambda_min))
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    // ------------------------------------------------------------
+    // Null space of A - lambda_min I.
+    //
+    // Take all three row cross products and choose the one with
+    // largest norm for numerical stability.
+    // ------------------------------------------------------------
+
+    const double m00 =
+        a00 -
+        lambda_min;
+
+    const double m01 = a01;
+    const double m02 = a02;
+
+    const double m10 = a01;
+
+    const double m11 =
+        a11 -
+        lambda_min;
+
+    const double m12 = a12;
+
+    const double m20 = a02;
+    const double m21 = a12;
+
+    const double m22 =
+        a22 -
+        lambda_min;
+
+
+    // row0 x row1
+    const double c0x =
+        m01 * m12 -
+        m02 * m11;
+
+    const double c0y =
+        m02 * m10 -
+        m00 * m12;
+
+    const double c0z =
+        m00 * m11 -
+        m01 * m10;
+
+
+    // row0 x row2
+    const double c1x =
+        m01 * m22 -
+        m02 * m21;
+
+    const double c1y =
+        m02 * m20 -
+        m00 * m22;
+
+    const double c1z =
+        m00 * m21 -
+        m01 * m20;
+
+
+    // row1 x row2
+    const double c2x =
+        m11 * m22 -
+        m12 * m21;
+
+    const double c2y =
+        m12 * m20 -
+        m10 * m22;
+
+    const double c2z =
+        m10 * m21 -
+        m11 * m20;
+
+
+    const double n0 =
+        c0x * c0x +
+        c0y * c0y +
+        c0z * c0z;
+
+    const double n1 =
+        c1x * c1x +
+        c1y * c1y +
+        c1z * c1z;
+
+    const double n2 =
+        c2x * c2x +
+        c2y * c2y +
+        c2z * c2z;
+
+
+    double nx = c0x;
+    double ny = c0y;
+    double nz = c0z;
+
+    double best_norm2 = n0;
+
+
+    if (n1 > best_norm2)
+    {
+        best_norm2 = n1;
+
+        nx = c1x;
+        ny = c1y;
+        nz = c1z;
+    }
+
+
+    if (n2 > best_norm2)
+    {
+        best_norm2 = n2;
+
+        nx = c2x;
+        ny = c2y;
+        nz = c2z;
+    }
+
+
+    if (!isfinite(best_norm2) ||
+        best_norm2 <= 1.0e-30)
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    const double norm =
+        sqrt(best_norm2);
+
+
+    if (!isfinite(norm) ||
+        norm <= 1.0e-15)
+    {
+        used_v1_fallback = true;
+
+        return SmallestEigenvector3x3V1(
+            covariance,
+            normal);
+    }
+
+
+    const double inv_norm =
+        1.0 /
+        norm;
+
+
+    normal[0] =
+        nx *
+        inv_norm;
+
+    normal[1] =
+        ny *
+        inv_norm;
+
+    normal[2] =
+        nz *
+        inv_norm;
+
+
+    return
+        isfinite(normal[0]) &&
+        isfinite(normal[1]) &&
+        isfinite(normal[2]);
+}
+
+
 __global__ void PlaneHessianShadowKernelV1(
     const float *target_xyz,
     const std::size_t target_count,
@@ -4767,10 +5106,16 @@ FusedPlaneHessianKernelV3(
     double normal[3];
 
 
-    // Reuse already validated Shadow V1 3x3 eigensolver.
-    if (!SmallestEigenvector3x3V1(
+    // Fast analytic smallest-eigenvector solver.
+    //
+    // Numerically degenerate covariance matrices fall back
+    // internally to the validated Jacobi V1 implementation.
+    bool fast_eigen_used_v1_fallback = false;
+
+    if (!SmallestEigenvector3x3V2Fast(
             covariance,
-            normal))
+            normal,
+            fast_eigen_used_v1_fallback))
     {
         atomicAdd(
             &accumulator->plane_fit_failures,
