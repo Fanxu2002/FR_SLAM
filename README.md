@@ -2,6 +2,13 @@
 
 FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR-Inertial Odometry (LIO), structural constraints, loop closure, pose-graph optimization, CUDA-accelerated loop verification, post-PGO map refinement, and global map export.
 
+## Contributors
+
+- **Fan Xu** — Kyoto University
+- **Huang Xiaohan** — College of Mechanical and Electronic Engineering, Northwest A&F University (NWAFU)
+
+**Equal contribution:** Fan Xu and Huang Xiaohan contributed equally to this project.
+
 ## System Overview
 
 <p align="center">
@@ -9,8 +16,7 @@ FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR-Inertial Odometry (LIO), s
 </p>
 
 <p align="center">
-  <a href="docs/FR_SLAM_Overview.pdf">System Overview PDF</a> ·
-  <a href="docs/FR_SLAM_Technical_Overview.md">Technical Documentation</a>
+  <a href="docs/FR_SLAM_Overview.pdf">System Overview PDF</a>
 </p>
 
 ## Mapping Results
