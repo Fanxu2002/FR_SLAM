@@ -1,39 +1,16 @@
 # FR-SLAM
 
-**FR-SLAM** is a ROS 2 LiDAR SLAM system with LiDAR-inertial odometry, structural constraints, loop closure, pose-graph optimization, CUDA acceleration, and global mapping.
+FR-SLAM is a ROS 2 LiDAR SLAM system supporting LiDAR-Inertial Odometry (LIO), structural constraints, loop closure, pose-graph optimization, CUDA-accelerated loop verification, post-PGO map refinement, and global map export.
 
 ## System Overview
 
 ![FR-SLAM System Overview](docs/FR_SLAM_Overview.png)
 
-[System overview PDF](docs/FR_SLAM_Overview.pdf) · [Technical overview](docs/FR_SLAM_Technical_Overview.md)
-
-## Highlights
-
-- LiDAR-Inertial Odometry with IESKF
-- Ground and wall structural constraints
-- Scan Context loop-candidate retrieval
-- Geometric loop verification and g2o pose-graph optimization
-- Asynchronous post-PGO map refinement
-- CUDA exact dense-grid KNN
-- Fast analytic plane eigensolver with Jacobi fallback
-- Timestamped optimized / refined map export
-
-## Representative Accuracy
-
-Results on the **Strawberry_4** evaluation sequence:
-
-| Metric | FR-SLAM | FAST-LIO2 |
-|---|---:|---:|
-| Translation RMSE | **0.1439 m** | 0.1803 m |
-| Rotation RMSE | 0.8004° | **0.6508°** |
-| Z RMSE | 0.0464 m | **0.0286 m** |
-
-A validated Preserve-Z PGO configuration achieved **0.0994 m global ATE** and **0.0357 m Z RMSE**.
-<!--  -->
-> Results are dataset- and configuration-dependent.
+[System Overview PDF](docs/FR_SLAM_Overview.pdf) · [Technical Documentation](docs/FR_SLAM_Technical_Overview.md)
 
 ## Build
+
+Tested with ROS 2 Humble.
 
 ```bash
 cd ~/ros2_ws
@@ -50,7 +27,7 @@ source ~/ros2_ws/install/setup.bash
 
 ## Run
 
-Example HortiMulti outdoor LIO:
+### HortiMulti / Outdoor
 
 ```bash
 ros2 launch fr_slam lio.launch.py \
@@ -62,10 +39,51 @@ ros2 launch fr_slam lio.launch.py \
   planar_motion_mode:=false
 ```
 
-## Save Maps
+### Livox
+
+```bash
+ros2 launch fr_slam lio.launch.py \
+  sensor:=livox \
+  profile:=indoor \
+  backend_loop_closure_enable:=true \
+  ground_constraint_enable:=true \
+  planar_motion_mode:=false
+```
+
+### Hesai
+
+```bash
+ros2 launch fr_slam lio.launch.py \
+  sensor:=hesai \
+  profile:=outdoor \
+  backend_loop_closure_enable:=true \
+  ground_constraint_enable:=true \
+  planar_motion_mode:=false
+```
+
+## Save Map and Trajectory
 
 ```bash
 ros2 service call /save_slam_maps std_srvs/srv/Trigger "{}"
+```
+
+Each save creates a separate timestamped output directory.
+
+## Post-PGO Refinement
+
+The HortiMulti configuration supports:
+
+```yaml
+post_pgo_refinement_mode: "off"    # final refinement only when saving
+post_pgo_refinement_mode: "sync"   # synchronous online refinement
+post_pgo_refinement_mode: "async"  # background refinement worker
+```
+
+Current HortiMulti configuration:
+
+```yaml
+post_pgo_refinement_mode: "async"
+post_pgo_refinement_loop_stride: 8
 ```
 
 ## Demo
@@ -74,9 +92,9 @@ https://github.com/user-attachments/assets/b335c305-ebd7-4d81-80b5-f00bc73c70aa
 
 ## Documentation
 
-Detailed system architecture, backend refinement, accuracy, and runtime optimization notes are available in:
+More detailed architecture and implementation notes are available in:
 
-[**FR-SLAM Technical Overview**](docs/FR_SLAM_Technical_Overview.md)
+[FR-SLAM Technical Overview](docs/FR_SLAM_Technical_Overview.md)
 
 ## License
 
